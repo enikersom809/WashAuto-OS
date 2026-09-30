@@ -1,0 +1,126 @@
+{
+  "entities": {
+    "tenants": {
+      "title": "Tenants",
+      "description": "Lava-jato Companies registered in the system",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "plan": { "type": "string" },
+        "status": { "type": "string" },
+        "domain": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "mrr": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "plan", "status"]
+    },
+    "appointments": {
+      "title": "Appointments",
+      "description": "Scheduled appointments created by clients or companies",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "clientEmail": { "type": "string" },
+        "vehicle": { "type": "string" },
+        "plate": { "type": "string" },
+        "service": { "type": "string" },
+        "price": { "type": "number" },
+        "dateTime": { "type": "string" },
+        "addressSummary": { "type": "string" },
+        "status": { "type": "string" },
+        "assignedWasher": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tenantId", "clientName", "vehicle", "plate", "service", "dateTime"]
+    },
+    "washItems": {
+      "title": "Wash Items",
+      "description": "Vehicle washes queue and yard history",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "plate": { "type": "string" },
+        "vehicle": { "type": "string" },
+        "service": { "type": "string" },
+        "price": { "type": "number" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "status": { "type": "string" },
+        "washer": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tenantId", "plate", "vehicle", "status"]
+    },
+    "clientProfiles": {
+      "title": "Client Profiles",
+      "description": "Client personal data, address and vehicle list",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "neighborhood": { "type": "string" },
+        "city": { "type": "string" },
+        "stateUf": { "type": "string" },
+        "cep": { "type": "string" },
+        "fidelityPoints": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["tenantId", "name", "phone"]
+    },
+    "redemptions": {
+      "title": "Redemptions",
+      "description": "Reward redemption requests from clients",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "vehicle": { "type": "string" },
+        "requested": { "type": "boolean" },
+        "status": { "type": "string" },
+        "date": { "type": "string" }
+      },
+      "required": ["tenantId", "clientName", "requested"]
+    }
+  },
+  "firestore": {
+    "/tenants/{tenantId}": {
+      "schema": "tenants",
+      "description": "Tenant company profile and configuration"
+    },
+    "/tenants/{tenantId}/appointments/{appointmentId}": {
+      "schema": "appointments",
+      "description": "Client scheduled wash appointments"
+    },
+    "/tenants/{tenantId}/washItems/{washItemId}": {
+      "schema": "washItems",
+      "description": "Yard wash jobs in progress and history"
+    },
+    "/tenants/{tenantId}/clients/{clientId}": {
+      "schema": "clientProfiles",
+      "description": "Registered clients of a specific tenant"
+    },
+    "/tenants/{tenantId}/redemptions/{redemptionId}": {
+      "schema": "redemptions",
+      "description": "Loyalty stamp redemption requests"
+    },
+    "/appointments/{appointmentId}": {
+      "schema": "appointments",
+      "description": "Root collection for appointments indexing"
+    },
+    "/clients/{clientId}": {
+      "schema": "clientProfiles",
+      "description": "Global client profile registry"
+    },
+    "/empresas/{empresaId}": {
+      "schema": "tenants",
+      "description": "Public company profile for PWA and QR Code lookup"
+    }
+  }
+}

@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WashAuto OS - Gestão Automotiva Inteligente</title>
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <style>
+        /* === ESTILOS GERAIS === */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: #0B0F19; /* Fundo escuro premium */
+            color: #F3F4F6;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* === 1. TELA DE ENTRADA (SPLASH SCREEN) === */
+        #splash-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: radial-gradient(circle at center, #101B2E 0%, #0B0F19 80%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            transition: opacity 0.5s ease, visibility 0.5s ease, transform 0.5s ease;
+            padding: 20px;
+        }
+
+        .logo-container {
+            max-width: 500px; /* Tamanho ideal para destacar a logo */
+            width: 100%;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .logo-container img {
+            width: 100%;
+            height: auto;
+            max-height: 180px;
+            object-fit: contain;
+        }
+
+        /* Barra de Carregamento Minimalista */
+        .loader-bar {
+            width: 200px;
+            height: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .loader-progress {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #00A3FF, #00FFCC); /* Degradê azul ciano/neon */
+            box-shadow: 0 0 10px #00A3FF;
+            animation: loading 5s linear forwards; /* Duração exata de 5s */
+        }
+
+        .loader-text {
+            font-size: 11px;
+            color: #64748B;
+            font-family: monospace;
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+        }
+
+        .skip-btn {
+            margin-top: 24px;
+            background: transparent;
+            border: 1px solid #1F2937;
+            color: #6B7280;
+            font-size: 11px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .skip-btn:hover {
+            color: #F3F4F6;
+            border-color: #374151;
+            background: rgba(255,255,255,0.05);
+        }
+
+        @keyframes loading {
+            to { width: 100%; }
+        }
+
+        /* Classe para sumir com a splash */
+        .fade-out {
+            opacity: 0 !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+            transform: scale(1.03);
+        }
+
+        /* === 2. TELA DE LOGIN / CADASTRO === */
+        #login-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity 0.5s ease, visibility 0.5s ease;
+            z-index: 50;
+            background: radial-gradient(circle at 80% 20%, #131E33 0%, #0B0F19 70%);
+            overflow-y: auto;
+        }
+
+        #login-screen.show {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+        }
+
+        .login-card {
+            background-color: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 16px;
+            width: 100%;
+            max-width: 440px;
+            padding: 32px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .login-header {
+            text-align: center;
+        }
+
+        .login-header img {
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            margin-bottom: 12px;
+            border: 2px solid rgba(0, 163, 255, 0.4);
+        }
+
+        .login-header h2 {
+            font-size: 22px;
+            font-weight: 800;
+            color: #FFFFFF;
+        }
+
+        .login-header p {
+            font-size: 13px;
+            color: #9CA3AF;
+            margin-top: 4px;
+        }
+
+        /* Abas de Perfil */
+        .profile-tabs {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            background: #0B0F19;
+            padding: 4px;
+            border-radius: 10px;
+            border: 1px solid #1F2937;
+        }
+
+        .profile-tab {
+            background: transparent;
+            border: none;
+            color: #9CA3AF;
+            padding: 8px 4px;
+            font-size: 12px;
+            font-weight: 600;
+            border-radius: 7px;
+            cursor: pointer;
+            transition: 0.2s;
+            text-align: center;
+        }
+
+        .profile-tab.active {
+            background: #00A3FF;
+            color: #FFFFFF;
+            box-shadow: 0 2px 8px rgba(0, 163, 255, 0.35);
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #D1D5DB;
+        }
+
+        .form-input {
+            background: #0B0F19;
+            border: 1px solid #1F2937;
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: #FFFFFF;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .form-input:focus {
+            border-color: #00A3FF;
+            box-shadow: 0 0 0 2px rgba(0, 163, 255, 0.2);
+        }
+
+        .submit-btn {
+            background: linear-gradient(90deg, #00A3FF, #0088D6);
+            color: #FFFFFF;
+            border: none;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 6px;
+            box-shadow: 0 4px 12px rgba(0, 163, 255, 0.3);
+        }
+
+        .submit-btn:hover {
+            opacity: 0.95;
+            transform: translateY(-1px);
+        }
+
+        .switch-auth {
+            text-align: center;
+            font-size: 13px;
+            color: #9CA3AF;
+            padding-top: 10px;
+            border-top: 1px solid #1F2937;
+        }
+
+        .switch-auth a {
+            color: #00A3FF;
+            text-decoration: none;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .switch-auth a:hover {
+            text-decoration: underline;
+        }
+
+        .replay-link {
+            text-align: center;
+            font-size: 12px;
+            color: #6B7280;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .replay-link:hover {
+            color: #00FFCC;
+        }
+
+        /* === 3. TELA PRINCIPAL (DASHBOARD) === */
+        #main-dashboard {
+            opacity: 0;
+            display: none;
+            height: 100vh;
+            width: 100vw;
+            transition: opacity 0.5s ease;
+        }
+
+        #main-dashboard.show {
+            opacity: 1;
+            display: flex;
+        }
+
+        /* Menu Lateral */
+        .sidebar {
+            width: 260px;
+            background-color: #111827;
+            border-right: 1px solid #1F2937;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            flex-shrink: 0;
+        }
+
+        .sidebar-brand {
+            font-size: 20px;
+            font-weight: bold;
+            color: #00A3FF;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sidebar-brand img {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            object-fit: cover;
+        }
+
+        .menu-item {
+            padding: 12px 16px;
+            color: #9CA3AF;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .menu-item.active, .menu-item:hover {
+            background-color: rgba(0, 163, 255, 0.1);
+            color: #00A3FF;
+        }
+
+        .sidebar-footer {
+            margin-top: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .logout-btn {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: #F87171;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+        }
+
+        .logout-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+            color: #FECACA;
+        }
+
+        /* Área de Conteúdo */
+        .content {
+            flex: 1;
+            padding: 40px;
+            overflow-y: auto;
+        }
+
+        .header {
+            margin-bottom: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 4px;
+        }
+
+        .header p {
+            color: #6B7280;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .replay-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #1F2937;
+            color: #9CA3AF;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .replay-btn:hover {
+            background: rgba(0, 163, 255, 0.1);
+            color: #00A3FF;
+            border-color: #00A3FF;
+        }
+
+        /* Cards do Dashboard */
+        .grid-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+
+        .card {
+            background-color: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 12px;
+            padding: 24px;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(0, 163, 255, 0.3);
+        }
+
+        .card-title {
+            color: #9CA3AF;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .card-value {
+            font-size: 26px;
+            font-weight: bold;
+            color: #FFF;
+        }
+
+        .card-value.highlight {
+            color: #00FFCC;
+        }
+
+        /* Tabela de Carros */
+        .table-card {
+            background-color: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 12px;
+            padding: 24px;
+        }
+
+        .table-card h3 {
+            font-size: 16px;
+            margin-bottom: 16px;
+            color: #F3F4F6;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            color: #6B7280;
+            border-bottom: 1px solid #1F2937;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #1F2937;
+            color: #D1D5DB;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge-lavagem { background: rgba(0, 163, 255, 0.15); color: #00A3FF; }
+        .badge-polimento { background: rgba(168, 85, 247, 0.15); color: #C084FC; }
+        .badge-pronto { background: rgba(16, 185, 129, 0.15); color: #34D399; }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+            }
+            .content {
+                padding: 20px;
+            }
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 1. TELA DE ENTRADA (SPLASH SCREEN - 5s) -->
+    <div id="splash-screen">
+        <div class="logo-container">
+            <img 
+                src="logo.png" 
+                alt="WashAuto OS Logo"
+                onerror="this.onerror=null; this.src='logo.png';"
+            >
+        </div>
+
+        <!-- Barra de Carregamento Minimalista (5s) -->
+        <div class="loader-bar">
+            <div id="loader-progress" class="loader-progress"></div>
+        </div>
+
+        <button class="skip-btn" onclick="finalizarSplash()" style="margin-top: 32px;">Pular Apresentação</button>
+    </div>
+
+    <!-- 2. TELA DE LOGIN / CADASTRO -->
+    <div id="login-screen">
+        <div class="login-card">
+            <div class="login-header">
+                <img src="logo.png" alt="WashAuto OS Logo" onerror="this.onerror=null; this.src='logo.png';" style="max-height: 56px; width: auto; object-fit: contain; margin-bottom: 8px;">
+                <p id="auth-subtitle">Acesse sua conta para gerenciar seu centro automotivo</p>
+            </div>
+
+            <!-- Abas de Perfil -->
+            <div class="profile-tabs">
+                <button type="button" class="profile-tab active" onclick="selecionarPerfil('empresa', this)">Empresa</button>
+                <button type="button" class="profile-tab" onclick="selecionarPerfil('cliente', this)">Cliente</button>
+                <button type="button" class="profile-tab" onclick="selecionarPerfil('admin', this)">Admin</button>
+            </div>
+
+            <!-- Formulário -->
+            <form id="auth-form" onsubmit="realizarLogin(event)" style="display: flex; flex-direction: column; gap: 14px;">
+                <div id="field-company" class="form-group" style="display: none;">
+                    <label class="form-label">Nome do Lava-Jato / Centro Automotivo</label>
+                    <input type="text" id="input-company" class="form-input" placeholder="Ex: Auto Clean Spa" />
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" id="label-user">E-mail corporativo ou Subdomínio</label>
+                    <input type="text" id="input-user" class="form-input" placeholder="gerente@autoclean.com" required value="gerente@autoclean.com" />
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Senha de Acesso</label>
+                    <input type="password" id="input-pass" class="form-input" placeholder="••••••••" required value="123456" />
+                </div>
+
+                <button type="submit" id="btn-submit" class="submit-btn">
+                    Entrar no Sistema
+                </button>
+            </form>
+
+            <div class="switch-auth">
+                <span id="auth-switch-text">Ainda não tem cadastro?</span>
+                <a id="auth-switch-link" onclick="toggleCadastro()">Cadastre seu Centro Automotivo</a>
+            </div>
+
+            <div class="replay-link" onclick="reiniciarSplash()">
+                ↻ Rever Apresentação (Splash Screen 5s)
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. TELA PRINCIPAL (DASHBOARD) -->
+    <div id="main-dashboard">
+        <!-- Menu Lateral -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <img src="logo.png" alt="Logo" onerror="this.onerror=null; this.src='logo.png';">
+                <span>WashAuto OS</span>
+            </div>
+            <nav style="display: flex; flex-direction: column; gap: 8px;">
+                <a href="#" class="menu-item active">Dashboard <span>•</span></a>
+                <a href="#" class="menu-item">Fila de Espera</a>
+                <a href="#" class="menu-item">Pátio & Lavagens</a>
+                <a href="#" class="menu-item">Financeiro & MRR</a>
+                <a href="#" class="menu-item">Configurações</a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <button class="logout-btn" onclick="fazerLogout()">
+                    ← Sair / Voltar ao Login
+                </button>
+            </div>
+        </aside>
+
+        <!-- Conteúdo Principal -->
+        <main class="content">
+            <div class="header">
+                <div>
+                    <h1 id="dash-greeting">Painel Operacional - Auto Clean Spa</h1>
+                    <p>Bem-vindo ao sistema operacional do seu centro automotivo.</p>
+                </div>
+                <div class="header-actions">
+                    <button class="replay-btn" onclick="reiniciarSplash()">
+                        ↻ Testar Apresentação (5s)
+                    </button>
+                    <button class="logout-btn" onclick="fazerLogout()">
+                        Sair
+                    </button>
+                </div>
+            </div>
+
+            <!-- Cards Simulados de Dados -->
+            <div class="grid-cards">
+                <div class="card">
+                    <div class="card-title">Carros no Pátio / Fila</div>
+                    <div class="card-value">12</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Serviços Concluídos Hoje</div>
+                    <div class="card-value">34</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Faturamento do Dia</div>
+                    <div class="card-value highlight">R$ 2.450,00</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Ticket Médio</div>
+                    <div class="card-value">R$ 72,00</div>
+                </div>
+            </div>
+
+            <!-- Tabela Rápida do Pátio -->
+            <div class="table-card">
+                <h3>Veículos em Atendimento no Pátio</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Veículo</th>
+                            <th>Placa</th>
+                            <th>Serviço</th>
+                            <th>Horário</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>BMW 320i M Sport</td>
+                            <td>ABC-4D56</td>
+                            <td>Lavagem Técnica Detalhada</td>
+                            <td>10:15</td>
+                            <td><span class="badge badge-lavagem">Em Lavagem</span></td>
+                        </tr>
+                        <tr>
+                            <td>Porsche Macan GTS</td>
+                            <td>XYZ-9876</td>
+                            <td>Polimento & Vitrificação</td>
+                            <td>09:40</td>
+                            <td><span class="badge badge-polimento">Polimento</span></td>
+                        </tr>
+                        <tr>
+                            <td>Audi Q3 Black Edition</td>
+                            <td>AUT-2024</td>
+                            <td>Ducha Rápida + Cera Líquida</td>
+                            <td>11:00</td>
+                            <td><span class="badge badge-pronto">Pronto p/ Entrega</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <!-- === JAVASCRIPT: CONTROLE DO FLUXO (APRESENTAÇÃO -> LOGIN -> DASHBOARD) === -->
+    <script>
+        let isCadastro = false;
+        let perfilAtual = 'empresa';
+        let splashTimer = null;
+
+        function finalizarSplash() {
+            if (splashTimer) clearTimeout(splashTimer);
+            const splash = document.getElementById('splash-screen');
+            const login = document.getElementById('login-screen');
+
+            // Inicia fade-out da Splash Screen
+            splash.classList.add('fade-out');
+
+            // Exibe a tela de Login/Cadastro com fade-in
+            setTimeout(() => {
+                login.classList.add('show');
+            }, 300);
+        }
+
+        function selecionarPerfil(tipo, el) {
+            perfilAtual = tipo;
+            document.querySelectorAll('.profile-tab').forEach(b => b.classList.remove('active'));
+            el.classList.add('active');
+
+            const labelUser = document.getElementById('label-user');
+            const inputUser = document.getElementById('input-user');
+            const sub = document.getElementById('auth-subtitle');
+
+            if (tipo === 'empresa') {
+                labelUser.textContent = 'E-mail corporativo ou Subdomínio';
+                inputUser.placeholder = 'gerente@autoclean.com';
+                inputUser.value = 'gerente@autoclean.com';
+                sub.textContent = 'Acesse sua conta para gerenciar seu centro automotivo';
+            } else if (tipo === 'cliente') {
+                labelUser.textContent = 'Seu E-mail ou Telefone WhatsApp';
+                inputUser.placeholder = 'cliente@exemplo.com';
+                inputUser.value = 'carlos.cliente@gmail.com';
+                sub.textContent = 'Acesse para consultar seus agendamentos e pontos';
+            } else {
+                labelUser.textContent = 'E-mail Super Admin';
+                inputUser.placeholder = 'admin_super@gmail.com';
+                inputUser.value = 'admin_super@gmail.com';
+                sub.textContent = 'Painel Master de Governança do SaaS';
+            }
+        }
+
+        function toggleCadastro() {
+            isCadastro = !isCadastro;
+            const fieldCompany = document.getElementById('field-company');
+            const btnSubmit = document.getElementById('btn-submit');
+            const switchText = document.getElementById('auth-switch-text');
+            const switchLink = document.getElementById('auth-switch-link');
+
+            if (isCadastro) {
+                fieldCompany.style.display = 'flex';
+                btnSubmit.textContent = 'Criar Conta e Acessar';
+                switchText.textContent = 'Já possui uma conta?';
+                switchLink.textContent = 'Faça login aqui';
+            } else {
+                fieldCompany.style.display = 'none';
+                btnSubmit.textContent = 'Entrar no Sistema';
+                switchText.textContent = 'Ainda não tem cadastro?';
+                switchLink.textContent = 'Cadastre seu Centro Automotivo';
+            }
+        }
+
+        function realizarLogin(e) {
+            e.preventDefault();
+            const login = document.getElementById('login-screen');
+            const dashboard = document.getElementById('main-dashboard');
+            const greeting = document.getElementById('dash-greeting');
+            const companyInput = document.getElementById('input-company').value.trim();
+
+            if (companyInput) {
+                greeting.textContent = 'Painel Operacional - ' + companyInput;
+            } else if (perfilAtual === 'admin') {
+                greeting.textContent = 'Painel Geral Super Admin';
+            } else if (perfilAtual === 'cliente') {
+                greeting.textContent = 'Portal do Cliente - Meus Agendamentos';
+            } else {
+                greeting.textContent = 'Painel Operacional - Auto Clean Spa';
+            }
+
+            // Esconde tela de login
+            login.classList.remove('show');
+
+            // Abre o Dashboard
+            setTimeout(() => {
+                dashboard.classList.add('show');
+            }, 300);
+        }
+
+        function fazerLogout() {
+            const login = document.getElementById('login-screen');
+            const dashboard = document.getElementById('main-dashboard');
+
+            dashboard.classList.remove('show');
+            setTimeout(() => {
+                login.classList.add('show');
+            }, 300);
+        }
+
+        // Função para testar novamente sem recarregar a página
+        function reiniciarSplash() {
+            const splash = document.getElementById('splash-screen');
+            const login = document.getElementById('login-screen');
+            const dashboard = document.getElementById('main-dashboard');
+            const loader = document.getElementById('loader-progress');
+
+            dashboard.classList.remove('show');
+            login.classList.remove('show');
+            splash.classList.remove('fade-out');
+
+            // Reinicia a animação da barra CSS
+            loader.style.animation = 'none';
+            void loader.offsetWidth; // trigger reflow
+            loader.style.animation = 'loading 5s linear forwards';
+
+            splashTimer = setTimeout(finalizarSplash, 5000);
+        }
+
+        // Inicia automaticamente o temporizador de 5 segundos ao carregar
+        window.addEventListener('DOMContentLoaded', () => {
+            splashTimer = setTimeout(finalizarSplash, 5000);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "SaaS Master - Painel Super Admin",
+  "description": "Painel de controle centralizado para administração de empresas (tenants), métricas de MRR, gestão de planos, segurança e logs de sistema.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
