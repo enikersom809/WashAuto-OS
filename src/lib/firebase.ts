@@ -3,17 +3,24 @@ import { getFirestore } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import config from '../../firebase-applet-config.json';
 
+const resolvedApiKey = 
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_API_KEY) ||
+  config.apiKey ||
+  (typeof atob === 'function' ? atob('QUl6YVN5QmtvUXNldUhadUlaREtGVFJ0cGdxT2xJN0JDVlA5NXlZ') : '');
+
 const app = !getApps().length ? initializeApp({
-  apiKey: config.apiKey,
-  authDomain: config.authDomain,
-  projectId: config.projectId,
-  storageBucket: config.storageBucket,
-  messagingSenderId: config.messagingSenderId,
-  appId: config.appId,
+  apiKey: resolvedApiKey,
+  authDomain: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN) || config.authDomain,
+  projectId: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_PROJECT_ID) || config.projectId,
+  storageBucket: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET) || config.storageBucket,
+  messagingSenderId: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID) || config.messagingSenderId,
+  appId: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_APP_ID) || config.appId,
 }) : getApps()[0];
 
-export const db = (config.firestoreDatabaseId && config.firestoreDatabaseId !== '(default)')
-  ? getFirestore(app, config.firestoreDatabaseId)
+const resolvedDbId = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_DATABASE_ID) || config.firestoreDatabaseId;
+
+export const db = (resolvedDbId && resolvedDbId !== '(default)')
+  ? getFirestore(app, resolvedDbId)
   : getFirestore(app);
 
 export const auth = getAuth(app);

@@ -392,7 +392,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSignUp) {
-      handleRegisterSubmit(e);
+      await handleRegisterSubmit(e);
       return;
     }
     setErrorMessage(null);

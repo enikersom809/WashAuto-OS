@@ -5,7 +5,7 @@ import {
   where, 
   limit, 
   getDocs, 
-  DocumentData 
+  type DocumentData 
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 
