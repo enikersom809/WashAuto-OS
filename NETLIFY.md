@@ -22,6 +22,7 @@ Esta é a opção recomendada para atualizações automáticas a cada `git push`
 2. Clique em **"Add new site"** -> **"Import an existing project"**.
 3. Conecte sua conta do GitHub/GitLab e selecione o repositório deste projeto.
 4. O Netlify detectará automaticamente o arquivo `netlify.toml`:
+   - **Branch para implantação (Branch to deploy):** `main` (ou `master`)
    - **Base directory:** *(deixe em branco)*
    - **Build command:** `npm run build`
    - **Publish directory:** `dist`
