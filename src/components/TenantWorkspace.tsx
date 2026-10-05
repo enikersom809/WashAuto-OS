@@ -40,7 +40,8 @@ import {
   MessageSquare,
   ExternalLink,
   FileSpreadsheet,
-  FileText
+  FileText,
+  Menu
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { ClientPortal } from './ClientPortal';
@@ -148,6 +149,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   });
 
   const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente'>('fila');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const tenant = currentTenant;
 
@@ -628,14 +630,60 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     };
 
     const newWashList = [washFromApp, ...washItems];
-    const newAppList = appointments.map(a => a.id === app.id ? { ...a, status: 'Aprovado' as const, lavadorId: assignedStaff.id, lavadorName: assignedStaff.name } : a);
+    // Ao ser selecionado para a fila de lavagem, remove do agendamento para zerar e não deixar agendamento pendente marcado
+    const newAppList = appointments.filter(a => a.id !== app.id);
 
     setWashItems(newWashList);
     setAppointments(newAppList);
     localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
-    showToast(`✅ Agendamento de ${app.clientName} aprovado e enviado para a Fila do Pátio!`);
+    showToast(`✅ Agendamento de ${app.clientName} enviado para a Fila do Pátio e zerado em Agendamentos!`);
+  };
+
+  const handleApproveAllAppointments = () => {
+    const pendingApps = appointments.filter(a => a.status === 'Pendente');
+    if (pendingApps.length === 0) {
+      showToast('Nenhum agendamento pendente para enviar à fila.');
+      return;
+    }
+
+    const defaultStaff = staffList[0] || {
+      id: 'st-1',
+      name: 'Equipe do Pátio',
+      defaultCommission: 15
+    };
+
+    const newWashes: WashItem[] = pendingApps.map((app, idx) => {
+      const assignedStaff = staffList.find(s => s.id === app.lavadorId) || defaultStaff;
+      const commAmt = (app.price * (assignedStaff.defaultCommission || 15)) / 100;
+      return {
+        id: `w-from-${app.id}-${idx}`,
+        plate: app.plate,
+        vehicle: app.vehicle,
+        service: app.service,
+        price: app.price,
+        clientName: app.clientName,
+        clientPhone: app.clientPhone,
+        status: 'Aguardando',
+        lavadorId: assignedStaff.id,
+        lavadorName: assignedStaff.name,
+        commissionRate: assignedStaff.defaultCommission || 15,
+        commissionAmount: commAmt,
+        createdAt: `Agendado (${app.dateTime.split(' ')[1] || 'Horário'})`
+      };
+    });
+
+    const newWashList = [...newWashes, ...washItems];
+    // Zera todos os agendamentos pendentes da lista
+    const remainingApps = appointments.filter(a => a.status !== 'Pendente');
+
+    setWashItems(newWashList);
+    setAppointments(remainingApps);
+    localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
+    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remainingApps));
+    window.dispatchEvent(new Event('storage'));
+    showToast(`🚀 ${pendingApps.length} agendamentos enviados para a Fila do Pátio e zerados em Agendamentos!`);
   };
 
   const handleCancelAppointment = (appId: string) => {
@@ -826,9 +874,71 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const completedTodayCount = washItems.filter(w => w.status === 'Concluído').length;
   const totalRevenueToday = washItems.reduce((acc, curr) => acc + curr.price, 0);
   const totalCommissionsPending = staffList.reduce((acc, s) => acc + s.accumulatedCommission, 0);
+  const pendingAppointmentsCount = appointments.filter(a => a.status === 'Pendente').length;
+
+  const menuItems = [
+    {
+      id: 'fila' as const,
+      label: 'Fila de Lavagem',
+      icon: Kanban,
+      badge: activePatioCount > 0 ? `${activePatioCount}` : undefined,
+      badgeColor: 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+    },
+    {
+      id: 'agendamentos' as const,
+      label: 'Agendamentos',
+      icon: CalendarCheck,
+      badge: pendingAppointmentsCount > 0 
+        ? `${pendingAppointmentsCount} pendente`
+        : appointments.length > 0 ? `${appointments.length}` : '0',
+      badgeColor: pendingAppointmentsCount > 0
+        ? 'bg-amber-500 text-slate-950 font-black animate-pulse'
+        : 'bg-slate-800 text-slate-400'
+    },
+    {
+      id: 'historico-lavagem' as const,
+      label: 'Histórico de Lavagem',
+      icon: History,
+      badge: washHistory.length > 0 ? `${washHistory.length}` : undefined,
+      badgeColor: 'bg-slate-800 text-slate-300'
+    },
+    {
+      id: 'produtos' as const,
+      label: 'Produtos & Estoque',
+      icon: Package,
+      badge: products.filter(p => p.stock <= p.minStock).length > 0 
+        ? `${products.filter(p => p.stock <= p.minStock).length} repor`
+        : undefined,
+      badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+    },
+    {
+      id: 'comissoes' as const,
+      label: '% Comissões da Equipe',
+      icon: Percent,
+      badge: totalCommissionsPending > 0 ? `R$ ${totalCommissionsPending.toFixed(0)}` : undefined,
+      badgeColor: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+    },
+    {
+      id: 'configuracoes-empresa' as const,
+      label: 'Configurações da Empresa',
+      icon: Building2
+    },
+    {
+      id: 'saas-config' as const,
+      label: 'Módulos SaaS Root',
+      icon: Sliders
+    },
+    {
+      id: 'portal-cliente' as const,
+      label: 'Portal do Cliente',
+      icon: Sparkles,
+      badge: 'Público',
+      badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+    }
+  ];
 
   return (
-    <div className="bg-[#020617] text-[#f8fafc] min-h-screen flex flex-col font-sans">
+    <div className="bg-[#020617] text-[#f8fafc] min-h-screen flex font-sans">
       
       {/* Toast Notification Banner */}
       {toastMessage && (
@@ -838,202 +948,284 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         </div>
       )}
 
-      {/* Header do Tenant / Empresa */}
-      <header className="bg-[#0f172a] border-b border-[#1e293b] px-6 py-4 sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-xl text-white shadow-md shadow-blue-600/30 overflow-hidden shrink-0 border border-blue-500/30">
+      {/* ================= 1. GAVETA MOBILE (MENU LATERAL NO CELULAR) ================= */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-50 md:hidden flex">
+          <div 
+            className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity"
+            onClick={() => setIsMobileMenuOpen(false)}
+          />
+          <div className="relative flex flex-col w-72 max-w-[85vw] bg-[#020617] border-r border-[#1e293b] p-5 z-10 h-full overflow-y-auto">
+            <div className="flex items-center justify-between pb-4 border-b border-[#1e293b] mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-lg text-white shadow-md shadow-blue-600/30 overflow-hidden shrink-0 border border-blue-500/30">
+                  {tenant.logoUrl ? (
+                    <img src={tenant.logoUrl} alt={tenant.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <Car className="w-5 h-5" />
+                  )}
+                </div>
+                <div className="overflow-hidden">
+                  <h2 className="text-sm font-bold text-[#f8fafc] truncate">{tenant.nomeFantasia || tenant.name}</h2>
+                  <span className="text-[10px] text-blue-400 font-mono block truncate">{tenant.domain}</span>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsMobileMenuOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Menu Items Mobile */}
+            <nav className="space-y-1 flex-1">
+              <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Menu de Gestão
+              </div>
+              {menuItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = activeTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      setActiveTab(item.id);
+                      setIsMobileMenuOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl font-medium text-xs transition text-left ${
+                      isActive
+                        ? 'bg-blue-600 text-white font-bold shadow-sm'
+                        : 'text-slate-400 hover:bg-[#0f172a] hover:text-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 truncate">
+                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-slate-400'}`} />
+                      <span className="truncate">{item.label}</span>
+                    </div>
+                    {item.badge !== undefined && (
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0 ${isActive ? 'bg-white/20 text-white' : item.badgeColor}`}>
+                        {item.badge}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="pt-4 border-t border-[#1e293b] space-y-2 mt-4">
+              <button
+                onClick={() => {
+                  setShowNewWashModal(true);
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
+              >
+                <Plus className="w-4 h-4" /> Novo Veículo no Pátio
+              </button>
+              {onExitImpersonation && (
+                <button
+                  onClick={onExitImpersonation}
+                  className="w-full bg-[#0f172a] hover:bg-rose-500/10 border border-rose-500/30 text-rose-300 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition"
+                >
+                  <LogOut className="w-4 h-4 text-rose-400" /> Sair / Trocar Perfil
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= 2. MENU LATERAL DESKTOP (STICKY LEFT SIDEBAR) ================= */}
+      <aside className="hidden md:flex flex-col w-64 lg:w-72 bg-[#020617] border-r border-[#1e293b] h-screen sticky top-0 shrink-0 z-30">
+        
+        {/* Topo do Menu Lateral: Logo & Identidade do Lava-Jato */}
+        <div className="p-5 border-b border-[#1e293b]">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-xl text-white shadow-md shadow-blue-600/30 overflow-hidden shrink-0 border border-blue-500/30">
               {tenant.logoUrl ? (
                 <img src={tenant.logoUrl} alt={tenant.name} className="w-full h-full object-cover" />
               ) : (
                 <Car className="w-6 h-6" />
               )}
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-[#f8fafc]">{tenant.nomeFantasia || tenant.name}</h1>
-                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full font-bold">
-                  Plano {tenant.plan}
+            <div className="overflow-hidden flex-1">
+              <h1 className="text-sm font-bold text-[#f8fafc] truncate leading-tight" title={tenant.nomeFantasia || tenant.name}>
+                {tenant.nomeFantasia || tenant.name}
+              </h1>
+              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.2 rounded-full font-bold">
+                  {tenant.plan}
                 </span>
-                <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-mono">
+                <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.2 rounded font-mono truncate max-w-[110px]" title={tenant.domain}>
                   {tenant.domain}
                 </span>
               </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                {tenant.razaoSocial ? `${tenant.razaoSocial} · ` : ''}Painel da Empresa · Gestão de Pátio, Clientes & Comissões
-              </p>
             </div>
           </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <PWAInstallButton compact variant="outline" />
-
-            <button
-              onClick={() => setShowNewWashModal(true)}
-              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-blue-600/30 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" /> Novo Veículo no Pátio
-            </button>
-
-            {onExitImpersonation && (
-              <button
-                onClick={onExitImpersonation}
-                className="bg-[#020617] hover:bg-rose-500/10 border border-rose-500/30 text-rose-300 px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition"
-              >
-                <LogOut className="w-4 h-4 text-rose-400" /> Sair / Trocar Perfil
-              </button>
-            )}
-          </div>
         </div>
+
+        {/* Links de Navegação do Menu Lateral */}
+        <div className="p-3 flex-1 overflow-y-auto space-y-1">
+          <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Menu Operacional
+          </div>
+
+          {menuItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id)}
+                className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl font-medium text-xs transition text-left group cursor-pointer ${
+                  isActive
+                    ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/20'
+                    : 'text-slate-400 hover:bg-[#0f172a] hover:text-slate-200'
+                }`}
+              >
+                <div className="flex items-center gap-2.5 truncate">
+                  <Icon className={`w-4 h-4 shrink-0 transition-transform group-hover:scale-110 ${isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'}`} />
+                  <span className="truncate">{item.label}</span>
+                </div>
+                {item.badge !== undefined && (
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0 ${isActive ? 'bg-white/20 text-white' : item.badgeColor}`}>
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Botão de Ação Rápida no Menu Lateral */}
+        <div className="p-4 border-t border-[#1e293b] space-y-2.5 bg-[#020617]/50">
+          <button
+            onClick={() => setShowNewWashModal(true)}
+            className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-md shadow-blue-600/20 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" /> Novo Veículo no Pátio
+          </button>
+
+          <PWAInstallButton compact variant="outline" className="w-full justify-center" />
+
+          {onExitImpersonation && (
+            <button
+              onClick={onExitImpersonation}
+              className="w-full bg-[#0f172a] hover:bg-rose-500/10 border border-rose-500/30 text-rose-300 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
+            >
+              <LogOut className="w-4 h-4 text-rose-400" /> Sair / Trocar Perfil
+            </button>
+          )}
+        </div>
+      </aside>
+
+      {/* ================= 3. CONTEÚDO PRINCIPAL (ÁREA DIREITA) ================= */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-screen">
+        
+        {/* Header Superior da Área de Conteúdo */}
+        <header className="bg-[#0f172a] border-b border-[#1e293b] px-4 sm:px-6 py-3.5 sticky top-0 z-20">
+          <div className="flex items-center justify-between gap-4">
+            
+            {/* Lado Esquerdo: Botão Mobile Hamburguer + Título da Aba Ativa */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setIsMobileMenuOpen(true)}
+                className="md:hidden text-slate-400 hover:text-white p-2 rounded-lg bg-[#020617] border border-[#1e293b] cursor-pointer"
+                title="Abrir Menu Lateral"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-[#f8fafc] flex items-center gap-2">
+                  {activeTab === 'fila' && <><Kanban className="w-5 h-5 text-blue-400" /> Fila de Lavagem & Operação de Pátio</>}
+                  {activeTab === 'agendamentos' && <><CalendarCheck className="w-5 h-5 text-blue-400" /> Gestão de Agendamentos</>}
+                  {activeTab === 'historico-lavagem' && <><History className="w-5 h-5 text-blue-400" /> Histórico de Lavagem</>}
+                  {activeTab === 'produtos' && <><Package className="w-5 h-5 text-blue-400" /> Produtos & Estoque</>}
+                  {activeTab === 'comissoes' && <><Percent className="w-5 h-5 text-blue-400" /> % Comissões da Equipe</>}
+                  {activeTab === 'configuracoes-empresa' && <><Building2 className="w-5 h-5 text-blue-400" /> Configurações da Empresa</>}
+                  {activeTab === 'saas-config' && <><Sliders className="w-5 h-5 text-blue-400" /> Módulos SaaS Root</>}
+                  {activeTab === 'portal-cliente' && <><Sparkles className="w-5 h-5 text-amber-400" /> Portal do Cliente (Visão Pública)</>}
+                </h2>
+                <p className="text-[11px] text-slate-400 hidden sm:block">
+                  {tenant.nomeFantasia || tenant.name} · Gerenciamento centralizado
+                </p>
+              </div>
+            </div>
+
+            {/* Lado Direito: KPIs rápidos no Topo e Botão Novo Veículo */}
+            <div className="flex items-center gap-2 sm:gap-3">
+              <div className="hidden lg:flex items-center gap-3 bg-[#020617] px-3 py-1.5 rounded-xl border border-[#1e293b] text-xs">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-blue-400"></span>
+                  <span className="text-slate-400">Pátio:</span>
+                  <strong className="text-blue-300">{activePatioCount}</strong>
+                </div>
+                <span className="text-slate-700">|</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                  <span className="text-slate-400">Hoje:</span>
+                  <strong className="text-emerald-300">{completedTodayCount}</strong>
+                </div>
+                <span className="text-slate-700">|</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-indigo-400"></span>
+                  <span className="text-slate-400">Faturamento:</span>
+                  <strong className="text-slate-100">R$ {totalRevenueToday.toLocaleString('pt-BR')}</strong>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setShowNewWashModal(true)}
+                className="bg-blue-600 hover:bg-blue-500 text-white px-3 sm:px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow-sm shadow-blue-600/30 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span className="hidden sm:inline">Novo Veículo</span>
+              </button>
+            </div>
+          </div>
+        </header>
 
         {/* Quick Operational KPI Bar */}
-        <div className="max-w-7xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 pt-4 border-t border-[#1e293b]">
-          <div className="bg-[#020617] p-3 rounded-lg border border-[#1e293b] flex items-center justify-between">
-            <div>
-              <span className="text-[10px] text-slate-500 block uppercase font-bold">Pátio Ativo</span>
-              <span className="text-lg font-bold text-blue-400">{activePatioCount} Veículos</span>
+        <div className="px-4 sm:px-6 pt-4 max-w-7xl w-full mx-auto">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-[#0f172a] p-3 rounded-xl border border-[#1e293b] flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Pátio Ativo</span>
+                <span className="text-base sm:text-lg font-bold text-blue-400">{activePatioCount} Veículos</span>
+              </div>
+              <Car className="w-5 h-5 text-blue-400 opacity-60" />
             </div>
-            <Car className="w-5 h-5 text-blue-400 opacity-60" />
-          </div>
 
-          <div className="bg-[#020617] p-3 rounded-lg border border-[#1e293b] flex items-center justify-between">
-            <div>
-              <span className="text-[10px] text-slate-500 block uppercase font-bold">Concluídos Hoje</span>
-              <span className="text-lg font-bold text-emerald-400">{completedTodayCount} Serviços</span>
+            <div className="bg-[#0f172a] p-3 rounded-xl border border-[#1e293b] flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Concluídos Hoje</span>
+                <span className="text-base sm:text-lg font-bold text-emerald-400">{completedTodayCount} Serviços</span>
+              </div>
+              <CheckCircle className="w-5 h-5 text-emerald-400 opacity-60" />
             </div>
-            <CheckCircle className="w-5 h-5 text-emerald-400 opacity-60" />
-          </div>
 
-          <div className="bg-[#020617] p-3 rounded-lg border border-[#1e293b] flex items-center justify-between">
-            <div>
-              <span className="text-[10px] text-slate-500 block uppercase font-bold">Faturamento Estimado</span>
-              <span className="text-lg font-bold text-slate-100">R$ {totalRevenueToday.toLocaleString('pt-BR')}</span>
+            <div className="bg-[#0f172a] p-3 rounded-xl border border-[#1e293b] flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Faturamento Estimado</span>
+                <span className="text-base sm:text-lg font-bold text-slate-100">R$ {totalRevenueToday.toLocaleString('pt-BR')}</span>
+              </div>
+              <DollarSign className="w-5 h-5 text-emerald-400 opacity-60" />
             </div>
-            <DollarSign className="w-5 h-5 text-emerald-400 opacity-60" />
-          </div>
 
-          <div className="bg-[#020617] p-3 rounded-lg border border-[#1e293b] flex items-center justify-between">
-            <div>
-              <span className="text-[10px] text-slate-500 block uppercase font-bold">Comissões a Pagar</span>
-              <span className="text-lg font-bold text-indigo-400">R$ {totalCommissionsPending.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+            <div className="bg-[#0f172a] p-3 rounded-xl border border-[#1e293b] flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Comissões a Pagar</span>
+                <span className="text-base sm:text-lg font-bold text-indigo-400">R$ {totalCommissionsPending.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+              </div>
+              <Percent className="w-5 h-5 text-indigo-400 opacity-60" />
             </div>
-            <Percent className="w-5 h-5 text-indigo-400 opacity-60" />
           </div>
         </div>
 
-        {/* Navegação Secundária por Abas */}
-        <div className="max-w-7xl mx-auto mt-4 flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-          <button
-            onClick={() => setActiveTab('fila')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'fila' 
-                ? 'bg-blue-600 text-white shadow-sm' 
-                : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
-            }`}
-          >
-            <Kanban className="w-4 h-4" /> Fila de Lavagem
-            {activePatioCount > 0 && (
-              <span className="bg-white/20 text-white text-[10px] px-1.5 py-0.2 rounded-full">
-                {activePatioCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('agendamentos')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'agendamentos' 
-                ? 'bg-blue-600 text-white shadow-sm' 
-                : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
-            }`}
-          >
-            <CalendarCheck className="w-4 h-4" /> Agendamentos
-            {appointments.filter(a => a.status === 'Pendente').length > 0 ? (
-              <span className="bg-amber-500 text-slate-950 text-[10px] px-1.5 py-0.2 rounded-full font-black animate-pulse">
-                {appointments.filter(a => a.status === 'Pendente').length} pendentes
-              </span>
-            ) : appointments.length > 0 ? (
-              <span className="bg-blue-500/30 text-blue-300 text-[10px] px-1.5 py-0.2 rounded-full font-bold">
-                {appointments.length}
-              </span>
-            ) : null}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('historico-lavagem')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'historico-lavagem' 
-                ? 'bg-blue-600 text-white shadow-sm' 
-                : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
-            }`}
-          >
-            <History className="w-4 h-4" /> Histórico de Lavagem
-            {washHistory.length > 0 && (
-              <span className="bg-slate-800 text-slate-300 border border-slate-700 text-[10px] px-1.5 py-0.2 rounded-full font-bold">
-                {washHistory.length}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('produtos')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'produtos' 
-                ? 'bg-blue-600 text-white shadow-sm' 
-                : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
-            }`}
-          >
-            <Package className="w-4 h-4" /> Produtos & Estoque
-          </button>
-
-          <button
-            onClick={() => setActiveTab('comissoes')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'comissoes' 
-                ? 'bg-blue-600 text-white shadow-sm' 
-                : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
-            }`}
-          >
-            <Percent className="w-4 h-4" /> Comissões da Equipe
-          </button>
-
-          <button
-            onClick={() => setActiveTab('configuracoes-empresa')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'configuracoes-empresa' 
-                ? 'bg-blue-600 text-white shadow-sm ring-2 ring-blue-400/40' 
-                : 'bg-[#020617] text-blue-400 hover:text-blue-300 border border-blue-500/30'
-            }`}
-          >
-            <Building2 className="w-4 h-4" /> Configurações da Empresa
-          </button>
-
-          <button
-            onClick={() => setActiveTab('saas-config')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'saas-config' 
-                ? 'bg-indigo-600 text-white shadow-sm' 
-                : 'bg-[#020617] text-indigo-400 hover:text-indigo-300 border border-indigo-500/20'
-            }`}
-          >
-            <Settings className="w-4 h-4" /> Módulos SaaS Root
-          </button>
-
-          <button
-            onClick={() => setActiveTab('portal-cliente')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition ${
-              activeTab === 'portal-cliente' 
-                ? 'bg-amber-500 text-slate-950 shadow-sm font-black' 
-                : 'bg-[#020617] text-amber-400 hover:text-amber-300 border border-amber-500/30'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" /> Portal do Cliente (Visão Pública)
-          </button>
-        </div>
-      </header>
-
-      {/* Main Area Body */}
-      <main className="p-6 max-w-7xl w-full mx-auto space-y-6 flex-1">
+        {/* Main Area Body */}
+        <main className="p-4 sm:p-6 max-w-7xl w-full mx-auto space-y-6 flex-1">
 
         {/* ================= ALERTA AO GERENTE DA EMPRESA: SOLICITAÇÃO DE RESGATE ================= */}
         {redemptionData?.requested && (
@@ -1312,10 +1504,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {appointments.filter(a => a.status === 'Pendente').length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleApproveAllAppointments}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-emerald-600/30 cursor-pointer"
+                    title="Aprovar todos os agendamentos pendentes para a fila e zerar a lista"
+                  >
+                    <CheckCircle className="w-4 h-4" /> Enviar Todos para a Fila (Zerar)
+                  </button>
+                )}
                 <button
                   onClick={() => setShowNewAppointmentModal(true)}
-                  className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-blue-600/30"
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-blue-600/30 cursor-pointer"
                 >
                   <Plus className="w-4 h-4" /> Novo Agendamento
                 </button>
@@ -1532,9 +1734,10 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                     </button>
                                     <button
                                       onClick={() => handleApproveAppointment(app)}
-                                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm shadow-emerald-600/30 inline-flex items-center gap-1"
+                                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm shadow-emerald-600/30 inline-flex items-center gap-1 cursor-pointer"
+                                      title="Enviar este agendamento para a fila de lavagem (zera em agendamentos)"
                                     >
-                                      <CheckCircle className="w-3.5 h-3.5" /> Aprovar para Fila
+                                      <CheckCircle className="w-3.5 h-3.5" /> Enviar para a Fila (Zerar)
                                     </button>
                                   </>
                                 )}
@@ -2153,6 +2356,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         )}
 
       </main>
+      </div>
 
       {/* MODAL 1: NOVO SERVIÇO / VEÍCULO NO PÁTIO */}
       {showNewWashModal && (

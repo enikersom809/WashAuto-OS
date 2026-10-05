@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WashAuto OS - Sistema Integrado em Tempo Real</title>
+
+    <!-- 1. Firebase SDK v10 (Compat) -->
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+
+    <!-- Biblioteca para geração do QR Code (QRCode.js) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+        }
+
+        body {
+            background-color: #0B0F19;
+            color: #F3F4F6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        /* Top Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #1F2937;
+        }
+
+        .brand-title {
+            font-size: 22px;
+            font-weight: 800;
+            background: linear-gradient(90deg, #00A3FF, #00FFCC);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background-color: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 9999px;
+            font-size: 13px;
+            color: #9CA3AF;
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #10B981;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #10B981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+
+        /* Abas de Navegação */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .tab-btn {
+            flex: 1;
+            min-width: 140px;
+            background-color: #111827;
+            color: #9CA3AF;
+            border: 1px solid #1F2937;
+            padding: 12px 16px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.2s ease;
+            text-align: center;
+        }
+
+        .tab-btn:hover {
+            color: #FFF;
+            border-color: #374151;
+        }
+
+        .tab-btn.active {
+            background: linear-gradient(135deg, rgba(0, 163, 255, 0.15), rgba(0, 255, 204, 0.15));
+            color: #00FFCC;
+            border-color: #00A3FF;
+        }
+
+        .panel {
+            background-color: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 14px;
+            padding: 24px;
+            display: none;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .panel.active {
+            display: block;
+        }
+
+        h2 {
+            margin-bottom: 16px;
+            color: #FFF;
+            font-size: 20px;
+            font-weight: 700;
+            border-bottom: 1px solid #1F2937;
+            padding-bottom: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        /* Formulários */
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #9CA3AF;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px 14px;
+            background-color: #1F2937;
+            border: 1px solid #374151;
+            border-radius: 8px;
+            color: #FFF;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #00A3FF;
+            box-shadow: 0 0 0 2px rgba(0, 163, 255, 0.2);
+        }
+
+        input::placeholder {
+            color: #6B7280;
+        }
+
+        .btn-primary {
+            background: linear-gradient(90deg, #00A3FF, #00FFCC);
+            color: #0B0F19;
+            border: none;
+            padding: 14px 20px;
+            border-radius: 8px;
+            font-weight: 700;
+            cursor: pointer;
+            font-size: 15px;
+            width: 100%;
+            margin-top: 12px;
+            transition: opacity 0.2s, transform 0.1s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary:hover {
+            opacity: 0.92;
+        }
+
+        .btn-primary:active {
+            transform: scale(0.99);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: #00A3FF;
+            border: 1px solid #00A3FF;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            width: auto;
+            margin-bottom: 16px;
+            transition: background 0.2s;
+        }
+
+        .btn-secondary:hover {
+            background-color: rgba(0, 163, 255, 0.1);
+        }
+
+        /* Seção do QR Code Gerado */
+        .qr-result {
+            margin-top: 25px;
+            padding: 24px;
+            background-color: #1F2937;
+            border-radius: 10px;
+            text-align: center;
+            display: none;
+            border: 1px solid #374151;
+        }
+
+        #qrcode {
+            display: inline-block;
+            padding: 14px;
+            background-color: #FFF;
+            border-radius: 10px;
+            margin: 16px 0;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+        }
+
+        .qr-url {
+            color: #00FFCC;
+            font-size: 13px;
+            word-break: break-all;
+            background: #111827;
+            padding: 8px 12px;
+            border-radius: 6px;
+            display: inline-block;
+            margin-top: 6px;
+        }
+
+        /* Bloco de Veículos Dinâmicos */
+        .vehicle-block {
+            background-color: #1F2937;
+            padding: 16px;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            border-left: 4px solid #00A3FF;
+            position: relative;
+        }
+
+        .vehicle-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .vehicle-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #E5E7EB;
+        }
+
+        .btn-remove-vehicle {
+            background: transparent;
+            border: none;
+            color: #EF4444;
+            font-size: 12px;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .btn-remove-vehicle:hover {
+            background-color: rgba(239, 68, 68, 0.1);
+        }
+
+        /* Notificação */
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .alert-success {
+            background-color: rgba(16, 185, 129, 0.15);
+            border: 1px solid #10B981;
+            color: #34D399;
+        }
+
+        .alert-error {
+            background-color: rgba(239, 68, 68, 0.15);
+            border: 1px solid #EF4444;
+            color: #F87171;
+        }
+
+        /* Lista em Tempo Real de Clientes */
+        .client-cards-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 14px;
+            margin-top: 16px;
+        }
+
+        .client-card {
+            background-color: #1F2937;
+            border: 1px solid #374151;
+            border-radius: 10px;
+            padding: 16px;
+            transition: border-color 0.2s;
+        }
+
+        .client-card:hover {
+            border-color: #00A3FF;
+        }
+
+        .client-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .client-card-name {
+            font-size: 16px;
+            font-weight: 700;
+            color: #FFF;
+        }
+
+        .client-card-time {
+            font-size: 12px;
+            color: #9CA3AF;
+            background-color: #111827;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+
+        .client-info-row {
+            font-size: 13px;
+            color: #D1D5DB;
+            margin-bottom: 6px;
+        }
+
+        .client-info-row span {
+            color: #9CA3AF;
+        }
+
+        .vehicles-pill-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #374151;
+        }
+
+        .vehicle-pill {
+            background: #111827;
+            border: 1px solid #374151;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #00FFCC;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #6B7280;
+            font-size: 14px;
+        }
+
+        /* Botão de Impressão Térmica na Tela */
+        .btn-thermal-print {
+            background-color: #1F2937;
+            border: 1px solid #374151;
+            color: #00FFCC;
+            padding: 7px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 10px;
+            transition: all 0.2s;
+        }
+
+        .btn-thermal-print:hover {
+            background-color: #374151;
+            border-color: #00A3FF;
+            color: #FFF;
+        }
+
+        /* ================= 2. CONFIGURAÇÃO @media print (IMPRESSORA TÉRMICA 80mm / 58mm) ================= */
+        #reciboTermico {
+            display: none;
+        }
+
+        @media print {
+            /* 1. Oculta todos os componentes normais do site */
+            body > *:not(#reciboTermico),
+            .container,
+            .header,
+            .tabs,
+            .panel,
+            form,
+            button,
+            nav {
+                display: none !important;
+            }
+
+            /* 2. Zera margens da página e fixa largura padrão para 80mm (térmica) */
+            @page {
+                size: 80mm auto;
+                margin: 0;
+            }
+
+            html, body {
+                margin: 0 !important;
+                padding: 0 !important;
+                background: #FFFFFF !important;
+                background-color: #FFFFFF !important;
+                color: #000000 !important;
+                font-family: 'Segoe UI', Arial, -apple-system, sans-serif !important;
+                width: 80mm !important;
+                max-width: 80mm !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+
+            /* 3. Exibição limpa e estruturada do Cupom Térmico */
+            #reciboTermico {
+                display: block !important;
+                width: 80mm !important;
+                max-width: 80mm !important;
+                margin: 0 auto !important;
+                padding: 4mm 3mm !important;
+                box-sizing: border-box !important;
+                background: #FFFFFF !important;
+                color: #000000 !important;
+                font-size: 11px !important;
+                line-height: 1.35 !important;
+            }
+
+            .recibo-header {
+                text-align: center;
+                margin-bottom: 4px;
+            }
+
+            .recibo-titulo-principal {
+                font-size: 16px !important;
+                font-weight: 900 !important;
+                margin: 0 !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.5px !important;
+            }
+
+            .recibo-subtitulo {
+                font-size: 11px !important;
+                font-weight: 700 !important;
+                text-transform: uppercase !important;
+                margin: 1px 0 2px 0 !important;
+            }
+
+            .recibo-data-hora {
+                font-size: 10px !important;
+                color: #000000 !important;
+            }
+
+            .recibo-divisor {
+                text-align: center;
+                font-size: 10px;
+                letter-spacing: -0.5px;
+                margin: 3px 0;
+                overflow: hidden;
+                white-space: nowrap;
+                font-family: monospace;
+            }
+
+            .recibo-secao {
+                margin: 3px 0;
+            }
+
+            .recibo-rotulo-secao {
+                font-size: 10px !important;
+                font-weight: 800 !important;
+                text-transform: uppercase !important;
+                margin-bottom: 2px !important;
+                letter-spacing: 0.3px;
+            }
+
+            .recibo-linha {
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 1.5px;
+                font-size: 11px;
+            }
+
+            .recibo-linha-destaque {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin: 3px 0 1px 0;
+                padding: 2px 0;
+                border-top: 1px dashed #000;
+                border-bottom: 1px dashed #000;
+            }
+
+            .recibo-placa-destaque {
+                font-size: 14px !important;
+                font-weight: 900 !important;
+                letter-spacing: 1px !important;
+                font-family: monospace, sans-serif !important;
+            }
+
+            .recibo-checklist-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 3px 6px;
+                font-size: 10px;
+                margin-top: 2px;
+                padding: 2px 0;
+            }
+
+            .recibo-checklist-item {
+                font-family: monospace, sans-serif;
+                font-size: 10px;
+            }
+
+            .recibo-termo {
+                margin: 5px 0 6px 0;
+                padding: 3px 0;
+                font-size: 8.5px !important;
+                line-height: 1.25 !important;
+                text-align: justify;
+                border-top: 1px dotted #000;
+                border-bottom: 1px dotted #000;
+            }
+
+            .recibo-termo p {
+                margin: 0;
+                font-style: italic;
+            }
+
+            .recibo-assinaturas {
+                margin-top: 8px;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+
+            .recibo-bloco-assinatura {
+                text-align: center;
+                margin-top: 4px;
+            }
+
+            .recibo-linha-assinatura {
+                border-bottom: 1px dotted #000;
+                width: 85%;
+                margin: 0 auto 3px auto;
+            }
+
+            .recibo-texto-assinatura {
+                font-size: 9px;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+
+            .recibo-rodape-final {
+                text-align: center;
+                font-size: 8px;
+                margin-top: 3px;
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ================= ESTRUTURA PROFISSIONAL DO RECIBO TÉRMICO (80mm / 58mm) ================= -->
+<div id="reciboTermico">
+    <!-- 1. CABEÇALHO -->
+    <div class="recibo-header">
+        <h1 class="recibo-titulo-principal">WashAuto OS</h1>
+        <p class="recibo-subtitulo">Comprovante de Entrada</p>
+        <div class="recibo-data-hora">
+            <span>Recepção: </span><strong id="reciboDataHora">--/--/---- --:--</strong>
+        </div>
+    </div>
+
+    <div class="recibo-divisor">================================</div>
+
+    <!-- 2. DADOS DO CLIENTE -->
+    <div class="recibo-secao">
+        <div class="recibo-linha">
+            <span>NOME:</span>
+            <strong id="reciboClienteNome">---</strong>
+        </div>
+        <div class="recibo-linha">
+            <span>BAIRRO:</span>
+            <span id="reciboClienteBairro">---</span>
+        </div>
+    </div>
+
+    <div class="recibo-divisor">--------------------------------</div>
+
+    <!-- 3. DADOS DO VEÍCULO -->
+    <div class="recibo-secao">
+        <div class="recibo-rotulo-secao">DADOS DO VEÍCULO</div>
+        <div id="reciboVeiculosContainer">
+            <!-- Preenchido dinamicamente via imprimirRecibo() -->
+            <div class="recibo-linha">
+                <span>TIPO:</span>
+                <span id="reciboVeiculoTipo">Carro</span>
+            </div>
+            <div class="recibo-linha">
+                <span>MARCA / MODELO:</span>
+                <span id="reciboVeiculoModelo">---</span>
+            </div>
+            <div class="recibo-linha">
+                <span>COR:</span>
+                <span id="reciboVeiculoCor">---</span>
+            </div>
+            <div class="recibo-linha-destaque">
+                <span style="font-weight: bold;">PLACA:</span>
+                <strong id="reciboVeiculoPlaca" class="recibo-placa-destaque">---</strong>
+            </div>
+        </div>
+    </div>
+
+    <div class="recibo-divisor">--------------------------------</div>
+
+    <!-- 4. CHECK-LIST DE AVARIAS (VISUAL SUTIL) -->
+    <div class="recibo-secao">
+        <div class="recibo-rotulo-secao">Avarias Prévias Encontradas:</div>
+        <div class="recibo-checklist-grid">
+            <div class="recibo-checklist-item">[ ] Riscos</div>
+            <div class="recibo-checklist-item">[ ] Amassados</div>
+            <div class="recibo-checklist-item">[ ] Vidro Trincado</div>
+            <div class="recibo-checklist-item">[ ] Rodas Raspadas</div>
+        </div>
+    </div>
+
+    <!-- 5. TERMO DE RESPONSABILIDADE (TEXTO CURTO E SOFISTICADO) -->
+    <div class="recibo-secao recibo-termo">
+        <p>
+            "A empresa não se responsabiliza por objetos de valor deixados no interior do veículo. O cliente declara estar ciente do estado atual do automóvel registrado no check-list acima."
+        </p>
+    </div>
+
+    <!-- 6. ASSINATURAS -->
+    <div class="recibo-assinaturas">
+        <div class="recibo-bloco-assinatura">
+            <div class="recibo-linha-assinatura"></div>
+            <div class="recibo-texto-assinatura">Assinatura do Cliente</div>
+        </div>
+        <div class="recibo-bloco-assinatura">
+            <div class="recibo-linha-assinatura"></div>
+            <div class="recibo-texto-assinatura">Responsável Técnico</div>
+        </div>
+    </div>
+
+    <div class="recibo-divisor">================================</div>
+    <div class="recibo-rodape-final">WashAuto OS • Estética Automotiva Inteligente</div>
+</div>
+
+<div class="container">
+
+    <!-- Topo Oficial -->
+    <div class="header">
+        <div>
+            <div class="brand-title">WashAuto OS</div>
+            <div style="font-size: 12px; color: #9CA3AF;">Sincronização em Tempo Real (Computador & Celular)</div>
+        </div>
+        <div class="status-badge">
+            <span class="pulse-dot"></span>
+            <span id="connectionStatus">Firestore Conectado</span>
+        </div>
+    </div>
+
+    <!-- Abas de Navegação -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('admin')">1. Painel Admin / QR Code</button>
+        <button class="tab-btn" onclick="switchTab('cliente')">2. Formulário de Cadastro</button>
+        <button class="tab-btn" onclick="switchTab('lista')">3. Clientes em Tempo Real (<span id="clientsCount">0</span>)</button>
+    </div>
+
+    <!-- === ABA 1: PAINEL SUPER ADMIN === -->
+    <div id="panel-admin" class="panel active">
+        <h2>Painel Lava-Jato - Gerar QR Code de Autoatendimento</h2>
+        <p style="color: #9CA3AF; font-size: 14px; margin-bottom: 16px;">
+            Cadastre o nome ou domínio do lava-jato para gerar o QR Code impresso no balcão ou totem. O cliente aponta o celular e o formulário já abre identificado.
+        </p>
+        
+        <div class="form-group">
+            <label for="companyName">Nome ou Domínio do Lava-Jato</label>
+            <input type="text" id="companyName" placeholder="Ex: Estética Automotiva Brilho">
+        </div>
+        <button class="btn-primary" onclick="generateCompanyQR()">Gerar QR Code para Balcão / Totem</button>
+
+        <div id="qrResultSection" class="qr-result">
+            <p style="color: #FFF; font-weight: bold; font-size: 16px;">QR Code Gerado com Sucesso!</p>
+            <p style="font-size: 13px; color: #9CA3AF; margin-top: 4px;">Link direto que o cliente acessará no celular:</p>
+            <div><span id="generatedUrl" class="qr-url"></span></div>
+            <div id="qrcode"></div>
+            <p style="font-size: 12px; color: #9CA3AF;">
+                O cliente escaneia com a câmera do celular e todos os cadastros sobem instantaneamente para o Firestore!
+            </p>
+            <button class="btn-secondary" style="margin-top: 14px;" onclick="switchTab('cliente')">Testar Tela de Cadastro</button>
+        </div>
+    </div>
+
+    <!-- === ABA 2: TELA DE CADASTRO DA EMPRESA (VIA QR / CELULAR) === -->
+    <div id="panel-cliente" class="panel">
+        <h2>
+            <span>Criar Conta de Cliente</span>
+            <span id="empresaBadge" style="font-size: 12px; color: #00FFCC; font-weight: 600;"></span>
+        </h2>
+        <p id="welcomeMessage" style="color: #00A3FF; margin-bottom: 16px; font-weight: 600; font-size: 15px;"></p>
+        
+        <div id="alertSuccess" class="alert alert-success"></div>
+        <div id="alertError" class="alert alert-error"></div>
+
+        <form id="clientForm" onsubmit="handleClientSubmit(event)">
+            <!-- Dados Pessoais -->
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Nome Completo *</label>
+                    <input type="text" id="nome" required placeholder="Digite seu nome completo">
+                </div>
+                <div class="form-group">
+                    <label>Telefone / WhatsApp *</label>
+                    <input type="tel" id="telefone" required placeholder="(11) 98765-4321">
+                </div>
+            </div>
+
+            <!-- Endereço com Busca Automática via CEP -->
+            <div class="form-row">
+                <div class="form-group">
+                    <label>CEP (Busca Automática) *</label>
+                    <input type="text" id="cep" maxlength="9" placeholder="00000-000" onblur="buscarCEP(this.value)" required>
+                </div>
+                <div class="form-group">
+                    <label>Endereço Completo (Rua e Nº) *</label>
+                    <input type="text" id="endereco" required placeholder="Rua, Número, Complemento">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Bairro *</label>
+                    <input type="text" id="bairro" required placeholder="Seu bairro">
+                </div>
+                <div class="form-group">
+                    <label>Cidade *</label>
+                    <input type="text" id="cidade" required placeholder="Sua cidade">
+                </div>
+                <div class="form-group">
+                    <label>Estado (UF) *</label>
+                    <input type="text" id="estado" maxlength="2" required placeholder="Ex: SP">
+                </div>
+            </div>
+
+            <!-- Seção de Veículos Dinâmicos -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin: 20px 0 10px 0;">
+                <h3 style="color: #FFF; font-size: 16px; font-weight: 700;">Veículos do Cliente</h3>
+                <button type="button" class="btn-secondary" onclick="addVehicleBlock()">+ Adicionar Outro Veículo</button>
+            </div>
+            
+            <div id="vehiclesContainer">
+                <!-- O primeiro bloco é gerado pelo template inicial -->
+                <div class="vehicle-block" data-index="0">
+                    <div class="vehicle-header">
+                        <span class="vehicle-title">Veículo 1</span>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Tipo</label>
+                            <select class="veiculo-tipo">
+                                <option value="Carro">Carro</option>
+                                <option value="Moto">Moto</option>
+                                <option value="Caminhonete">Caminhonete</option>
+                                <option value="SUV">SUV</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Marca *</label>
+                            <input type="text" class="veiculo-marca" required placeholder="Ex: Toyota">
+                        </div>
+                        <div class="form-group">
+                            <label>Modelo *</label>
+                            <input type="text" class="veiculo-modelo" required placeholder="Ex: Corolla">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Cor *</label>
+                            <input type="text" class="veiculo-cor" required placeholder="Ex: Prata">
+                        </div>
+                        <div class="form-group">
+                            <label>Ano *</label>
+                            <input type="number" class="veiculo-ano" min="1950" max="2035" required placeholder="Ex: 2023">
+                        </div>
+                        <div class="form-group">
+                            <label>Placa *</label>
+                            <input type="text" class="veiculo-placa" required placeholder="Ex: ABC1D23" style="text-transform: uppercase;">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <button type="submit" id="submitBtn" class="btn-primary">
+                Salvar Cadastro no Firestore
+            </button>
+        </form>
+    </div>
+
+    <!-- === ABA 3: CLIENTES EM TEMPO REAL (.onSnapshot) === -->
+    <div id="panel-lista" class="panel">
+        <h2>
+            <span>Clientes Sincronizados em Tempo Real</span>
+            <span style="font-size: 13px; color: #10B981; font-weight: 500;">● Conexão Ativa</span>
+        </h2>
+        <p style="color: #9CA3AF; font-size: 14px; margin-bottom: 16px;">
+            Qualquer cadastro feito no celular ou neste computador aparece aqui instantaneamente via <code>db.collection('clientes').onSnapshot()</code>.
+        </p>
+
+        <div id="clientsCardsContainer" class="client-cards-grid">
+            <div class="empty-state">Conectando ao Firestore e aguardando cadastros...</div>
+        </div>
+    </div>
+
+</div>
+
+<!-- 2. Inicialização do Firebase & Scripts do Sistema -->
+<script>
+    // Configuração oficial informada pelo usuário
+    const firebaseConfig = {
+      apiKey: "AIzaSyBkoQseuHZuIZDKFTRtpgqOlI7BCVP95yY",
+      authDomain: "meulavajatogestaoparalavajato.firebaseapp.com",
+      projectId: "meulavajatogestaoparalavajato",
+      storageBucket: "meulavajatogestaoparalavajato.firebasestorage.app",
+      messagingSenderId: "372328060896",
+      appId: "1:372328060896:web:596b7467604aba2a78bd85"
+    };
+
+    // Inicialização do Firebase Compat
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+    const db = firebase.firestore();
+
+    // Estado da Aplicação
+    let currentEmpresa = "";
+    let qrcodeInstance = null;
+
+    // Detectar parâmetros de URL (ex: ?empresa=estetica-brilho)
+    window.addEventListener('DOMContentLoaded', () => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const empresaParam = urlParams.get('empresa') || urlParams.get('lava') || urlParams.get('t');
+        if (empresaParam) {
+            setEmpresaContext(empresaParam);
+            switchTab('cliente');
+        } else {
+            setEmpresaContext('Lava-Jato Principal');
+        }
+
+        // Inicia a escuta em tempo real do Firestore
+        escutarClientes();
+    });
+
+    function setEmpresaContext(nomeEmpresa) {
+        currentEmpresa = nomeEmpresa;
+        const msg = document.getElementById('welcomeMessage');
+        const badge = document.getElementById('empresaBadge');
+        if (msg) msg.textContent = `Cadastre-se na ${nomeEmpresa} para agilizar seus atendimentos`;
+        if (badge) badge.textContent = `Lava-Jato: ${nomeEmpresa}`;
+    }
+
+    // Troca de Abas
+    function switchTab(tabName) {
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+
+        const targetBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick')?.includes(tabName));
+        if (targetBtn) targetBtn.classList.add('active');
+
+        const targetPanel = document.getElementById(`panel-${tabName}`);
+        if (targetPanel) targetPanel.classList.add('active');
+    }
+
+    // Gerador de QR Code do Painel Admin
+    function generateCompanyQR() {
+        const input = document.getElementById('companyName');
+        const companyName = input.value.trim();
+        if (!companyName) {
+            alert('Por favor, informe o nome ou domínio do lava-jato!');
+            input.focus();
+            return;
+        }
+
+        setEmpresaContext(companyName);
+
+        const baseUrl = window.location.origin + window.location.pathname;
+        const cleanSlug = companyName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
+        const fullUrl = `${baseUrl}?empresa=${encodeURIComponent(cleanSlug)}`;
+
+        document.getElementById('generatedUrl').textContent = fullUrl;
+        document.getElementById('qrResultSection').style.display = 'block';
+
+        const qrContainer = document.getElementById('qrcode');
+        qrContainer.innerHTML = '';
+
+        if (typeof QRCode !== 'undefined') {
+            qrcodeInstance = new QRCode(qrContainer, {
+                text: fullUrl,
+                width: 180,
+                height: 180,
+                colorDark: '#0B0F19',
+                colorLight: '#FFFFFF',
+                correctLevel: QRCode.CorrectLevel.H
+            });
+        } else {
+            qrContainer.innerHTML = '<p style="color: #000; font-size: 12px; padding: 10px;">QR Code Generator indisponível.</p>';
+        }
+    }
+
+    // Busca de CEP Automática (ViaCEP)
+    function buscarCEP(valor) {
+        const cep = valor.replace(/\D/g, '');
+        if (cep.length === 8) {
+            fetch(`https://viacep.com.br/ws/${cep}/json/`)
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.erro) {
+                        document.getElementById('endereco').value = data.logradouro ? `${data.logradouro}` : '';
+                        document.getElementById('bairro').value = data.bairro || '';
+                        document.getElementById('cidade').value = data.localidade || '';
+                        document.getElementById('estado').value = data.uf || '';
+                    } else {
+                        showAlert('error', 'CEP não encontrado. Preencha os campos manualmente.');
+                    }
+                })
+                .catch(err => {
+                    console.error('Erro na consulta do CEP:', err);
+                });
+        }
+    }
+
+    // Gerenciador Dinâmico de Veículos
+    function addVehicleBlock() {
+        const container = document.getElementById('vehiclesContainer');
+        const total = container.querySelectorAll('.vehicle-block').length;
+        const newIndex = total + 1;
+
+        const block = document.createElement('div');
+        block.className = 'vehicle-block';
+        block.dataset.index = total;
+        block.innerHTML = `
+            <div class="vehicle-header">
+                <span class="vehicle-title">Veículo ${newIndex}</span>
+                <button type="button" class="btn-remove-vehicle" onclick="removeVehicleBlock(this)">✕ Remover Veículo</button>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Tipo</label>
+                    <select class="veiculo-tipo">
+                        <option value="Carro">Carro</option>
+                        <option value="Moto">Moto</option>
+                        <option value="Caminhonete">Caminhonete</option>
+                        <option value="SUV">SUV</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Marca *</label>
+                    <input type="text" class="veiculo-marca" required placeholder="Ex: Toyota">
+                </div>
+                <div class="form-group">
+                    <label>Modelo *</label>
+                    <input type="text" class="veiculo-modelo" required placeholder="Ex: Corolla">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Cor *</label>
+                    <input type="text" class="veiculo-cor" required placeholder="Ex: Prata">
+                </div>
+                <div class="form-group">
+                    <label>Ano *</label>
+                    <input type="number" class="veiculo-ano" min="1950" max="2035" required placeholder="Ex: 2023">
+                </div>
+                <div class="form-group">
+                    <label>Placa *</label>
+                    <input type="text" class="veiculo-placa" required placeholder="Ex: ABC1D23" style="text-transform: uppercase;">
+                </div>
+            </div>
+        `;
+        container.appendChild(block);
+    }
+
+    function removeVehicleBlock(btn) {
+        const block = btn.closest('.vehicle-block');
+        if (block) {
+            block.remove();
+            // Renumera os blocos restantes
+            const blocks = document.querySelectorAll('#vehiclesContainer .vehicle-block');
+            blocks.forEach((b, i) => {
+                const title = b.querySelector('.vehicle-title');
+                if (title) title.textContent = `Veículo ${i + 1}`;
+            });
+        }
+    }
+
+    // Alertas visuais
+    function showAlert(type, message) {
+        const successEl = document.getElementById('alertSuccess');
+        const errorEl = document.getElementById('alertError');
+        if (type === 'success') {
+            successEl.textContent = message;
+            successEl.style.display = 'block';
+            errorEl.style.display = 'none';
+            setTimeout(() => { successEl.style.display = 'none'; }, 6000);
+        } else {
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+            successEl.style.display = 'none';
+            setTimeout(() => { errorEl.style.display = 'none'; }, 6000);
+        }
+    }
+
+    // 3. Envio do Formulário para o Firestore (coleção 'clientes')
+    async function handleClientSubmit(event) {
+        event.preventDefault();
+        const submitBtn = document.getElementById('submitBtn');
+        const originalText = submitBtn.innerHTML;
+
+        try {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = 'Salvando no Firestore...';
+
+            // Coleta dados pessoais e de endereço
+            const nome = document.getElementById('nome').value.trim();
+            const telefone = document.getElementById('telefone').value.trim();
+            const cep = document.getElementById('cep').value.trim();
+            const endereco = document.getElementById('endereco').value.trim();
+            const bairro = document.getElementById('bairro').value.trim();
+            const cidade = document.getElementById('cidade').value.trim();
+            const estado = document.getElementById('estado').value.trim().toUpperCase();
+
+            // Coleta lista dinâmica de veículos
+            const vehicleBlocks = document.querySelectorAll('#vehiclesContainer .vehicle-block');
+            const veiculos = [];
+
+            vehicleBlocks.forEach(block => {
+                const tipo = block.querySelector('.veiculo-tipo')?.value || 'Carro';
+                const marca = block.querySelector('.veiculo-marca')?.value.trim() || '';
+                const modelo = block.querySelector('.veiculo-modelo')?.value.trim() || '';
+                const cor = block.querySelector('.veiculo-cor')?.value.trim() || '';
+                const ano = parseInt(block.querySelector('.veiculo-ano')?.value) || new Date().getFullYear();
+                const placa = block.querySelector('.veiculo-placa')?.value.trim().toUpperCase() || '';
+
+                if (marca && modelo) {
+                    veiculos.push({ tipo, marca, modelo, cor, ano, placa });
+                }
+            });
+
+            const novoCliente = {
+                nome,
+                telefone,
+                cep,
+                endereco,
+                bairro,
+                cidade,
+                estado,
+                empresa: currentEmpresa || 'Lava-Jato Principal',
+                veiculos,
+                dataCadastro: firebase.firestore.FieldValue.serverTimestamp()
+            };
+
+            // Salva diretamente na coleção 'clientes' do Firestore
+            await db.collection('clientes').add(novoCliente);
+
+            window.ultimoClienteCadastrado = novoCliente;
+            showAlert('success', `
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                    <span>✅ Cadastro realizado com sucesso! Sincronizado no Firestore.</span>
+                    <button type="button" class="btn-thermal-print" style="margin-top: 0; background-color: #00A3FF; color: #FFF; font-weight: bold;" onclick="imprimirRecibo(window.ultimoClienteCadastrado)">
+                        🖨️ Imprimir Recibo Térmico (80mm)
+                    </button>
+                </div>
+            `);
+            
+            // Reseta formulário e volta para 1 veículo
+            document.getElementById('clientForm').reset();
+            const container = document.getElementById('vehiclesContainer');
+            while (container.children.length > 1) {
+                container.removeChild(container.lastChild);
+            }
+
+            // Opcional: abre a aba de clientes para ver em tempo real
+            setTimeout(() => {
+                switchTab('lista');
+            }, 1200);
+
+        } catch (error) {
+            console.error('Erro ao salvar no Firestore:', error);
+            showAlert('error', `Falha ao salvar no Firestore: ${error.message || 'Erro de conexão'}`);
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalText;
+        }
+    }
+
+    // Cache de clientes para impressão térmica
+    const clientesCache = {};
+
+    // 3. Função JavaScript imprimirRecibo(dadosCliente) para Impressão Térmica
+    function imprimirRecibo(dadosCliente) {
+        if (!dadosCliente) {
+            alert('Nenhum dado informado para o recibo.');
+            return;
+        }
+
+        // 1. Data e Hora da Recepção
+        let dataHoraFormatada = '';
+        if (dadosCliente.dataCadastro && dadosCliente.dataCadastro.toDate) {
+            dataHoraFormatada = dadosCliente.dataCadastro.toDate().toLocaleString('pt-BR');
+        } else if (dadosCliente.dataCadastro instanceof Date) {
+            dataHoraFormatada = dadosCliente.dataCadastro.toLocaleString('pt-BR');
+        } else {
+            dataHoraFormatada = new Date().toLocaleString('pt-BR');
+        }
+        const elDataHora = document.getElementById('reciboDataHora');
+        if (elDataHora) elDataHora.textContent = dataHoraFormatada;
+
+        // 2. Dados do Cliente: Nome Completo e Bairro
+        const elNome = document.getElementById('reciboClienteNome');
+        if (elNome) elNome.textContent = dadosCliente.nome || 'Consumidor';
+
+        const elBairro = document.getElementById('reciboClienteBairro');
+        if (elBairro) elBairro.textContent = dadosCliente.bairro || 'Centro / Balcão';
+
+        // 3. Dados do Veículo: Tipo (Carro/Moto), Marca, Modelo, Cor e Placa (em destaque)
+        const container = document.getElementById('reciboVeiculosContainer');
+        if (container) {
+            const veiculos = Array.isArray(dadosCliente.veiculos) && dadosCliente.veiculos.length > 0 
+                ? dadosCliente.veiculos 
+                : [{
+                    tipo: dadosCliente.tipo || 'Carro',
+                    marca: dadosCliente.marca || '',
+                    modelo: dadosCliente.modelo || 'Veículo',
+                    cor: dadosCliente.cor || 'Padrão',
+                    placa: dadosCliente.placa || 'Sem Placa'
+                }];
+
+            container.innerHTML = veiculos.map((v, i) => `
+                <div style="${i > 0 ? 'margin-top: 5px; padding-top: 4px; border-top: 1px dotted #000;' : ''}">
+                    <div class="recibo-linha">
+                        <span>TIPO:</span>
+                        <strong>${(v.tipo || 'Carro').toUpperCase()}</strong>
+                    </div>
+                    <div class="recibo-linha">
+                        <span>MARCA / MODELO:</span>
+                        <span>${v.marca || ''} ${v.modelo || ''}</span>
+                    </div>
+                    <div class="recibo-linha">
+                        <span>COR:</span>
+                        <span>${v.cor || '---'}</span>
+                    </div>
+                    <div class="recibo-linha-destaque">
+                        <span style="font-weight: bold;">PLACA:</span>
+                        <strong class="recibo-placa-destaque">${(v.placa || '---').toUpperCase()}</strong>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 4. Dispara o diálogo de impressão configurado para rolo térmico 80mm
+        window.print();
+    }
+
+    function imprimirReciboPorId(clienteId) {
+        const cliente = clientesCache[clienteId];
+        if (cliente) {
+            imprimirRecibo(cliente);
+        } else {
+            alert('Dados do cliente não encontrados para impressão.');
+        }
+    }
+
+    // 4. Função escutarClientes() com .onSnapshot() em tempo real
+    function escutarClientes() {
+        const container = document.getElementById('clientsCardsContainer');
+        const counter = document.getElementById('clientsCount');
+
+        // Escuta em tempo real da coleção 'clientes'
+        db.collection('clientes').onSnapshot((snapshot) => {
+            const clientes = [];
+            snapshot.forEach(doc => {
+                const item = {
+                    id: doc.id,
+                    ...doc.data()
+                };
+                clientes.push(item);
+                clientesCache[doc.id] = item;
+            });
+
+            // Ordena os mais recentes no topo (com suporte seguro a serverTimestamp pendente)
+            clientes.sort((a, b) => {
+                const timeA = a.dataCadastro?.toMillis ? a.dataCadastro.toMillis() : (a.dataCadastro?.seconds ? a.dataCadastro.seconds * 1000 : Date.now());
+                const timeB = b.dataCadastro?.toMillis ? b.dataCadastro.toMillis() : (b.dataCadastro?.seconds ? b.dataCadastro.seconds * 1000 : Date.now());
+                return timeB - timeA;
+            });
+
+            if (counter) counter.textContent = clientes.length;
+
+            if (clientes.length === 0) {
+                container.innerHTML = '<div class="empty-state">Nenhum cliente cadastrado ainda. Use a aba "Formulário de Cadastro" ou o QR Code no celular para cadastrar o primeiro!</div>';
+                return;
+            }
+
+            container.innerHTML = clientes.map(cliente => {
+                // Formatação da data
+                let dataFormatada = 'Agora mesmo';
+                if (cliente.dataCadastro && cliente.dataCadastro.toDate) {
+                    dataFormatada = cliente.dataCadastro.toDate().toLocaleString('pt-BR', {
+                        day: '2-digit', month: '2-digit', year: 'numeric',
+                        hour: '2-digit', minute: '2-digit'
+                    });
+                }
+
+                // Lista de veículos em badges
+                const veiculosHtml = (cliente.veiculos && cliente.veiculos.length > 0)
+                    ? cliente.veiculos.map(v => `
+                        <div class="vehicle-pill">
+                            🚗 <strong>${v.marca} ${v.modelo}</strong> (${v.cor}) • Placa: <strong>${v.placa || 'S/P'}</strong>
+                        </div>
+                    `).join('')
+                    : '<span style="font-size: 12px; color: #6B7280;">Nenhum veículo registrado</span>';
+
+                return `
+                    <div class="client-card">
+                        <div class="client-card-header">
+                            <div>
+                                <div class="client-card-name">${escapeHtml(cliente.nome || 'Cliente sem nome')}</div>
+                                <div style="font-size: 12px; color: #00A3FF; margin-top: 2px;">
+                                    ${escapeHtml(cliente.empresa || 'Lava-Jato')}
+                                </div>
+                            </div>
+                            <div class="client-card-time">🕒 ${dataFormatada}</div>
+                        </div>
+
+                        <div class="client-info-row">
+                            <span>📞 Telefone:</span> <strong>${escapeHtml(cliente.telefone || 'Não informado')}</strong>
+                        </div>
+                        <div class="client-info-row">
+                            <span>📍 Endereço:</span> ${escapeHtml(cliente.endereco || '')} - ${escapeHtml(cliente.bairro || '')}, ${escapeHtml(cliente.cidade || '')}/${escapeHtml(cliente.estado || '')} (CEP: ${escapeHtml(cliente.cep || '')})
+                        </div>
+
+                        <div class="vehicles-pill-list">
+                            ${veiculosHtml}
+                        </div>
+
+                        <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #374151; display: flex; justify-content: flex-end;">
+                            <button type="button" class="btn-thermal-print" onclick="imprimirReciboPorId('${cliente.id}')">
+                                🖨️ Imprimir Recibo Térmico (80mm)
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+        }, (error) => {
+            console.error('Erro no snapshot do Firestore:', error);
+            document.getElementById('connectionStatus').textContent = 'Erro Firestore';
+            document.getElementById('connectionStatus').style.color = '#EF4444';
+            container.innerHTML = `<div class="empty-state" style="color: #EF4444;">Erro na escuta em tempo real: ${error.message}</div>`;
+        });
+    }
+
+    // Auxiliar anti-XSS para segurança da renderização
+    function escapeHtml(text) {
+        if (!text) return '';
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+</script>
+
+</body>
+</html>

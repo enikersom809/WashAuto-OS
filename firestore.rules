@@ -52,6 +52,11 @@ service cloud.firestore {
       allow get, list, create, update, delete: if isValidId(clientId);
     }
 
+    // 3.1 Raiz: Clientes em tempo real (Coleção 'clientes' compatível com formulário e mobile)
+    match /clientes/{clienteId} {
+      allow read, write: if true;
+    }
+
     // 4. Raiz: Empresas (Busca pelo PWA e QR Code)
     match /empresas/{empresaId} {
       allow get, list, create, update, delete: if isValidId(empresaId);
