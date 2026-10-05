@@ -26,10 +26,14 @@ import {
   ShoppingBag,
   Search,
   Loader2,
-  QrCode
+  QrCode,
+  Car,
+  Printer,
+  Receipt
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { TenantQRCode } from './TenantQRCode';
+import { saveTenantToFirestore } from '../lib/firebaseService';
 
 interface StaffMember {
   id: string;
@@ -96,8 +100,80 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
   const [isSearchingCnpj, setIsSearchingCnpj] = useState(false);
   const [isSearchingCep, setIsSearchingCep] = useState(false);
 
-  // Logo URL
+  // Logo URL & Image Upload
   const [logoUrl, setLogoUrl] = useState(tenant.logoUrl || '');
+  const [isProcessingLogo, setIsProcessingLogo] = useState(false);
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+
+  // File Upload with automatic Canvas compression
+  const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setLogoUploadError('Por favor, selecione um arquivo de imagem válido (PNG, JPG, SVG, WebP).');
+      return;
+    }
+
+    setIsProcessingLogo(true);
+    setLogoUploadError(null);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      if (!result) {
+        setIsProcessingLogo(false);
+        return;
+      }
+
+      if (file.type.includes('svg')) {
+        setLogoUrl(result);
+        setIsProcessingLogo(false);
+        showNotification('✨ Logotipo SVG carregado com sucesso!');
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        const MAX_WIDTH = 450;
+        const MAX_HEIGHT = 450;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width);
+        canvas.height = Math.round(height);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const compressed = canvas.toDataURL('image/png', 0.9);
+          setLogoUrl(compressed);
+          showNotification('✨ Logotipo otimizado e carregado com sucesso!');
+        } else {
+          setLogoUrl(result);
+        }
+        setIsProcessingLogo(false);
+      };
+      img.onerror = () => {
+        setIsProcessingLogo(false);
+        setLogoUploadError('Falha ao processar o arquivo de imagem.');
+      };
+      img.src = result;
+    };
+    reader.readAsDataURL(file);
+  };
 
   // Password Management
   const [currentPassword, setCurrentPassword] = useState('');
@@ -255,14 +331,19 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
   };
 
   // Save Logo
-  const handleSaveLogo = (e: React.FormEvent) => {
+  const handleSaveLogo = async (e: React.FormEvent) => {
     e.preventDefault();
     const updated: Tenant = {
       ...tenant,
       logoUrl: logoUrl.trim() || undefined
     };
     onUpdateTenantDetails(updated);
-    showNotification('✅ Logotipo da empresa atualizado com sucesso!');
+    try {
+      await saveTenantToFirestore(updated);
+    } catch (err) {
+      console.warn('Erro ao sincronizar logo no Firestore:', err);
+    }
+    showNotification('✅ Logotipo salvo e sincronizado! Ele já aparece no cabeçalho e nos comprovantes.');
   };
 
   // Save Password Change
@@ -1140,52 +1221,201 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
 
       {/* ================= ABA 5: LOGO DA EMPRESA ================= */}
       {subTab === 'logo' && (
-        <form onSubmit={handleSaveLogo} className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 space-y-6 max-w-2xl">
-          <div className="border-b border-[#1e293b] pb-4">
-            <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
-              <ImageIcon className="w-4 h-4 text-blue-400" />
-              Identidade Visual & Logotipo da Empresa
-            </h3>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Personalize o logotipo exibido no cabeçalho do Painel Operacional e no Portal do Cliente.
-            </p>
-          </div>
-
-          <div className="space-y-4 text-xs">
+        <form onSubmit={handleSaveLogo} className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 space-y-6">
+          <div className="border-b border-[#1e293b] pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <label className="block text-slate-300 font-bold mb-1">URL da Imagem do Logotipo</label>
-              <input
-                type="url"
-                placeholder="https://exemplo.com/logo-empresa.png"
-                value={logoUrl}
-                onChange={(e) => setLogoUrl(e.target.value)}
-                className="w-full bg-[#020617] border border-[#1e293b] rounded-xl p-3 text-slate-200 font-mono focus:outline-none focus:border-blue-500"
-              />
-            </div>
-
-            {/* Preview do Logo */}
-            <div className="p-4 bg-[#020617] border border-[#1e293b] rounded-xl flex items-center gap-4">
-              <div className="w-16 h-16 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center overflow-hidden shrink-0">
-                {logoUrl ? (
-                  <img src={logoUrl} alt="Logo Preview" className="w-full h-full object-cover" />
-                ) : (
-                  <Building2 className="w-8 h-8 text-slate-600" />
-                )}
-              </div>
-              <div>
-                <h4 className="font-bold text-slate-200">{nomeFantasia || tenant.name}</h4>
-                <p className="text-slate-500 text-[11px]">
-                  {logoUrl ? 'Pré-visualização do logotipo carregado com sucesso.' : 'Nenhum logotipo customizado configurado ainda.'}
-                </p>
-              </div>
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <ImageIcon className="w-5 h-5 text-blue-400" />
+                Identidade Visual & Logotipo Individual do Lava-Jato
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Faça o upload da imagem ou informe a URL da logo. Ela é exibida automaticamente no topo do Painel, no Totem QR Code e no <strong className="text-slate-200">Recibo/Comprovante de Atendimento</strong>.
+              </p>
             </div>
 
             <button
               type="submit"
-              className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl font-bold transition shadow-lg shadow-blue-600/25 flex items-center gap-2 cursor-pointer"
+              disabled={isProcessingLogo}
+              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-bold transition shadow-lg shadow-blue-600/25 flex items-center gap-2 cursor-pointer self-start sm:self-auto shrink-0"
             >
               <Save className="w-4 h-4" /> Salvar Logotipo
             </button>
+          </div>
+
+          {logoUploadError && (
+            <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{logoUploadError}</span>
+            </div>
+          )}
+
+          {/* Seletor de Arquivo e URL */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-xs">
+            {/* Opção 1: Upload Direto do Dispositivo */}
+            <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="font-bold text-slate-200 flex items-center gap-2">
+                  <Upload className="w-4 h-4 text-blue-400" /> Fazer Upload de Imagem
+                </label>
+                <span className="text-[10px] text-slate-500">PNG, JPG, SVG ou WebP</span>
+              </div>
+              <p className="text-slate-400 text-[11px]">
+                Selecione o arquivo da logo no seu computador ou celular. A imagem é otimizada e salva diretamente no sistema.
+              </p>
+
+              <div className="pt-2">
+                <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-700 hover:border-blue-500 rounded-xl p-6 cursor-pointer bg-slate-900/50 hover:bg-slate-900 transition group">
+                  <Upload className="w-8 h-8 text-slate-400 group-hover:text-blue-400 transition mb-2" />
+                  <span className="font-bold text-slate-300 group-hover:text-white text-xs">
+                    {isProcessingLogo ? 'Processando imagem...' : 'Clique para selecionar a imagem'}
+                  </span>
+                  <span className="text-[10px] text-slate-500 mt-1">Recomendado formato quadrado ou retangular</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleLogoFileUpload}
+                    className="hidden"
+                    disabled={isProcessingLogo}
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* Opção 2: Inserir Link Direto (URL) */}
+            <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-5 space-y-3 flex flex-col justify-between">
+              <div>
+                <label className="font-bold text-slate-200 flex items-center gap-2 mb-1">
+                  <Search className="w-4 h-4 text-blue-400" /> Ou informe a URL da Imagem
+                </label>
+                <p className="text-slate-400 text-[11px] mb-3">
+                  Caso sua logo já esteja hospedada na web ou em CDN, cole o link direto abaixo:
+                </p>
+                <input
+                  type="url"
+                  placeholder="https://exemplo.com/minha-logo.png"
+                  value={logoUrl}
+                  onChange={(e) => setLogoUrl(e.target.value)}
+                  className="w-full bg-[#0f172a] border border-[#1e293b] rounded-xl p-3 text-slate-200 font-mono focus:outline-none focus:border-blue-500 text-xs"
+                />
+              </div>
+
+              {logoUrl && (
+                <div className="pt-3 border-t border-[#1e293b] flex items-center justify-between">
+                  <span className="text-emerald-400 text-[11px] font-medium flex items-center gap-1.5">
+                    <CheckCircle className="w-3.5 h-3.5" /> Logotipo ativo carregado
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLogoUrl('');
+                      showNotification('Logotipo removido. Clique em "Salvar Logotipo" para confirmar.');
+                    }}
+                    className="text-rose-400 hover:text-rose-300 text-xs flex items-center gap-1 font-medium transition cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> Remover Logotipo
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ================= SEÇÃO DE PRÉ-VISUALIZAÇÕES ================= */}
+          <div className="pt-4 border-t border-[#1e293b]">
+            <h4 className="text-sm font-bold text-slate-200 mb-1 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-cyan-400" /> Pré-Visualização em Tempo Real da Logo
+            </h4>
+            <p className="text-xs text-slate-400 mb-4">
+              Veja exatamente como a sua logo será apresentada nas diferentes telas e no comprovante oficial:
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Preview 1: Cabeçalho Operacional */}
+              <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 block mb-2">
+                    1. Cabeçalho da Empresa
+                  </span>
+                  <div className="bg-[#0f172a] border border-[#1e293b] rounded-lg p-3 flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                      {logoUrl ? (
+                        <img src={logoUrl} alt="Logo" className="w-full h-full object-contain" />
+                      ) : (
+                        <Car className="w-5 h-5 text-slate-400" />
+                      )}
+                    </div>
+                    <div className="overflow-hidden">
+                      <div className="font-bold text-xs text-slate-200 truncate">{nomeFantasia || tenant.name}</div>
+                      <div className="text-[10px] text-slate-400 truncate">Painel Operacional Ativo</div>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-2">Visível para os operadores no dia a dia.</p>
+              </div>
+
+              {/* Preview 2: RECIBO / COMPROVANTE DE LAVAGEM */}
+              <div className="bg-white text-slate-900 border-2 border-slate-300 rounded-xl p-4 shadow-md flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between pb-1.5 border-b border-dashed border-slate-300 mb-2">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-700">
+                      2. Recibo / Comprovante Oficial
+                    </span>
+                    <Printer className="w-3.5 h-3.5 text-slate-600" />
+                  </div>
+
+                  {/* Topo do Recibo com a Logo */}
+                  <div className="text-center py-1">
+                    {logoUrl ? (
+                      <div className="w-14 h-14 mx-auto rounded-lg bg-slate-100 border border-slate-300 p-1 flex items-center justify-center overflow-hidden mb-1.5 shadow-sm">
+                        <img src={logoUrl} alt="Logo Recibo" className="w-full h-full object-contain" />
+                      </div>
+                    ) : (
+                      <div className="w-10 h-10 mx-auto rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold text-xs mb-1.5">
+                        {tenant.code || 'LJ'}
+                      </div>
+                    )}
+                    <div className="font-extrabold text-xs text-slate-950 leading-tight">{nomeFantasia || tenant.name}</div>
+                    {cnpj && <div className="text-[9px] text-slate-600 font-mono">CNPJ: {cnpj}</div>}
+                    <div className="text-[9px] text-emerald-700 font-bold mt-1">✓ COMPROVANTE DE ATENDIMENTO</div>
+                  </div>
+
+                  {/* Resumo do Recibo */}
+                  <div className="bg-slate-50 border border-slate-200 rounded p-2 text-[10px] space-y-1 mt-2 font-mono">
+                    <div className="flex justify-between"><span>Placa:</span><strong>ABC-1234</strong></div>
+                    <div className="flex justify-between"><span>Serviço:</span><span>Lavagem Geral</span></div>
+                    <div className="flex justify-between border-t border-slate-300 pt-1 font-bold text-slate-900">
+                      <span>Total Pago:</span><span className="text-emerald-700">R$ 55,00</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-[9px] text-slate-500 text-center mt-2 border-t border-dashed border-slate-300 pt-1">
+                  Impresso ou enviado no WhatsApp do cliente com a sua logo!
+                </div>
+              </div>
+
+              {/* Preview 3: Totem / QR Code do Cliente */}
+              <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block mb-2">
+                    3. Placa do Totem & QR Code
+                  </span>
+                  <div className="bg-white text-slate-900 rounded-lg p-3 text-center border border-slate-300 shadow-sm">
+                    {logoUrl ? (
+                      <div className="w-10 h-10 mx-auto rounded-lg bg-slate-100 border border-slate-200 p-0.5 flex items-center justify-center overflow-hidden mb-1">
+                        <img src={logoUrl} alt="Logo Totem" className="w-full h-full object-contain" />
+                      </div>
+                    ) : (
+                      <div className="w-8 h-8 mx-auto rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-xs mb-1">
+                        <Car className="w-4 h-4" />
+                      </div>
+                    )}
+                    <div className="font-bold text-[11px] text-slate-900 truncate">{nomeFantasia || tenant.name}</div>
+                    <div className="text-[9px] text-slate-500">Acesse via câmera do celular</div>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-2">Exibido na placa de balcão e no portal PWA.</p>
+              </div>
+            </div>
           </div>
         </form>
       )}

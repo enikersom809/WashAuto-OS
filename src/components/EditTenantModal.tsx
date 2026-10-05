@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Pencil, Save, Trash2 } from 'lucide-react';
+import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
 
 interface EditTenantModalProps {
@@ -19,6 +19,7 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
 }) => {
   const [formData, setFormData] = useState<Tenant | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<boolean>(false);
+  const [isProcessingLogo, setIsProcessingLogo] = useState<boolean>(false);
 
   useEffect(() => {
     setFormData(tenant);
@@ -26,6 +27,56 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
   }, [tenant]);
 
   if (!isOpen || !formData) return null;
+
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !formData) return;
+
+    setIsProcessingLogo(true);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      if (!result) {
+        setIsProcessingLogo(false);
+        return;
+      }
+
+      if (file.type.includes('svg')) {
+        setFormData({ ...formData, logoUrl: result });
+        setIsProcessingLogo(false);
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 400;
+        let w = img.width;
+        let h = img.height;
+        if (w > h && w > MAX) {
+          h *= MAX / w;
+          w = MAX;
+        } else if (h > MAX) {
+          w *= MAX / h;
+          h = MAX;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(w);
+        canvas.height = Math.round(h);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const compressed = canvas.toDataURL('image/png', 0.9);
+          setFormData({ ...formData, logoUrl: compressed });
+        } else {
+          setFormData({ ...formData, logoUrl: result });
+        }
+        setIsProcessingLogo(false);
+      };
+      img.onerror = () => setIsProcessingLogo(false);
+      img.src = result;
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,6 +199,59 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
               />
             </div>
+          </div>
+
+          {/* Logotipo Individual da Empresa */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-slate-300 font-medium flex items-center gap-1.5">
+                <ImageIcon className="w-3.5 h-3.5 text-indigo-400" /> Logotipo do Lava-Jato
+              </label>
+              {formData.logoUrl && (
+                <button
+                  type="button"
+                  onClick={() => setFormData({ ...formData, logoUrl: undefined })}
+                  className="text-rose-400 hover:text-rose-300 text-[11px] cursor-pointer"
+                >
+                  Remover Logo
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-slate-950 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                {formData.logoUrl ? (
+                  <img src={formData.logoUrl} alt="Logo" className="w-full h-full object-contain" />
+                ) : (
+                  <span className="font-bold text-slate-500 text-xs">{formData.code || 'LJ'}</span>
+                )}
+              </div>
+
+              <div className="flex-1 space-y-1.5">
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-200 rounded text-xs font-semibold cursor-pointer border border-slate-700">
+                  <Upload className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>{isProcessingLogo ? 'Carregando...' : 'Fazer Upload de Imagem'}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleLogoUpload}
+                    className="hidden"
+                    disabled={isProcessingLogo}
+                  />
+                </label>
+
+                <input
+                  type="url"
+                  placeholder="Ou cole a URL direta da logo..."
+                  value={formData.logoUrl || ''}
+                  onChange={(e) => setFormData({ ...formData, logoUrl: e.target.value.trim() || undefined })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-200 text-xs font-mono focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-500">
+              A logo aparece no cabeçalho do lava-jato, no totem QR Code e no <strong className="text-slate-400">recibo de atendimento</strong>.
+            </p>
           </div>
 
           <div>

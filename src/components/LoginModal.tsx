@@ -16,10 +16,12 @@ import {
   EyeOff,
   ShieldAlert,
   Shield,
-  Key
+  Key,
+  QrCode
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
+import { QrCodeScannerModal } from './QrCodeScannerModal';
 import { 
   registerClientInFirebaseAuth, 
   loginClientInFirebaseAuth, 
@@ -45,6 +47,32 @@ interface LoginModalProps {
   onReplaySplash?: () => void;
 }
 
+// Helper to extract clean slug from typed domain or URL
+const extractDomainSlug = (input: string) => {
+  return input
+    .toLowerCase()
+    .replace('https://', '')
+    .replace('http://', '')
+    .replace('.saas.com', '')
+    .replace('.seusaas.com', '')
+    .replace(/[^a-z0-9-]/g, '')
+    .trim();
+};
+
+const getInitialSlugFromUrl = () => {
+  if (typeof window === 'undefined') return '';
+  try {
+    const searchParams = new URLSearchParams(window.location.search);
+    const qSlug = searchParams.get('empresa') || searchParams.get('slug') || searchParams.get('t') || searchParams.get('lava');
+    if (qSlug) return extractDomainSlug(qSlug);
+    const pathSeg = window.location.pathname.replace(/^\//, '').split('/')[0];
+    if (pathSeg && pathSeg !== 'index.html' && pathSeg !== '') {
+      return extractDomainSlug(pathSeg);
+    }
+  } catch (e) {}
+  return '';
+};
+
 export const LoginModal: React.FC<LoginModalProps> = ({
   isOpen = true,
   onClose,
@@ -61,12 +89,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
   
   // Login Form States
-  const [subdomain, setSubdomain] = useState('');
+  const [subdomain, setSubdomain] = useState(() => getInitialSlugFromUrl());
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // QR Code Scanner State
+  const [isQrScannerOpen, setIsQrScannerOpen] = useState(false);
+  const [qrScanTarget, setQrScanTarget] = useState<'login' | 'reg'>('login');
 
   // Security / Privacy Mode (Proteção Anti-Espiões)
   const [stealthMode, setStealthMode] = useState(true);
@@ -85,7 +117,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [regEmail, setRegEmail] = useState('');
   const [regPhone, setRegPhone] = useState('');
   const [regCompanyName, setRegCompanyName] = useState('');
-  const [regSubdomain, setRegSubdomain] = useState('');
+  const [regSubdomain, setRegSubdomain] = useState(() => getInitialSlugFromUrl());
   const [regPlan, setRegPlan] = useState<'Basic' | 'Pro' | 'Enterprise'>('Pro');
   const [regPassword, setRegPassword] = useState('');
   const [showRegPassword, setShowRegPassword] = useState(false);
@@ -94,10 +126,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   const handleTabChange = (type: LoginProfileType) => {
     setActiveTab(type);
+    if (type !== 'cliente') {
+      setIsSignUp(false);
+    }
     setErrorMessage(null);
     setIdentifier('');
     setPassword('');
-    setSubdomain('');
+    setSubdomain(getInitialSlugFromUrl());
     setAutoMatchedInfo(null);
     setIsSearchingEmail(false);
   };
@@ -108,9 +143,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setRegSubdomain(slug);
   };
 
-  // Helper to extract clean slug from typed domain or name
-  const extractDomainSlug = (input: string) => {
-    return input.toLowerCase().replace('.saas.com', '').replace('.seusaas.com', '').replace(/[^a-z0-9-]/g, '').trim();
+  const handleQrScanSuccess = (scannedSlug: string) => {
+    if (qrScanTarget === 'reg') {
+      setRegSubdomain(scannedSlug);
+    } else {
+      setSubdomain(scannedSlug);
+    }
+    setErrorMessage(null);
   };
 
   // Handler que associa automaticamente o e-mail corporativo ao subdomínio da empresa,
@@ -361,6 +400,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           lastActive: 'Agora mesmo'
         };
 
+        // Inicia novo lava-jato com dados zerados
+        localStorage.setItem(`saas_tenant_washes_${createdTenant.id}`, '[]');
+        localStorage.setItem(`saas_tenant_appointments_${createdTenant.id}`, '[]');
+        localStorage.setItem(`saas_tenant_wash_history_${createdTenant.id}`, '[]');
+
         // 🏢 Cria a empresa na coleção 'tenants' do Firestore
         await saveTenantToFirestore(createdTenant);
 
@@ -520,52 +564,53 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         {/* Card Principal de Login */}
         <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
 
-          {/* ================= 1. SELETOR DE PERFIL (TABS) ================= */}
-          <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1.5 rounded-xl border border-slate-800/80 text-xs font-bold">
-            
-            {/* Tab Cliente */}
-            <button 
-              type="button" 
-              onClick={() => handleTabChange('cliente')} 
-              className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg transition-all duration-200 ${
-                activeTab === 'cliente' 
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30 font-black' 
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <User className="w-4 h-4 mb-0.5" />
-              <span>Cliente</span>
-            </button>
+          {/* ================= 1. SELETOR DE PERFIL (TABS CLIENTE & EMPRESA) ================= */}
+          {activeTab !== 'admin' ? (
+            <div className="grid grid-cols-2 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800/80 text-xs font-bold">
+              {/* Tab Cliente */}
+              <button 
+                type="button" 
+                onClick={() => handleTabChange('cliente')} 
+                className={`flex flex-col items-center justify-center py-2.5 px-2 rounded-lg transition-all duration-200 cursor-pointer ${
+                  activeTab === 'cliente' 
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30 font-black' 
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <User className="w-4 h-4 mb-0.5" />
+                <span>Cliente</span>
+              </button>
 
-            {/* Tab Empresa */}
-            <button 
-              type="button" 
-              onClick={() => handleTabChange('empresa')} 
-              className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg transition-all duration-200 ${
-                activeTab === 'empresa' 
-                  ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30 font-black' 
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Building2 className="w-4 h-4 mb-0.5" />
-              <span>Empresa</span>
-            </button>
-
-            {/* Tab Super Admin */}
-            <button 
-              type="button" 
-              onClick={() => handleTabChange('admin')} 
-              className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg transition-all duration-200 ${
-                activeTab === 'admin' 
-                  ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 font-black' 
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <ShieldCheck className="w-4 h-4 mb-0.5" />
-              <span>Super Admin</span>
-            </button>
-
-          </div>
+              {/* Tab Empresa */}
+              <button 
+                type="button" 
+                onClick={() => handleTabChange('empresa')} 
+                className={`flex flex-col items-center justify-center py-2.5 px-2 rounded-lg transition-all duration-200 cursor-pointer ${
+                  activeTab === 'empresa' 
+                    ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30 font-black' 
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Building2 className="w-4 h-4 mb-0.5" />
+                <span>Lava-Jato / Empresa</span>
+              </button>
+            </div>
+          ) : (
+            /* Banner de Acesso Super Admin com opção de retorno */
+            <div className="flex items-center justify-between bg-indigo-950/70 border border-indigo-500/30 px-3.5 py-2.5 rounded-xl text-xs">
+              <div className="flex items-center gap-2 text-indigo-300 font-bold">
+                <ShieldCheck className="w-4 h-4 text-indigo-400" />
+                <span>Acesso Master: Super Admin</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleTabChange('empresa')}
+                className="text-[11px] text-slate-400 hover:text-white transition underline cursor-pointer"
+              >
+                ← Voltar ao login normal
+              </button>
+            </div>
+          )}
 
           {/* Indicator / Banner Dinâmico do Perfil Ativo */}
           {activeTab === 'cliente' && (
@@ -704,53 +749,34 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         <span className="ml-1.5 text-[10px] text-emerald-400 font-bold">✓ Vinculado</span>
                       )}
                     </label>
-                    <span className="text-[11px] text-blue-400 font-mono">.saas.com</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQrScanTarget('login');
+                        setIsQrScannerOpen(true);
+                      }}
+                      className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-semibold cursor-pointer transition hover:underline"
+                      title="Escanear QR Code do balcão ou totem"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>Ler QR Code</span>
+                    </button>
                   </div>
                   <div className="relative flex items-center">
                     <input 
                       type="text" 
                       value={subdomain}
                       onChange={(e) => setSubdomain(e.target.value)}
-                      placeholder="autoclean ou stark" 
+                      placeholder="Digite o domínio (Ex: autoclean)" 
                       className={`w-full bg-slate-950 border rounded-lg pl-3 pr-24 py-2.5 text-xs text-slate-100 font-bold focus:outline-none transition font-mono ${
                         autoMatchedInfo ? 'border-blue-500/50 bg-blue-950/20' : 'border-slate-800 focus:border-blue-500'
                       }`}
                     />
                     <span className="absolute right-3 text-xs text-slate-500 font-mono font-bold">.saas.com</span>
                   </div>
-
-                  {/* Informação do Lava-Jato Detectado */}
-                  {subdomain && (
-                    <div className="mt-1.5 px-2.5 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-between text-[11px]">
-                      <span className="text-slate-300 truncate">
-                        🏢 <strong>{resolveTenantByDomain(subdomain).name}</strong>
-                      </span>
-                      <span className="text-blue-400 font-mono font-bold shrink-0 ml-2">
-                        {resolveTenantByDomain(subdomain).domain}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Atalhos Rápidos de Lava-Jatos Cadastrados */}
-                  {tenants.length > 0 && (
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] text-slate-500 font-bold">Sugestões:</span>
-                      {tenants.slice(0, 4).map(t => (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => setSubdomain(extractDomainSlug(t.domain))}
-                          className={`text-[10px] px-2 py-0.5 rounded-md border transition cursor-pointer font-medium ${
-                            subdomain.toLowerCase() === extractDomainSlug(t.domain)
-                              ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
-                              : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700'
-                          }`}
-                        >
-                          {t.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <p className="text-[11px] text-slate-400 mt-1.5 flex items-center gap-1">
+                    <span>💡 Digite o domínio do lava-jato ou use o botão para ler o QR Code.</span>
+                  </p>
                 </div>
               )}
 
@@ -892,7 +918,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   type="submit" 
                   className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition shadow-lg shadow-blue-600/25 flex items-center justify-center gap-2 text-xs mt-2 cursor-pointer"
                 >
-                  <span>{subdomain ? `Acessar Portal (${resolveTenantByDomain(subdomain).name})` : 'Acessar Portal do Lava-Jato'}</span>
+                  <span>Acessar Portal do Lava-Jato</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               )}
@@ -962,49 +988,32 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <div>
                     <div className="flex justify-between items-center mb-1">
                       <label className="block text-xs font-bold text-slate-300">Domínio do Lava-Jato a Agendar *</label>
-                      <span className="text-[11px] text-blue-400 font-mono">.saas.com</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQrScanTarget('reg');
+                          setIsQrScannerOpen(true);
+                        }}
+                        className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-semibold cursor-pointer transition hover:underline"
+                        title="Escanear QR Code da placa ou totem"
+                      >
+                        <QrCode className="w-3.5 h-3.5" />
+                        <span>Ler QR Code</span>
+                      </button>
                     </div>
                     <div className="relative flex items-center">
                       <input 
                         type="text" 
                         value={regSubdomain}
                         onChange={(e) => setRegSubdomain(e.target.value)}
-                        placeholder="autoclean ou nomedolavajato" 
+                        placeholder="Digite o domínio (Ex: autoclean)" 
                         className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-24 py-2.5 text-xs text-slate-100 font-bold focus:outline-none focus:border-blue-500 transition font-mono"
                       />
                       <span className="absolute right-3 text-xs text-slate-500 font-mono font-bold">.saas.com</span>
                     </div>
-
-                    {/* Live Match Preview */}
-                    <div className="mt-1.5 px-2.5 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-between text-[11px]">
-                      <span className="text-slate-300 truncate">
-                        🎯 Abrirá o portal: <strong>{resolveTenantByDomain(regSubdomain || 'autoclean').name}</strong>
-                      </span>
-                      <span className="text-blue-400 font-mono font-bold shrink-0 ml-2">
-                        {resolveTenantByDomain(regSubdomain || 'autoclean').domain}
-                      </span>
-                    </div>
-
-                    {/* Quick Tenant Choice */}
-                    {tenants.length > 0 && (
-                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        <span className="text-[10px] text-slate-500 font-bold">Lava-Jatos:</span>
-                        {tenants.slice(0, 4).map(t => (
-                          <button
-                            key={t.id}
-                            type="button"
-                            onClick={() => setRegSubdomain(extractDomainSlug(t.domain))}
-                            className={`text-[10px] px-2 py-0.5 rounded-md border transition cursor-pointer font-medium ${
-                              extractDomainSlug(regSubdomain) === extractDomainSlug(t.domain)
-                                ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
-                                : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
-                            }`}
-                          >
-                            {t.name}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    <p className="text-[11px] text-slate-400 mt-1.5 flex items-center gap-1">
+                      <span>💡 Digite o domínio fornecido pelo seu lava-jato ou leia o QR Code no balcão da empresa.</span>
+                    </p>
                   </div>
 
                   <div>
@@ -1050,7 +1059,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       </>
                     ) : (
                       <>
-                        <span>Criar Minha Conta & Abrir Portal ({resolveTenantByDomain(regSubdomain || 'autoclean').name})</span>
+                        <span>Criar Minha Conta & Acessar</span>
                         <Sparkles className="w-4 h-4" />
                       </>
                     )}
@@ -1249,45 +1258,71 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
           {/* Rodapé do Card */}
           <div className="pt-4 border-t border-slate-800/80 text-center text-xs text-slate-400 font-medium">
-            {!isSignUp ? (
-              <span>
-                Ainda não tem uma conta?{' '}
-                <button 
-                  type="button" 
-                  onClick={() => { setIsSignUp(true); setErrorMessage(null); }} 
-                  className="text-blue-400 font-bold hover:underline bg-transparent border-0 cursor-pointer"
-                >
-                  Cadastre-se grátis
-                </button>
-              </span>
+            {activeTab === 'admin' ? (
+              <button 
+                type="button" 
+                onClick={() => handleTabChange('empresa')} 
+                className="text-indigo-400 font-bold hover:underline bg-transparent border-0 cursor-pointer"
+              >
+                ← Voltar para Acesso Cliente / Empresa
+              </button>
+            ) : activeTab === 'cliente' ? (
+              !isSignUp ? (
+                <span>
+                  Ainda não tem uma conta?{' '}
+                  <button 
+                    type="button" 
+                    onClick={() => { setIsSignUp(true); setErrorMessage(null); }} 
+                    className="text-blue-400 font-bold hover:underline bg-transparent border-0 cursor-pointer"
+                  >
+                    Cadastre-se grátis
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  Já possui uma conta?{' '}
+                  <button 
+                    type="button" 
+                    onClick={() => { setIsSignUp(false); setErrorMessage(null); }} 
+                    className="text-emerald-400 font-bold hover:underline bg-transparent border-0 cursor-pointer"
+                  >
+                    Faça login aqui
+                  </button>
+                </span>
+              )
             ) : (
-              <span>
-                Já possui uma conta?{' '}
-                <button 
-                  type="button" 
-                  onClick={() => { setIsSignUp(false); setErrorMessage(null); }} 
-                  className="text-emerald-400 font-bold hover:underline bg-transparent border-0 cursor-pointer"
-                >
-                  Faça login aqui
-                </button>
+              <span className="text-[11px] text-slate-500">
+                🔒 Acesso exclusivo para empresas cadastradas. Utilize a senha temporária fornecida pelo administrador.
               </span>
             )}
           </div>
 
         </div>
 
-        {/* Botão para Rever Apresentação (Splash Screen 5s) */}
-        {onReplaySplash && (
-          <div className="mt-4 flex justify-center">
+        {/* Link no Rodapé: Entrar com a conta do super admin (somente visível para quem procura acesso administrativo) */}
+        {activeTab !== 'admin' && (
+          <div className="mt-5 text-center">
             <button
               type="button"
-              onClick={onReplaySplash}
-              className="text-xs text-slate-400 hover:text-cyan-400 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/60 border border-slate-800 hover:border-cyan-500/30 transition-all cursor-pointer shadow-sm"
+              onClick={() => {
+                handleTabChange('admin');
+                setIsSignUp(false);
+              }}
+              className="text-xs text-slate-500 hover:text-slate-300 transition-colors inline-flex items-center gap-1.5 hover:underline cursor-pointer py-1.5 px-3 rounded-lg hover:bg-slate-900/60 border border-transparent hover:border-slate-800"
+              title="Acesso restrito ao Painel Master"
             >
-              <span>🎬 Rever Tela de Apresentação (Splash 5s)</span>
+              <ShieldCheck className="w-3.5 h-3.5 text-slate-500" />
+              <span>Entrar com a conta do super admin</span>
             </button>
           </div>
         )}
+
+        {/* Modal de Leitura de QR Code */}
+        <QrCodeScannerModal
+          isOpen={isQrScannerOpen}
+          onClose={() => setIsQrScannerOpen(false)}
+          onScanSuccess={handleQrScanSuccess}
+        />
 
       </div>
 

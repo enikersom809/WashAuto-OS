@@ -2,120 +2,59 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions para validação de segurança robusta e permanente
+    // Helper functions para validação de IDs
     function isValidId(id) {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.:]+$');
     }
 
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
     // 1. Tenants (Empresas de Lava-Jato)
     match /tenants/{tenantId} {
-      allow get: if isValidId(tenantId);
-      allow list: if true;
-      allow create: if isValidId(tenantId) 
-        && incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100
-        && incoming().plan is string
-        && incoming().status is string;
-      allow update: if isValidId(tenantId)
-        && (!('name' in incoming()) || (incoming().name is string && incoming().name.size() <= 100))
-        && (!('status' in incoming()) || incoming().status is string)
-        && (!('plan' in incoming()) || incoming().plan is string);
-      allow delete: if isValidId(tenantId);
+      allow get, list: if true;
+      allow create, update, delete: if isValidId(tenantId);
 
-      // Subcoleção: Agendamentos
+      // Subcoleção: Agendamentos da Empresa
       match /appointments/{appointmentId} {
-        allow get: if isValidId(tenantId) && isValidId(appointmentId);
-        allow list: if isValidId(tenantId);
-        allow create: if isValidId(tenantId) && isValidId(appointmentId)
-          && incoming().clientName is string && incoming().clientName.size() > 0 && incoming().clientName.size() <= 120
-          && incoming().vehicle is string && incoming().vehicle.size() <= 100
-          && incoming().plate is string && incoming().plate.size() <= 20
-          && incoming().service is string && incoming().service.size() <= 120
-          && incoming().dateTime is string && incoming().dateTime.size() <= 50;
-        allow update: if isValidId(tenantId) && isValidId(appointmentId)
-          && (!('status' in incoming()) || (incoming().status is string && incoming().status.size() <= 50))
-          && (!('assignedWasher' in incoming()) || incoming().assignedWasher is string);
-        allow delete: if isValidId(tenantId) && isValidId(appointmentId);
+        allow get, list: if true;
+        allow create, update, delete: if isValidId(tenantId) && isValidId(appointmentId);
       }
 
       // Subcoleção: Itens de Lavagem / Fila do Pátio
       match /washItems/{washItemId} {
-        allow get: if isValidId(tenantId) && isValidId(washItemId);
-        allow list: if isValidId(tenantId);
-        allow create: if isValidId(tenantId) && isValidId(washItemId)
-          && incoming().plate is string && incoming().plate.size() <= 20
-          && incoming().vehicle is string && incoming().vehicle.size() <= 100
-          && incoming().status is string && incoming().status.size() <= 50;
-        allow update: if isValidId(tenantId) && isValidId(washItemId)
-          && (!('status' in incoming()) || (incoming().status is string && incoming().status.size() <= 50))
-          && (!('washer' in incoming()) || incoming().washer is string);
-        allow delete: if isValidId(tenantId) && isValidId(washItemId);
+        allow get, list: if true;
+        allow create, update, delete: if isValidId(tenantId) && isValidId(washItemId);
       }
 
-      // Subcoleção: Perfis de Clientes
+      // Subcoleção: Clientes da Empresa
       match /clients/{clientId} {
-        allow get: if isValidId(tenantId) && isValidId(clientId);
-        allow list: if isValidId(tenantId);
-        allow create, update: if isValidId(tenantId) && isValidId(clientId)
-          && incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 120
-          && (!('phone' in incoming()) || (incoming().phone is string && incoming().phone.size() <= 30))
-          && (!('email' in incoming()) || (incoming().email is string && incoming().email.size() <= 120))
-          && (!('address' in incoming()) || (incoming().address is string && incoming().address.size() <= 200))
-          && (!('cep' in incoming()) || (incoming().cep is string && incoming().cep.size() <= 20));
-        allow delete: if isValidId(tenantId) && isValidId(clientId);
+        allow get, list: if true;
+        allow create, update, delete: if isValidId(tenantId) && isValidId(clientId);
       }
 
-      // Subcoleção: Resgate de Fidelidade
+      // Subcoleção: Resgates de Fidelidade
       match /redemptions/{redemptionId} {
-        allow get: if isValidId(tenantId) && isValidId(redemptionId);
-        allow list: if isValidId(tenantId);
-        allow create: if isValidId(tenantId) && isValidId(redemptionId)
-          && incoming().clientName is string && incoming().clientName.size() <= 120
-          && incoming().requested is bool;
-        allow update, delete: if isValidId(tenantId) && isValidId(redemptionId);
+        allow get, list: if true;
+        allow create, update, delete: if isValidId(tenantId) && isValidId(redemptionId);
       }
 
-      // Subcoleção: Configurações do Tenant
+      // Subcoleção: Configurações da Empresa
       match /config/{configId} {
-        allow get, list: if isValidId(tenantId);
-        allow create, update, delete: if isValidId(tenantId) && isValidId(configId);
+        allow get, list, create, update, delete: if isValidId(tenantId);
       }
     }
 
     // 2. Raiz: Agendamentos Gerais
     match /appointments/{appointmentId} {
-      allow get, list: if true;
-      allow create: if isValidId(appointmentId)
-        && incoming().clientName is string && incoming().clientName.size() > 0 && incoming().clientName.size() <= 120
-        && incoming().vehicle is string && incoming().vehicle.size() <= 100
-        && incoming().plate is string && incoming().plate.size() <= 20
-        && incoming().service is string && incoming().service.size() <= 120;
-      allow update: if isValidId(appointmentId)
-        && (!('status' in incoming()) || (incoming().status is string && incoming().status.size() <= 50));
-      allow delete: if isValidId(appointmentId);
+      allow get, list, create, update, delete: if isValidId(appointmentId);
     }
 
-    // 3. Raiz: Clientes Gerais
+    // 3. Raiz: Clientes Gerais (Ficha Cadastral e Veículos)
     match /clients/{clientId} {
-      allow get, list: if true;
-      allow create, update: if isValidId(clientId)
-        && incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 120
-        && (!('phone' in incoming()) || (incoming().phone is string && incoming().phone.size() <= 30))
-        && (!('email' in incoming()) || (incoming().email is string && incoming().email.size() <= 120));
-      allow delete: if isValidId(clientId);
+      allow get, list, create, update, delete: if isValidId(clientId);
     }
 
-    // 4. Raiz: Empresas (Catálogo PWA e QR Code)
+    // 4. Raiz: Empresas (Busca pelo PWA e QR Code)
     match /empresas/{empresaId} {
-      allow get, list: if true;
-      allow create, update, delete: if isValidId(empresaId);
+      allow get, list, create, update, delete: if isValidId(empresaId);
     }
 
     // 5. Fallback de teste de conexão

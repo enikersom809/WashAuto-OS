@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { LogOut } from 'lucide-react';
 import { 
   INITIAL_TENANTS, 
   INITIAL_PLANS, 
@@ -30,7 +31,8 @@ import {
   saveTenantToFirestore, 
   deleteTenantFromFirestore, 
   subscribeToTenantsFirestore,
-  saveCompanyEmailMapping 
+  saveCompanyEmailMapping,
+  syncAllLocalTenantsToFirestore
 } from './lib/firebaseService';
 
 export type AuthSession = 
@@ -141,6 +143,14 @@ export default function App() {
       }
     });
     return () => unsubscribe();
+  }, []);
+
+  // Sincronização inicial automática: caso o usuário já tenha cadastrado empresas no navegador
+  // que ainda não subiram para o Firestore (/tenants)
+  useEffect(() => {
+    if (tenants.length > 0) {
+      syncAllLocalTenantsToFirestore(tenants);
+    }
   }, []);
 
   useEffect(() => {
@@ -314,6 +324,50 @@ export default function App() {
       {/* 2. TELA PRINCIPAL (DASHBOARD): Fade-in suave de entrada */}
       <div className={`w-full min-h-screen transition-opacity duration-700 ${showSplash ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
         
+        {/* Barra Superior Oficial: WashAuto OS */}
+        <div className="bg-[#0B0F19] border-b border-[#1F2937] px-4 py-2.5 flex items-center justify-between sticky top-0 z-50">
+          <div className="flex items-center gap-2.5">
+            <img 
+              src="/logo.png" 
+              alt="WashAuto OS" 
+              onError={(e) => {
+                const target = e.currentTarget as HTMLImageElement;
+                if (target.src !== window.location.origin + '/logo.png') {
+                  target.src = '/logo.png';
+                }
+              }}
+              className="w-6 h-6 rounded-lg object-contain bg-slate-900 border border-cyan-500/30 p-0.5"
+            />
+            <span className="text-sm font-bold tracking-tight text-white flex items-center gap-2">
+              WashAuto OS
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            {authSession?.role === 'cliente' && authSession.tenant && (
+              <span className="text-[11px] text-cyan-400 font-medium bg-cyan-500/10 px-2.5 py-0.5 rounded-full border border-cyan-500/20">
+                {authSession.tenant.name}
+              </span>
+            )}
+            {authSession?.role === 'empresa' && authSession.tenant && (
+              <span className="text-[11px] text-blue-400 font-medium bg-blue-500/10 px-2.5 py-0.5 rounded-full border border-blue-500/20">
+                {authSession.tenant.nomeFantasia || authSession.tenant.name}
+              </span>
+            )}
+            {authSession && (
+              <button
+                onClick={() => setAuthSession(null)}
+                className="text-[11px] text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 px-2 py-1 rounded transition flex items-center gap-1 cursor-pointer font-medium"
+                title="Sair / Trocar de perfil"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Sair</span>
+              </button>
+            )}
+          </div>
+        </div>
+        
         {/* 2.1 MODO LOGIN / SELEÇÃO DE PERFIL */}
         {!authSession && (
           <LoginModal
@@ -397,6 +451,7 @@ export default function App() {
             onUpdateTenant={(updated) => {
               setTenants(prev => prev.map(t => t.id === updated.id ? updated : t));
               setAuthSession(prev => prev ? { ...prev, tenant: updated } : null);
+              saveTenantToFirestore(updated).catch(console.error);
             }}
           />
         )}
@@ -502,6 +557,19 @@ export default function App() {
         isOpen={isNewTenantModalOpen}
         onClose={() => setIsNewTenantModalOpen(false)}
         onAddTenant={handleAddTenant}
+        onTestClientPortal={(tenant) => {
+          setTenants(prev => prev.some(t => t.id === tenant.id) ? prev : [tenant, ...prev]);
+          setAuthSession({
+            role: 'cliente',
+            tenant,
+            clientInfo: {
+              name: 'Cliente Teste',
+              phone: '(11) 98765-4321',
+              email: 'cliente@exemplo.com'
+            },
+            userEmail: 'cliente@exemplo.com'
+          });
+        }}
       />
 
       {/* Modal Editar Empresa */}

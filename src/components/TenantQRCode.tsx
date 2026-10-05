@@ -152,9 +152,15 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
         >
           {/* Header da Placa */}
           <div className="flex items-center justify-center gap-2 mb-4">
-            <div className="w-10 h-10 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-md">
-              <Car className="w-5 h-5" />
-            </div>
+            {empresa.logoUrl ? (
+              <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-200 p-1 flex items-center justify-center shadow-md overflow-hidden">
+                <img src={empresa.logoUrl} alt={empresa.nome} className="w-full h-full object-contain" />
+              </div>
+            ) : (
+              <div className="w-10 h-10 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-md">
+                <Car className="w-5 h-5" />
+              </div>
+            )}
             <span className="text-[11px] font-black uppercase tracking-widest text-blue-600">
               Lava-Jato Inteligente
             </span>

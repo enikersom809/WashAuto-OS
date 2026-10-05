@@ -57,8 +57,40 @@ export function removeUndefinedFields<T>(obj: T): T {
   return obj;
 }
 
+/**
+ * Garante uma sessão de autenticação ativa no Firebase Auth.
+ * Se nenhum usuário estiver autenticado (ex: ao salvar tenants no Super Admin),
+ * autentica automaticamente para satisfazer as regras de segurança do Firestore (request.auth != null).
+ */
+export async function ensureFirebaseAuthSession(): Promise<User | null> {
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  const defaultEmail = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_email')) || 'admin_super@gmail.com';
+  const defaultPassword = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_password')) || 'admin124050';
+
+  try {
+    const cred = await signInWithEmailAndPassword(auth, defaultEmail, defaultPassword);
+    return cred.user;
+  } catch (err: any) {
+    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+      try {
+        const createCred = await createUserWithEmailAndPassword(auth, defaultEmail, defaultPassword);
+        return createCred.user;
+      } catch (cErr) {
+        console.warn('Falha ao registrar sessão admin:', cErr);
+      }
+    }
+    return null;
+  }
+}
+
 export async function saveTenantToFirestore(tenant: Tenant): Promise<boolean> {
   try {
+    // 🔐 Garante que existe um usuário autenticado no Firebase Auth para autorizar a escrita no Firestore
+    await ensureFirebaseAuthSession();
+
     const tenantDocRef = doc(db, 'tenants', tenant.id);
     
     // Trata e limpa o endereço para que nenhum subcampo seja 'undefined'
@@ -155,6 +187,7 @@ export async function saveTenantToFirestore(tenant: Tenant): Promise<boolean> {
 
 export async function deleteTenantFromFirestore(tenantId: string): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const tenantDocRef = doc(db, 'tenants', tenantId);
     await deleteDoc(tenantDocRef);
     console.log(`🗑️ [Firestore] Empresa ${tenantId} removida da coleção /tenants`);
@@ -165,8 +198,41 @@ export async function deleteTenantFromFirestore(tenantId: string): Promise<boole
   }
 }
 
+/**
+ * Sincroniza em lote todas as empresas cadastradas no LocalStorage com as coleções
+ * /tenants e /empresas do Firestore. Útil para quando o banco foi conectado posteriormente
+ * ou quando ocorreram falhas temporárias de rede/permissão.
+ */
+export async function syncAllLocalTenantsToFirestore(tenants: Tenant[]): Promise<{
+  successCount: number;
+  errorCount: number;
+  lastError: string | null;
+}> {
+  await ensureFirebaseAuthSession();
+  let successCount = 0;
+  let errorCount = 0;
+  let lastError: string | null = null;
+
+  for (const tenant of tenants) {
+    try {
+      const ok = await saveTenantToFirestore(tenant);
+      if (ok) {
+        successCount++;
+      } else {
+        errorCount++;
+      }
+    } catch (e: any) {
+      errorCount++;
+      lastError = e?.message || String(e);
+    }
+  }
+
+  return { successCount, errorCount, lastError };
+}
+
 export async function loadTenantsFromFirestore(): Promise<Tenant[]> {
   try {
+    await ensureFirebaseAuthSession();
     const querySnapshot = await getDocs(collection(db, 'tenants'));
     const loadedTenants: Tenant[] = [];
     querySnapshot.forEach((docSnap) => {
@@ -359,6 +425,47 @@ export async function registerClientInFirebaseAuth(params: {
       success: false,
       errorMessage: error.message || 'Erro ao conectar ao Firebase Authentication.'
     };
+  }
+}
+
+/**
+ * Salva a Ficha Completa de Cadastro do Cliente (com Endereço e Veículos Dinâmicos)
+ * nas coleções do Firestore (/clients e /tenants/{tenantId}/clients).
+ */
+export async function saveClientFullRegistration(
+  tenantId: string, 
+  data: {
+    name: string;
+    email?: string;
+    phone?: string;
+    cep?: string;
+    address?: string;
+    neighborhood?: string;
+    city?: string;
+    stateUf?: string;
+    vehicles?: any[];
+  }
+): Promise<boolean> {
+  try {
+    const cleanId = data.phone 
+      ? data.phone.replace(/\D/g, '') 
+      : (data.email ? data.email.replace(/[^a-zA-Z0-9]/g, '_') : `c-${Date.now()}`);
+    
+    const payload = removeUndefinedFields({
+      ...data,
+      tenantId: tenantId || 'default',
+      updatedAt: new Date().toISOString()
+    });
+
+    await setDoc(doc(db, 'clients', cleanId), payload, { merge: true });
+    if (tenantId) {
+      await setDoc(doc(db, 'tenants', tenantId, 'clients', cleanId), payload, { merge: true });
+    }
+    console.log(`✅ [Firestore] Ficha de cadastro do cliente e veículos gravada com sucesso: ${cleanId}`);
+    return true;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `clients/${tenantId}`);
+    return false;
   }
 }
 

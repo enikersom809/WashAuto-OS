@@ -26,10 +26,11 @@ import {
   LogOut,
   Sun,
   Sunrise,
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
 import { Tenant } from '../types';
-import { saveClientEmailMapping } from '../lib/firebaseService';
+import { saveClientEmailMapping, saveClientFullRegistration } from '../lib/firebaseService';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface Vehicle {
@@ -300,7 +301,10 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   const [tenantAppointments, setTenantAppointments] = useState<any[]>(() => {
     const saved = localStorage.getItem(`saas_tenant_appointments_${tenant.id}`);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) {}
+      try { 
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed.filter((a: any) => !a.id?.startsWith('app-init-'));
+      } catch (e) {}
     }
     return [];
   });
@@ -311,7 +315,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) setTenantAppointments(parsed);
+          if (Array.isArray(parsed)) setTenantAppointments(parsed.filter((a: any) => !a.id?.startsWith('app-init-')));
         } catch (e) {}
       }
     };
@@ -367,6 +371,150 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  // Modo de visualização: Agendamento ou Ficha de Cadastro (Via QR)
+  const [portalTab, setPortalTab] = useState<'agendar' | 'cadastro'>('agendar');
+  const [isSearchingCep, setIsSearchingCep] = useState(false);
+
+  // Busca Automática de Endereço via CEP (ViaCEP)
+  const buscarCEP = async (valorCep: string) => {
+    const cleanCep = valorCep.replace(/\D/g, '');
+    if (cleanCep.length !== 8) return;
+
+    try {
+      setIsSearchingCep(true);
+      const res = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`);
+      const data = await res.json();
+      if (!data.erro) {
+        if (data.logradouro) setAddress(data.logradouro);
+        if (data.bairro) setNeighborhood(data.bairro);
+        if (data.localidade) setCity(data.localidade);
+        if (data.uf) setStateUf(data.uf);
+        setCep(cleanCep.replace(/^(\d{5})(\d{3})/, '$1-$2'));
+        showToast('Endereço preenchido automaticamente via CEP!');
+      } else {
+        showToast('⚠️ CEP não encontrado.');
+      }
+    } catch (err) {
+      console.error('Erro ao buscar CEP:', err);
+    } finally {
+      setIsSearchingCep(false);
+    }
+  };
+
+  // Seção de Veículos Dinâmicos para a Ficha de Cadastro
+  const [formVehicles, setFormVehicles] = useState<Array<{
+    id: string;
+    type: 'carro' | 'moto';
+    brand: string;
+    model: string;
+    year: string;
+    plate: string;
+    color: string;
+  }>>(() => {
+    const saved = localStorage.getItem(`saas_client_vehicles_${tenant.id}`);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {}
+    }
+    return [{
+      id: `v-${Date.now()}`,
+      type: 'carro',
+      brand: '',
+      model: '',
+      year: new Date().getFullYear().toString(),
+      plate: '',
+      color: ''
+    }];
+  });
+
+  const handleAddDynamicVehicle = () => {
+    setFormVehicles(prev => [
+      ...prev,
+      {
+        id: `v-${Date.now()}-${prev.length}`,
+        type: 'carro',
+        brand: '',
+        model: '',
+        year: new Date().getFullYear().toString(),
+        plate: '',
+        color: ''
+      }
+    ]);
+  };
+
+  const handleRemoveDynamicVehicle = (index: number) => {
+    if (formVehicles.length <= 1) return;
+    setFormVehicles(prev => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleUpdateDynamicVehicle = (index: number, field: string, val: string) => {
+    setFormVehicles(prev => {
+      const copy = [...prev];
+      copy[index] = { ...copy[index], [field]: val };
+      return copy;
+    });
+  };
+
+  const handleFullRegistrationSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const finalName = editName.trim() || clientProfile.name.trim();
+    if (!finalName) {
+      showToast('Por favor, informe seu nome completo.');
+      return;
+    }
+
+    // Salva perfil pessoal
+    const updatedProfile = {
+      name: finalName,
+      email: editEmail.trim() || clientProfile.email,
+      phone: editPhone.trim() || clientProfile.phone
+    };
+    setClientProfile(updatedProfile);
+    localStorage.setItem(`saas_client_profile_${tenant.id}`, JSON.stringify(updatedProfile));
+
+    // Salva endereço
+    const addressObj = { cep, address, neighborhood, city, stateUf };
+    localStorage.setItem(`saas_client_address_${tenant.id}`, JSON.stringify(addressObj));
+
+    // Salva veículos (filtrando os que têm ao menos marca ou modelo ou placa)
+    const validVehicles: Vehicle[] = formVehicles
+      .filter(v => v.brand.trim() || v.model.trim() || v.plate.trim())
+      .map(v => ({
+        id: v.id,
+        type: v.type,
+        brand: v.brand.trim() || 'Veículo',
+        model: v.model.trim() || 'Modelo',
+        year: v.year.trim() || new Date().getFullYear().toString(),
+        plate: v.plate.trim().toUpperCase() || 'ABC-1234',
+        color: v.color.trim() || 'Padrão'
+      }));
+
+    if (validVehicles.length > 0) {
+      setVehicles(validVehicles);
+      setSelectedVehicleId(validVehicles[0].id);
+      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(validVehicles));
+    }
+
+    // Grava no Firebase Firestore
+    await saveClientFullRegistration(tenant.id, {
+      name: updatedProfile.name,
+      email: updatedProfile.email,
+      phone: updatedProfile.phone,
+      cep,
+      address,
+      neighborhood,
+      city,
+      stateUf,
+      vehicles: validVehicles
+    });
+
+    showToast('🎉 Ficha de cadastro e veículos salvos com sucesso!');
+    setPortalTab('agendar');
   };
 
   const handleAddVehicle = (e: React.FormEvent) => {
@@ -547,8 +695,14 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center font-black text-white text-base shadow-lg shadow-blue-500/25">
-              {tenant.code || 'LJ'}
+            <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-700/80 flex items-center justify-center font-black text-white text-base shadow-lg shadow-blue-500/25 overflow-hidden p-0.5 shrink-0">
+              {tenant.logoUrl ? (
+                <img src={tenant.logoUrl} alt={tenant.nomeFantasia || tenant.name} className="w-full h-full object-contain" />
+              ) : (
+                <div className="w-full h-full rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center">
+                  {tenant.code || 'LJ'}
+                </div>
+              )}
             </div>
             <div>
               <h1 className="text-base font-bold text-[#f8fafc] flex items-center gap-2">
@@ -593,7 +747,313 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
       <div className="max-w-6xl mx-auto px-4 lg:px-8 pt-6 space-y-8">
 
+        {/* ================= ABAS DE SIMULAÇÃO / FLUXO DO CLIENTE ================= */}
+        <div className="flex gap-2.5 p-2 bg-[#111827] border border-[#1F2937] rounded-xl">
+          <button
+            type="button"
+            onClick={() => setPortalTab('agendar')}
+            className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer ${
+              portalTab === 'agendar'
+                ? 'bg-[#00A3FF] text-white shadow-md shadow-blue-500/20'
+                : 'text-slate-400 hover:text-white bg-transparent'
+            }`}
+          >
+            <CalendarIcon className="w-4 h-4" /> 1. Agendamento & Serviços
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setPortalTab('cadastro')}
+            className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer ${
+              portalTab === 'cadastro'
+                ? 'text-slate-950 shadow-md shadow-cyan-500/20 font-black'
+                : 'text-cyan-400 hover:text-cyan-300 bg-transparent'
+            }`}
+            style={portalTab === 'cadastro' ? { background: 'linear-gradient(90deg, #00A3FF, #00FFCC)' } : undefined}
+          >
+            <Edit3 className="w-4 h-4" /> 2. Ficha de Cadastro de Cliente (Via QR)
+          </button>
+        </div>
+
+        {/* === ABA 2: TELA DO CLIENTE (FICHA DE CADASTRO VIA QR) === */}
+        {portalTab === 'cadastro' && (
+          <div className="bg-[#111827] border border-[#1F2937] rounded-2xl p-6 sm:p-8 space-y-6 shadow-2xl animate-fadeIn">
+            <div className="border-b border-[#1F2937] pb-4 flex items-center gap-4">
+              {tenant.logoUrl && (
+                <div className="w-14 h-14 rounded-2xl bg-slate-900 border border-slate-700 p-1 flex items-center justify-center overflow-hidden shrink-0 shadow-md">
+                  <img src={tenant.logoUrl} alt={tenant.nomeFantasia || tenant.name} className="w-full h-full object-contain" />
+                </div>
+              )}
+              <div>
+                <h2 className="text-xl font-bold text-white mb-1 flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-cyan-400" /> Ficha de Cadastro de Cliente
+                </h2>
+                <p className="text-cyan-400 font-medium text-sm">
+                  Seja bem-vindo(a) ao estabelecimento: <strong>{tenant.nomeFantasia || tenant.name}</strong>. Preencha seus dados para agilizar seu atendimento e acumular selos de fidelidade.
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={handleFullRegistrationSubmit} className="space-y-6">
+              {/* Dados Pessoais */}
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                    Nome Completo
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Digite seu nome completo"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                      WhatsApp / Telefone
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="(11) 98765-4321"
+                      value={editPhone}
+                      onChange={(e) => setEditPhone(e.target.value)}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                      E-mail (Para Notificações)
+                    </label>
+                    <input
+                      type="email"
+                      placeholder="seu@email.com"
+                      value={editEmail}
+                      onChange={(e) => setEditEmail(e.target.value)}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* Dados de Endereço com Busca Automática ViaCEP */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5 flex items-center justify-between">
+                      <span>CEP (Busca Automática)</span>
+                      {isSearchingCep && <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />}
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={9}
+                      placeholder="00000-000"
+                      value={cep}
+                      onChange={(e) => {
+                        setCep(e.target.value);
+                        if (e.target.value.replace(/\D/g, '').length === 8) {
+                          buscarCEP(e.target.value);
+                        }
+                      }}
+                      onBlur={(e) => buscarCEP(e.target.value)}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-mono focus:outline-none focus:border-[#00A3FF] text-sm"
+                      required
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                      Endereço Completo
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Rua, Número, Apto"
+                      value={address}
+                      onChange={(e) => setAddress(e.target.value)}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                      Bairro
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Bairro"
+                      value={neighborhood}
+                      onChange={(e) => setNeighborhood(e.target.value)}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                      Cidade
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Cidade"
+                      value={city}
+                      onChange={(e) => setCity(e.target.value)}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-[#9CA3AF] font-semibold mb-1.5">
+                      Estado (UF)
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={2}
+                      required
+                      placeholder="EX: SP"
+                      value={stateUf}
+                      onChange={(e) => setStateUf(e.target.value.toUpperCase())}
+                      className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-bold uppercase focus:outline-none focus:border-[#00A3FF] text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Seção de Veículos Dinâmicos */}
+              <div className="pt-4 border-t border-[#1F2937]">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <Car className="w-5 h-5 text-[#00A3FF]" /> Veículos ({formVehicles.length})
+                  </h3>
+                  <span className="text-xs text-slate-400">
+                    Cadastre um ou mais veículos para lavagens rápidas
+                  </span>
+                </div>
+
+                <div className="space-y-4">
+                  {formVehicles.map((v, idx) => (
+                    <div
+                      key={v.id || idx}
+                      className="bg-[#1F2937] p-4 sm:p-5 rounded-xl border-l-4 border-[#00A3FF] space-y-3 relative"
+                    >
+                      <div className="flex items-center justify-between text-xs text-slate-400 font-bold border-b border-slate-700/60 pb-2">
+                        <span>Veículo #{idx + 1}</span>
+                        {formVehicles.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveDynamicVehicle(idx)}
+                            className="text-rose-400 hover:text-rose-300 flex items-center gap-1 transition cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Remover
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                        <div>
+                          <label className="block text-[#9CA3AF] mb-1 font-semibold">Tipo</label>
+                          <select
+                            value={v.type}
+                            onChange={(e) => handleUpdateDynamicVehicle(idx, 'type', e.target.value as 'carro' | 'moto')}
+                            className="w-full p-2.5 bg-[#111827] border border-[#374151] rounded-lg text-white font-bold cursor-pointer"
+                          >
+                            <option value="carro">🚗 Carro</option>
+                            <option value="moto">🏍️ Moto</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[#9CA3AF] mb-1 font-semibold">Marca</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Ex: Toyota"
+                            value={v.brand}
+                            onChange={(e) => handleUpdateDynamicVehicle(idx, 'brand', e.target.value)}
+                            className="w-full p-2.5 bg-[#111827] border border-[#374151] rounded-lg text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[#9CA3AF] mb-1 font-semibold">Modelo</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Ex: Corolla"
+                            value={v.model}
+                            onChange={(e) => handleUpdateDynamicVehicle(idx, 'model', e.target.value)}
+                            className="w-full p-2.5 bg-[#111827] border border-[#374151] rounded-lg text-white"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                        <div>
+                          <label className="block text-[#9CA3AF] mb-1 font-semibold">Cor</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Ex: Prata"
+                            value={v.color}
+                            onChange={(e) => handleUpdateDynamicVehicle(idx, 'color', e.target.value)}
+                            className="w-full p-2.5 bg-[#111827] border border-[#374151] rounded-lg text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[#9CA3AF] mb-1 font-semibold">Ano</label>
+                          <input
+                            type="number"
+                            required
+                            placeholder="Ex: 2023"
+                            value={v.year}
+                            onChange={(e) => handleUpdateDynamicVehicle(idx, 'year', e.target.value)}
+                            className="w-full p-2.5 bg-[#111827] border border-[#374151] rounded-lg text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[#9CA3AF] mb-1 font-semibold">Placa</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Ex: ABC1D23"
+                            value={v.plate}
+                            onChange={(e) => handleUpdateDynamicVehicle(idx, 'plate', e.target.value.toUpperCase())}
+                            className="w-full p-2.5 bg-[#111827] border border-[#374151] rounded-lg text-white font-mono uppercase font-bold"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="pt-3">
+                  <button
+                    type="button"
+                    onClick={handleAddDynamicVehicle}
+                    className="w-full py-3 px-4 rounded-lg font-bold text-[#00A3FF] border border-[#00A3FF] bg-transparent hover:bg-[#00A3FF]/10 transition flex items-center justify-center gap-2 cursor-pointer text-sm"
+                  >
+                    <PlusCircle className="w-4 h-4" /> + Novo Veículo (Carro / Moto)
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-4">
+                <button
+                  type="submit"
+                  className="w-full py-3.5 px-6 rounded-lg font-black text-slate-950 text-base transition-opacity hover:opacity-90 cursor-pointer shadow-lg shadow-cyan-500/20"
+                  style={{ background: 'linear-gradient(90deg, #00A3FF, #00FFCC)' }}
+                >
+                  Enviar Cadastro
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {/* ================= BANNER CARROSSEL (PROMOÇÕES) ================= */}
+        {portalTab === 'agendar' && (
+        <>
         <div className="relative rounded-2xl overflow-hidden border border-[#1e293b] shadow-2xl bg-[#0f172a]">
           <div className="relative h-64 sm:h-72 w-full overflow-hidden">
             {slides.map((slide, index) => (
@@ -816,12 +1276,22 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-6 gap-3 text-xs">
                   <div className="sm:col-span-2">
-                    <label className="block text-slate-400 font-bold mb-1">CEP</label>
+                    <label className="block text-slate-400 font-bold mb-1 flex items-center justify-between">
+                      <span>CEP (Busca Automática)</span>
+                      {isSearchingCep && <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />}
+                    </label>
                     <input
                       type="text"
                       placeholder="00000-000"
+                      maxLength={9}
                       value={cep}
-                      onChange={(e) => setCep(e.target.value)}
+                      onChange={(e) => {
+                        setCep(e.target.value);
+                        if (e.target.value.replace(/\D/g, '').length === 8) {
+                          buscarCEP(e.target.value);
+                        }
+                      }}
+                      onBlur={(e) => buscarCEP(e.target.value)}
                       className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-blue-500 font-mono"
                     />
                   </div>
@@ -1363,6 +1833,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
           </div>
 
         </div>
+        </>
+        )}
 
       </div>
 

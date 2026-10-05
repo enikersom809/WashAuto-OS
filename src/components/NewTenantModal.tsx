@@ -30,15 +30,18 @@ interface NewTenantModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAddTenant: (newTenant: Tenant) => void;
+  onTestClientPortal?: (tenant: Tenant) => void;
 }
 
 export const NewTenantModal: React.FC<NewTenantModalProps> = ({
   isOpen,
   onClose,
-  onAddTenant
+  onAddTenant,
+  onTestClientPortal
 }) => {
-  // Swapped order: 'fiscal' is now Step 1 (default active tab)
-  const [activeTab, setActiveTab] = useState<'fiscal' | 'geral' | 'acesso' | 'qrcode'>('fiscal');
+  // 'rapido' is now Step 1 (default active tab matching user request)
+  const [activeTab, setActiveTab] = useState<'rapido' | 'fiscal' | 'geral' | 'acesso' | 'qrcode'>('rapido');
+  const [fastCompanyName, setFastCompanyName] = useState('');
   
   // Fiscal / Company extended data (Step 1)
   const [razaoSocial, setRazaoSocial] = useState('');
@@ -260,6 +263,73 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
     setTimeout(() => setCopiedPwd(false), 2000);
   };
 
+  const handleFastCreate = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const companyName = fastCompanyName.trim();
+    if (!companyName) {
+      flashAutoFillNotice('Por favor, digite o nome do lava-jato.');
+      return;
+    }
+
+    const slug = generateSlug(companyName) || `lavajato-${Date.now()}`;
+    const code = companyName.slice(0, 2).toUpperCase() || 'WA';
+    const formattedDate = new Date().toLocaleDateString('pt-BR');
+
+    const createdTenant: Tenant = {
+      id: `t-${Date.now()}`,
+      name: companyName,
+      code,
+      domain: `${slug}.saas.com`,
+      plan: 'Pro',
+      status: 'Ativo',
+      endUsersCount: 1,
+      maxUsers: 500,
+      mrrAmount: 499,
+      createdAt: formattedDate,
+      contactEmail: `${slug}@empresa.com`,
+      contactPhone: '(11) 99999-9999',
+      ownerName: companyName,
+      lastActive: 'Agora mesmo',
+      tempPassword: generateRandomPassword(),
+      razaoSocial: companyName,
+      nomeFantasia: companyName,
+      cnpj: '',
+      inscricaoEstadual: '',
+      address: {
+        cep: '01310-100',
+        street: 'Av. Principal',
+        number: '100',
+        complement: '',
+        neighborhood: 'Centro',
+        city: 'São Paulo',
+        state: 'SP',
+      },
+      logoUrl: ''
+    };
+
+    setIsSaving(true);
+    try {
+      // Inicia novo lava-jato 100% zerado (sem agendamentos pendentes ou lavagens fictícias na fila)
+      localStorage.setItem(`saas_tenant_washes_${createdTenant.id}`, '[]');
+      localStorage.setItem(`saas_tenant_appointments_${createdTenant.id}`, '[]');
+      localStorage.setItem(`saas_tenant_wash_history_${createdTenant.id}`, '[]');
+
+      await saveTenantToFirestore(createdTenant);
+      if (createdTenant.contactEmail) {
+        saveCompanyEmailMapping(createdTenant.contactEmail, createdTenant);
+      }
+      onAddTenant(createdTenant);
+      setCreatedSuccessTenant(createdTenant);
+      setFastCompanyName('');
+    } catch (err) {
+      console.error('Error saving fast tenant:', err);
+      onAddTenant(createdTenant);
+      setCreatedSuccessTenant(createdTenant);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
@@ -309,6 +379,11 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
 
     setIsSaving(true);
     try {
+      // Inicia novo lava-jato 100% zerado (sem agendamentos pendentes ou lavagens fictícias na fila)
+      localStorage.setItem(`saas_tenant_washes_${createdTenant.id}`, '[]');
+      localStorage.setItem(`saas_tenant_appointments_${createdTenant.id}`, '[]');
+      localStorage.setItem(`saas_tenant_wash_history_${createdTenant.id}`, '[]');
+
       // 🏢 Cria a empresa na coleção 'tenants' e 'empresas' do Firestore
       await saveTenantToFirestore(createdTenant);
       if (createdTenant.contactEmail) {
@@ -394,11 +469,24 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
               }}
             />
 
-            <div className="pt-4 border-t border-[#1e293b] flex justify-end gap-3">
+            <div className="pt-4 border-t border-[#1e293b] flex flex-wrap items-center justify-between gap-3">
+              {onTestClientPortal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTestClientPortal(createdSuccessTenant);
+                    handleFinishSuccess();
+                  }}
+                  className="px-4 py-2.5 rounded-xl font-bold text-xs text-slate-950 transition flex items-center gap-2 shadow-lg shadow-cyan-500/20 hover:opacity-90 cursor-pointer"
+                  style={{ background: 'linear-gradient(90deg, #00A3FF, #00FFCC)' }}
+                >
+                  📱 Abrir Tela do Cliente (Via QR) Deste Lava-Jato
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleFinishSuccess}
-                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs transition flex items-center gap-2 shadow-lg shadow-emerald-600/30 cursor-pointer"
+                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs transition flex items-center gap-2 shadow-lg shadow-emerald-600/30 cursor-pointer ml-auto"
               >
                 <Check className="w-4 h-4" /> Concluir & Ir para o Painel
               </button>
@@ -413,7 +501,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
               <div>
                 <h2 className="text-base font-bold text-[#f8fafc]">Cadastrar Nova Empresa (Tenant)</h2>
                 <p className="text-[11px] text-slate-400">
-                  Preencha a Razão Social ou CNPJ para automatizar o preenchimento dos dados operacionais e de acesso.
+                  Cadastre rapidamente pelo nome ou preencha os dados fiscais e operacionais completos.
                 </p>
               </div>
             </div>
@@ -426,8 +514,20 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
           </div>
         )}
 
-        {/* Modal Internal Navigation - SWAPPED: 1 is Fiscal/Empresa, 2 is Dados Principais, 3 is Senha */}
+        {/* Modal Internal Navigation */}
         <div className="flex items-center gap-2 border-b border-[#1e293b] pb-2 shrink-0 overflow-x-auto scrollbar-none">
+          <button
+            type="button"
+            onClick={() => setActiveTab('rapido')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap ${
+              activeTab === 'rapido' 
+                ? 'bg-[#00A3FF] text-white shadow-sm shadow-blue-500/30' 
+                : 'bg-[#020617] text-cyan-400 hover:text-cyan-300 border border-cyan-500/30'
+            }`}
+          >
+            ⚡ 1. Cadastro Rápido & QR Code
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab('fiscal')}
@@ -437,7 +537,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                 : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
             }`}
           >
-            <FileText className="w-3.5 h-3.5" /> 1. Razão Social, CNPJ & Endereço
+            <FileText className="w-3.5 h-3.5" /> 2. Razão Social & CNPJ
           </button>
 
           <button
@@ -449,7 +549,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                 : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
             }`}
           >
-            <Building2 className="w-3.5 h-3.5" /> 2. Dados Principais & Plano
+            <Building2 className="w-3.5 h-3.5" /> 3. Dados Principais & Plano
             {name && <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block ml-1"></span>}
           </button>
 
@@ -462,7 +562,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                 : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
             }`}
           >
-            <Key className="w-3.5 h-3.5" /> 3. Senha de Acesso
+            <Key className="w-3.5 h-3.5" /> 4. Senha de Acesso
           </button>
 
           <button
@@ -474,11 +574,69 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                 : 'bg-[#020617] text-emerald-400 hover:text-emerald-300 border border-emerald-500/30'
             }`}
           >
-            <QrCode className="w-3.5 h-3.5" /> 4. Totem & QR Code PWA
+            <QrCode className="w-3.5 h-3.5" /> 5. Totem & QR Code PWA
           </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs overflow-y-auto pr-1 flex-1">
+          
+          {/* ================= ABA RÁPIDA: CADASTRO DO NOME + QR CODE DIRETO ================= */}
+          {activeTab === 'rapido' && (
+            <div className="space-y-4 py-1">
+              <div className="bg-[#111827] border border-[#1F2937] p-5 rounded-xl space-y-4">
+                <div>
+                  <label className="block text-sm text-[#9CA3AF] font-semibold mb-2">
+                    Nome do Lava-Jato
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Estética Automotiva Brilho"
+                    value={fastCompanyName}
+                    onChange={(e) => setFastCompanyName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleFastCreate();
+                      }
+                    }}
+                    className="w-full p-3 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-sm"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    O sistema cria automaticamente o link exclusivo, cadastra no Firestore e gera a placa com QR Code para o balcão.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleFastCreate}
+                  disabled={isSaving || !fastCompanyName.trim()}
+                  className="w-full py-3 px-5 rounded-lg font-bold text-slate-950 text-base transition hover:opacity-90 cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20"
+                  style={{ background: 'linear-gradient(90deg, #00A3FF, #00FFCC)' }}
+                >
+                  {isSaving ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" /> Cadastrando Empresa & Gerando QR Code...
+                    </>
+                  ) : (
+                    <>
+                      <QrCode className="w-5 h-5" /> Cadastrar Empresa & Gerar QR Code
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400 bg-slate-900/50 p-3 rounded-lg border border-slate-800">
+                <span>Deseja preencher Razão Social, CNPJ ou endereço físico completo?</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('fiscal')}
+                  className="text-blue-400 hover:underline font-bold cursor-pointer"
+                >
+                  Ir para Cadastro Fiscal →
+                </button>
+              </div>
+            </div>
+          )}
           
           {/* ================= ABA 1: FISCAL E ENDEREÇO (AGORA ITEM 1 COM AUTOFILL) ================= */}
           {activeTab === 'fiscal' && (

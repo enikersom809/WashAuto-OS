@@ -46,6 +46,7 @@ import { Tenant } from '../types';
 import { ClientPortal } from './ClientPortal';
 import { TenantConfigSettings } from './TenantConfigSettings';
 import { PWAInstallButton } from './PWAInstallButton';
+import { saveTenantToFirestore } from '../lib/firebaseService';
 
 interface WashItem {
   id: string;
@@ -237,54 +238,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     }
   ];
 
-  const defaultAppointments: CustomerAppointment[] = [
-    {
-      id: 'app-init-1',
-      dateTime: `${new Date().toISOString().split('T')[0]} 14:30`,
-      clientName: 'Bruno Henrique Silveira',
-      clientPhone: '(11) 98123-4567',
-      clientEmail: 'bruno.silveira@gmail.com',
-      vehicle: 'VW Golf GTI',
-      plate: 'GHJ5A88',
-      service: 'Lavagem Completa + Cera Pro',
-      price: 90,
-      status: 'Pendente',
-      notes: 'Solicitou lavagem de motor e aspiração interna caprichada.'
-    },
-    {
-      id: 'app-init-2',
-      dateTime: `${new Date().toISOString().split('T')[0]} 16:00`,
-      clientName: 'Camila Mendonça',
-      clientPhone: '(11) 99234-5678',
-      clientEmail: 'camila.mendonca@outlook.com',
-      vehicle: 'Hyundai Creta Platinum',
-      plate: 'CRE2024',
-      service: 'Higienização de Bancos & Lavagem Técnica',
-      price: 180,
-      status: 'Aprovado',
-      lavadorId: 'st-1',
-      lavadorName: 'Carlos Silva',
-      notes: 'Leva e traz solicitado pelo cliente.'
-    },
-    {
-      id: 'app-init-3',
-      dateTime: `${new Date(Date.now() + 86400000).toISOString().split('T')[0]} 10:00`,
-      clientName: 'Gustavo Paiva',
-      clientPhone: '(11) 97345-6789',
-      clientEmail: 'gustavo.paiva@yahoo.com.br',
-      vehicle: 'Chevrolet Onix Plus',
-      plate: 'ONX7742',
-      service: 'Lavagem Simples',
-      price: 60,
-      status: 'Pendente'
-    }
-  ];
+  const defaultAppointments: CustomerAppointment[] = [];
 
   // Persistent States per Lava-Jato Company (Tenant)
+  const isDemoTenant = tenant.id === 't-autoclean';
+
   const [washItems, setWashItems] = useState<WashItem[]>(() => {
     const saved = localStorage.getItem(`saas_tenant_washes_${tenant.id}`);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+      try { 
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter(w => !w.id.startsWith('w-from-app-init-') && !w.id.startsWith('wh-'));
+        }
+      } catch (e) { console.error(e); }
     }
     return [];
   });
@@ -305,10 +272,13 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          // Remove qualquer resquício de agendamentos fictícios antigos (app-init-)
+          return parsed.filter(a => !a.id.startsWith('app-init-'));
+        }
       } catch (e) { console.error(e); }
     }
-    return defaultAppointments;
+    return [];
   });
 
   const [washHistory, setWashHistory] = useState<CompletedWashRecord[]>(() => {
@@ -316,10 +286,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          if (!isDemoTenant) {
+            return parsed.filter(w => !w.id.startsWith('wh-'));
+          }
+          return parsed;
+        }
       } catch (e) { console.error(e); }
     }
-    return defaultWashHistory;
+    return isDemoTenant ? defaultWashHistory : [];
   });
 
   const [products, setProducts] = useState<ProductItem[]>(() => {
@@ -362,7 +337,11 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         try {
           const parsed = JSON.parse(savedApps);
           if (Array.isArray(parsed)) {
-            setAppointments(parsed);
+            if (!isDemoTenant) {
+              setAppointments(parsed.filter(a => !a.id.startsWith('app-init-')));
+            } else {
+              setAppointments(parsed);
+            }
           }
         } catch (e) {
           console.error(e);
@@ -889,16 +868,6 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           <div className="flex flex-wrap items-center gap-3">
             <PWAInstallButton compact variant="outline" />
 
-            {onReplaySplash && (
-              <button
-                onClick={onReplaySplash}
-                className="bg-[#020617] hover:bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                title="Executar novamente a introdução de 5 segundos"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-cyan-400" /> Rever Splash (5s)
-              </button>
-            )}
-
             <button
               onClick={() => setShowNewWashModal(true)}
               className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-blue-600/30 cursor-pointer"
@@ -1280,6 +1249,30 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                         </div>
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs font-semibold text-slate-400">R$ {item.price.toFixed(2)}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedWashReceipt({
+                                id: item.id,
+                                plate: item.plate,
+                                vehicle: item.vehicle,
+                                service: item.service,
+                                price: item.price,
+                                clientName: item.clientName,
+                                clientPhone: item.clientPhone,
+                                lavadorName: item.lavadorName,
+                                commissionRate: item.commissionRate,
+                                commissionAmount: item.commissionAmount,
+                                completedAt: 'Hoje às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+                                date: new Date().toISOString().split('T')[0],
+                                paymentMethod: 'PIX'
+                              });
+                            }}
+                            className="p-1 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded transition cursor-pointer"
+                            title="Visualizar e Imprimir Recibo"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleDeleteWashItem(item.id)}
@@ -2049,10 +2042,11 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             onUpdateTenantDetails={(updated) => {
               setCurrentTenant(updated);
               localStorage.setItem(`saas_tenant_custom_data_${updated.id}`, JSON.stringify(updated));
+              saveTenantToFirestore(updated).catch(console.error);
               if (onUpdateTenant) {
                 onUpdateTenant(updated);
               }
-              showToast('Configurações da empresa salvas com sucesso!');
+              showToast('Configurações e logotipo da empresa salvos com sucesso!');
             }}
           />
         )}
@@ -2692,29 +2686,106 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         </div>
       )}
 
-      {/* MODAL 5: COMPROVANTE / RECIBO DE LAVAGEM */}
+      {/* MODAL 5: COMPROVANTE / RECIBO DE LAVAGEM COM LOGO DA EMPRESA */}
       {selectedWashReceipt && (
-        <div className="fixed inset-0 z-50 bg-[#020617]/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl max-w-md w-full p-6 space-y-5 shadow-2xl relative">
+        <div className="fixed inset-0 z-50 bg-[#020617]/85 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          {/* Estilos dedicados para impressão limpa do recibo */}
+          <style>{`
+            @media print {
+              body * {
+                visibility: hidden !important;
+              }
+              #wash-receipt-print-modal, #wash-receipt-print-modal * {
+                visibility: visible !important;
+              }
+              #wash-receipt-print-modal {
+                position: fixed !important;
+                left: 0 !important;
+                top: 0 !important;
+                width: 100% !important;
+                max-width: 480px !important;
+                margin: 0 auto !important;
+                background: white !important;
+                color: black !important;
+                padding: 24px !important;
+                box-shadow: none !important;
+                border: 1px solid #ccc !important;
+              }
+              #wash-receipt-print-modal .receipt-print-hide {
+                display: none !important;
+              }
+              #wash-receipt-print-modal .text-white,
+              #wash-receipt-print-modal .text-slate-100,
+              #wash-receipt-print-modal .text-slate-200,
+              #wash-receipt-print-modal .text-slate-300 {
+                color: #0f172a !important;
+              }
+              #wash-receipt-print-modal .text-slate-400,
+              #wash-receipt-print-modal .text-slate-500 {
+                color: #475569 !important;
+              }
+              #wash-receipt-print-modal .bg-\\[\\#0f172a\\],
+              #wash-receipt-print-modal .bg-\\[\\#020617\\],
+              #wash-receipt-print-modal .bg-slate-900 {
+                background: #f8fafc !important;
+                border-color: #cbd5e1 !important;
+              }
+            }
+          `}</style>
+
+          <div 
+            id="wash-receipt-print-modal"
+            className="bg-[#0f172a] border border-[#1e293b] rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl relative my-auto"
+          >
             <button
               onClick={() => setSelectedWashReceipt(null)}
-              className="absolute top-4 right-4 text-slate-400 hover:text-white"
+              className="absolute top-4 right-4 text-slate-400 hover:text-white receipt-print-hide p-1 cursor-pointer"
+              title="Fechar"
             >
               <X className="w-5 h-5" />
             </button>
 
-            {/* Cabeçalho do Recibo */}
-            <div className="text-center border-b border-[#1e293b] pb-4">
-              <div className="w-12 h-12 mx-auto rounded-full bg-blue-600/10 border border-blue-500/20 flex items-center justify-center mb-2">
-                <CheckCircle className="w-6 h-6 text-emerald-400" />
+            {/* Cabeçalho do Recibo com a LOGO DA EMPRESA */}
+            <div className="text-center border-b border-[#1e293b] pb-4 flex flex-col items-center">
+              {tenant.logoUrl ? (
+                <div className="w-20 h-20 rounded-2xl bg-white/5 border border-slate-700/80 p-1.5 flex items-center justify-center overflow-hidden mb-2.5 shadow-lg">
+                  <img
+                    src={tenant.logoUrl}
+                    alt={tenant.nomeFantasia || tenant.name}
+                    className="w-full h-full object-contain"
+                  />
+                </div>
+              ) : (
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center font-black text-white text-xl shadow-lg mb-2.5">
+                  {tenant.code || (tenant.name ? tenant.name.slice(0, 2).toUpperCase() : 'LJ')}
+                </div>
+              )}
+
+              <h3 className="text-base font-extrabold text-[#f8fafc] leading-tight tracking-tight">
+                {tenant.nomeFantasia || tenant.name}
+              </h3>
+              {tenant.razaoSocial && (
+                <p className="text-[11px] text-slate-400 mt-0.5">{tenant.razaoSocial}</p>
+              )}
+              {tenant.cnpj && (
+                <p className="text-[10px] text-slate-400 font-mono mt-0.5">CNPJ: {tenant.cnpj}</p>
+              )}
+              {(tenant.address?.street || tenant.contactPhone) && (
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  {tenant.address?.street ? `${tenant.address.street}${tenant.address.number ? `, ${tenant.address.number}` : ''} • ` : ''}
+                  {tenant.contactPhone ? `Tel: ${tenant.contactPhone}` : ''}
+                </p>
+              )}
+
+              <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-bold uppercase tracking-wider">
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                Comprovante Oficial de Atendimento
               </div>
-              <h3 className="text-base font-bold text-[#f8fafc]">{tenant.name}</h3>
-              <p className="text-xs text-slate-400 font-mono">Comprovante de Atendimento Concluído</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">ID: {selectedWashReceipt.id}</p>
+              <p className="text-[10px] text-slate-500 mt-1 font-mono">Controle: #{selectedWashReceipt.id}</p>
             </div>
 
             {/* Detalhes do Recibo */}
-            <div className="space-y-3 text-xs bg-[#020617] p-4 rounded-xl border border-[#1e293b]">
+            <div className="space-y-2.5 text-xs bg-[#020617] p-4 rounded-xl border border-[#1e293b]">
               <div className="flex justify-between items-center py-1 border-b border-[#1e293b]">
                 <span className="text-slate-400">Data / Horário:</span>
                 <span className="font-semibold text-slate-200">{selectedWashReceipt.completedAt}</span>
@@ -2761,31 +2832,67 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </span>
               </div>
 
-              <div className="flex justify-between items-center pt-2 text-sm font-bold">
+              <div className="flex justify-between items-center pt-2 text-sm font-bold border-t border-[#1e293b]">
                 <span className="text-slate-200">Total Pago:</span>
-                <span className="text-emerald-400 font-mono text-base">
+                <span className="text-emerald-400 font-mono text-base font-extrabold">
                   R$ {selectedWashReceipt.price.toFixed(2)}
                 </span>
               </div>
             </div>
 
+            {/* Mensagem de Rodapé */}
+            <p className="text-center text-[10px] text-slate-500 italic">
+              Agradecemos a sua preferência! Volte sempre ao {tenant.nomeFantasia || tenant.name}.
+            </p>
+
             {/* Ações do Comprovante */}
-            <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e293b]">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#1e293b] receipt-print-hide">
               <button
                 type="button"
                 onClick={() => setSelectedWashReceipt(null)}
-                className="px-4 py-2 bg-[#020617] hover:bg-slate-900 text-slate-300 text-xs rounded-lg font-medium transition border border-[#1e293b]"
+                className="px-3.5 py-2 bg-[#020617] hover:bg-slate-900 text-slate-300 text-xs rounded-lg font-medium transition border border-[#1e293b] cursor-pointer"
               >
                 Fechar
               </button>
 
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg font-bold transition flex items-center gap-1.5 shadow-sm shadow-blue-600/30"
-              >
-                <Printer className="w-3.5 h-3.5" /> Imprimir Recibo
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Enviar no WhatsApp */}
+                {(() => {
+                  const phoneDigits = (selectedWashReceipt.clientPhone || '').replace(/\D/g, '');
+                  const receiptText = `*COMPROVANTE DE ATENDIMENTO - ${tenant.nomeFantasia || tenant.name}*\n` +
+                    `📅 Data: ${selectedWashReceipt.completedAt}\n` +
+                    `👤 Cliente: ${selectedWashReceipt.clientName}\n` +
+                    `🚗 Veículo: ${selectedWashReceipt.vehicle} (${selectedWashReceipt.plate})\n` +
+                    `🧼 Serviço: ${selectedWashReceipt.service}\n` +
+                    `💳 Pagamento: ${selectedWashReceipt.paymentMethod}\n` +
+                    `💰 *Total Pago: R$ ${selectedWashReceipt.price.toFixed(2)}*\n\n` +
+                    `Agradecemos a sua preferência! Volte sempre ao ${tenant.nomeFantasia || tenant.name}.`;
+                  const waUrl = phoneDigits 
+                    ? `https://wa.me/55${phoneDigits}?text=${encodeURIComponent(receiptText)}` 
+                    : `https://api.whatsapp.com/send?text=${encodeURIComponent(receiptText)}`;
+
+                  return (
+                    <a
+                      href={waUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded-lg font-bold transition flex items-center gap-1.5 shadow-sm shadow-emerald-600/30"
+                      title="Enviar recibo para o WhatsApp do cliente"
+                    >
+                      <Phone className="w-3.5 h-3.5" /> WhatsApp
+                    </a>
+                  );
+                })()}
+
+                {/* Imprimir Recibo */}
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg font-bold transition flex items-center gap-1.5 shadow-sm shadow-blue-600/30 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" /> Imprimir Recibo
+                </button>
+              </div>
             </div>
           </div>
         </div>
