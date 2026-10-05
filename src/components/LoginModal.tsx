@@ -129,8 +129,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
   
-  // Login Form States
+  // Login Form States (Profile-isolated to prevent browser cross-tab autofill leaks)
   const [subdomain, setSubdomain] = useState(() => getInitialSlugFromUrl());
+  
+  // Empresa Login States
+  const [empresaEmail, setEmpresaEmail] = useState('');
+  const [empresaPassword, setEmpresaPassword] = useState('');
+
+  // Cliente Login States
+  const [clienteIdentifier, setClienteIdentifier] = useState('');
+  const [clientePassword, setClientePassword] = useState('');
+
+  // Super Admin Login States
+  const [adminEmail, setAdminEmail] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -233,8 +246,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       setIsSignUp(false);
     }
     setErrorMessage(null);
-    setIdentifier('');
+    setAuthSuccessMsg(null);
+    // Limpa senhas para que a senha do Super Admin não persista na aba Empresa
     setPassword('');
+    setEmpresaPassword('');
+    setClientePassword('');
+    setAdminPassword('');
     setSubdomain(getInitialSlugFromUrl());
     setAutoMatchedInfo(null);
     setIsSearchingEmail(false);
@@ -259,6 +276,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   // ou o e-mail do cliente ao lava-jato registrado
   const handleIdentifierChange = (val: string) => {
     setIdentifier(val);
+    if (activeTab === 'empresa') {
+      setEmpresaEmail(val);
+    } else if (activeTab === 'cliente') {
+      setClienteIdentifier(val);
+    } else {
+      setAdminEmail(val);
+    }
     const cleanEmail = val.trim().toLowerCase();
 
     if (!cleanEmail || !cleanEmail.includes('@')) {
@@ -270,6 +294,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     // 1. ABA EMPRESA: Associa e-mail corporativo ao subdomínio da empresa
     if (activeTab === 'empresa') {
+      // Se digitou acidentalmente ou autofill colocou o email do admin super na aba da empresa
+      if (cleanEmail === 'admin_super@gmail.com' || cleanEmail === (localStorage.getItem('saas_admin_email') || '').trim().toLowerCase()) {
+        setAutoMatchedInfo(null);
+        return;
+      }
       // a) Busca em tenants conhecidos no estado da aplicação
       const matchedTenant = tenants.find(t => 
         (t.contactEmail && t.contactEmail.trim().toLowerCase() === cleanEmail) ||
@@ -574,11 +603,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     const savedAdminEmail = (localStorage.getItem('saas_admin_email') || 'admin_super@gmail.com').trim().toLowerCase();
     const savedAdminPassword = localStorage.getItem('saas_admin_password') || 'admin124050';
 
-    const typedEmail = identifier.trim().toLowerCase();
-    const typedPassword = password.trim();
+    // 1. ABA SUPER ADMIN (Apenas permite login master nesta aba específica)
+    if (activeTab === 'admin') {
+      const typedEmail = (adminEmail || identifier).trim().toLowerCase();
+      const typedPassword = (adminPassword || password).trim();
 
-    // Login inteligente: se o usuário estiver na aba admin OU se digitou as credenciais do Super Admin em qualquer aba
-    if (activeTab === 'admin' || (typedEmail && (typedEmail === savedAdminEmail || typedEmail === 'admin_super@gmail.com'))) {
       if (!typedEmail) {
         setErrorMessage('Por favor, informe o E-mail Master (admin_super@gmail.com).');
         return;
@@ -601,14 +630,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
 
+    // 2. ABA CLIENTE
     if (activeTab === 'cliente') {
+      const typedClientIdentifier = (clienteIdentifier || identifier).trim();
+      const typedClientPassword = (clientePassword || password).trim();
+
       setIsSubmitting(true);
       try {
         const tenantToOpen = resolveTenantByDomain(subdomain || 'autoclean');
         
         // Tenta autenticar cliente no Firebase Auth se houver credenciais
-        if (identifier.includes('@')) {
-          await loginClientInFirebaseAuth(identifier, password || undefined);
+        if (typedClientIdentifier.includes('@')) {
+          await loginClientInFirebaseAuth(typedClientIdentifier, typedClientPassword || undefined);
         }
 
         const savedProfile = localStorage.getItem(`saas_client_profile_${tenantToOpen.id}`);
@@ -617,11 +650,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           try { clientData = JSON.parse(savedProfile); } catch (e) {}
         }
         if (!clientData) {
-          const isEmail = identifier.includes('@');
+          const isEmail = typedClientIdentifier.includes('@');
           clientData = {
-            name: isEmail ? identifier.split('@')[0] : (identifier || 'Cliente'),
-            email: isEmail ? identifier : '',
-            phone: !isEmail ? identifier : '(11) 99999-9999'
+            name: isEmail ? typedClientIdentifier.split('@')[0] : (typedClientIdentifier || 'Cliente'),
+            email: isEmail ? typedClientIdentifier : '',
+            phone: !isEmail ? typedClientIdentifier : '(11) 99999-9999'
           };
           localStorage.setItem(`saas_client_profile_${tenantToOpen.id}`, JSON.stringify(clientData));
         }
@@ -630,15 +663,41 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       } catch (err: any) {
         console.warn('Client login warning:', err);
         const tenantToOpen = resolveTenantByDomain(subdomain || 'autoclean');
-        onLoginAsClient(tenantToOpen, { name: identifier.split('@')[0] || 'Cliente', phone: '(11) 99999-9999' });
+        onLoginAsClient(tenantToOpen, { name: (clienteIdentifier || identifier).split('@')[0] || 'Cliente', phone: '(11) 99999-9999' });
         if (onClose) onClose();
       } finally {
         setIsSubmitting(false);
       }
-    } else if (activeTab === 'empresa') {
-      const tenantToOpen = resolveTenantByDomain(subdomain || 'autoclean', 'Auto Clean Spa');
+      return;
+    }
+
+    // 3. ABA EMPRESA (Lava-Jato / Centro Automotivo)
+    if (activeTab === 'empresa') {
+      const typedEmpresaEmail = (empresaEmail || identifier).trim().toLowerCase();
+      const typedEmpresaPassword = (empresaPassword || password).trim();
+
+      // Bloqueio rigoroso: se o navegador ou usuário preencheu com o e-mail do Super Admin na tela da empresa
+      if (typedEmpresaEmail === savedAdminEmail || typedEmpresaEmail === 'admin_super@gmail.com') {
+        setErrorMessage('Atenção: Este e-mail pertence ao Super Admin. Para acessar a área restrita do sistema, mude para a aba "Super Admin" no rodapé.');
+        return;
+      }
+
+      const tenantToOpen = resolveTenantByDomain(subdomain || (typedEmpresaEmail ? typedEmpresaEmail.split('@')[0] : 'autoclean'), 'Auto Clean Spa');
+
+      // Validação de senha da empresa (caso tenha sido configurada senha personalizada ou temporária legítima)
+      const customPwd = localStorage.getItem(`saas_tenant_custom_password_${tenantToOpen.id}`);
+      const expectedPwd = customPwd || tenantToOpen.tempPassword;
+
+      if (expectedPwd && expectedPwd !== savedAdminPassword && expectedPwd !== 'admin124050') {
+        if (typedEmpresaPassword && typedEmpresaPassword !== expectedPwd) {
+          setErrorMessage('Senha de acesso da empresa incorreta.');
+          return;
+        }
+      }
+
       onLoginAsEmpresa(tenantToOpen);
       if (onClose) onClose();
+      return;
     }
   };
 
@@ -795,15 +854,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
           {/* ================= 2. FORMULÁRIO DE LOGIN OU CADASTRO ================= */}
           {!isSignUp ? (
-            /* FORMULÁRIO DE LOGIN */
-            <form onSubmit={handleSubmit} className="space-y-4">
+            /* FORMULÁRIO DE LOGIN (com key={activeTab} para destruir e recriar inputs e impedir contaminação de autofill do navegador) */
+            <form key={activeTab} onSubmit={handleSubmit} autoComplete="off" data-lpignore="true" className="space-y-4">
               
               {/* 1. CAMPO E-MAIL / WHATSAPP / E-MAIL CORPORATIVO (PRIMEIRO CAMPO) */}
               <div>
                 <div className="flex justify-between items-center mb-1">
                   <label className="block text-xs font-bold text-slate-300">
                     {activeTab === 'cliente' && 'E-mail ou WhatsApp'}
-                    {activeTab === 'empresa' && 'E-mail Corporativo'}
+                    {activeTab === 'empresa' && 'E-mail Corporativo do Lava-Jato'}
                     {activeTab === 'admin' && 'E-mail Master (Root)'}
                   </label>
                   {activeTab !== 'admin' && (
@@ -813,20 +872,47 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   )}
                 </div>
                 <div className="relative">
-                  <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
-                  <input 
-                    type="text" 
-                    value={identifier}
-                    onChange={(e) => handleIdentifierChange(e.target.value)}
-                    placeholder={
-                      activeTab === 'admin' 
-                        ? 'admin_super@gmail.com' 
-                        : activeTab === 'empresa'
-                        ? 'contato@seulavajato.com'
-                        : 'seu@email.com ou WhatsApp'
-                    } 
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 transition font-medium"
-                  />
+                  <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500 pointer-events-none" />
+                  {activeTab === 'empresa' && (
+                    <input 
+                      type="text" 
+                      name="empresa_login_email"
+                      id="empresa_login_email"
+                      value={empresaEmail || identifier}
+                      onChange={(e) => handleIdentifierChange(e.target.value)}
+                      placeholder="contato@seulavajato.com" 
+                      autoComplete="off"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 transition font-medium"
+                    />
+                  )}
+                  {activeTab === 'cliente' && (
+                    <input 
+                      type="text" 
+                      name="cliente_login_identity"
+                      id="cliente_login_identity"
+                      value={clienteIdentifier || identifier}
+                      onChange={(e) => handleIdentifierChange(e.target.value)}
+                      placeholder="seu@email.com ou WhatsApp" 
+                      autoComplete="off"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 transition font-medium"
+                    />
+                  )}
+                  {activeTab === 'admin' && (
+                    <input 
+                      type="email" 
+                      name="superadmin_master_email"
+                      id="superadmin_master_email"
+                      value={adminEmail || identifier}
+                      onChange={(e) => handleIdentifierChange(e.target.value)}
+                      placeholder="admin_super@gmail.com" 
+                      autoComplete="username"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 transition font-medium"
+                    />
+                  )}
                   {isSearchingEmail && (
                     <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin absolute right-3.5 top-3" />
                   )}
@@ -924,9 +1010,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <div className="relative flex items-center">
                     <input 
                       type="text" 
+                      name="empresa_login_subdomain"
+                      id="empresa_login_subdomain"
                       value={subdomain}
                       onChange={(e) => setSubdomain(e.target.value)}
                       placeholder="autoclean" 
+                      autoComplete="off"
+                      data-lpignore="true"
                       className={`w-full bg-slate-950 border rounded-lg pl-3 pr-24 py-2.5 text-xs text-slate-100 font-bold focus:outline-none transition font-mono ${
                         autoMatchedInfo ? 'border-emerald-500/50 bg-emerald-950/20' : 'border-slate-800 focus:border-emerald-500'
                       }`}
@@ -950,7 +1040,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <div>
                 <div className="flex justify-between items-center mb-1">
                   <label className="flex items-center gap-1.5 text-xs font-bold text-slate-300">
-                    <span>{activeTab === 'admin' ? 'Senha Administrativa' : 'Senha'}</span>
+                    <span>
+                      {activeTab === 'admin' ? 'Senha Administrativa Master' : activeTab === 'empresa' ? 'Senha de Acesso da Empresa' : 'Senha'}
+                    </span>
                     <span className="inline-flex items-center gap-1 text-[10px] bg-slate-800 text-emerald-400 px-1.5 py-0.5 rounded font-mono font-bold border border-emerald-500/20">
                       <Shield className="w-2.5 h-2.5 text-emerald-400" />
                       Protegida
@@ -963,6 +1055,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       if (activeTab === 'admin') {
                         localStorage.setItem('saas_admin_email', 'admin_super@gmail.com');
                         localStorage.setItem('saas_admin_password', 'admin124050');
+                        setAdminEmail('admin_super@gmail.com');
+                        setAdminPassword('admin124050');
                         setIdentifier('admin_super@gmail.com');
                         setPassword('admin124050');
                         setErrorMessage(null);
@@ -978,14 +1072,55 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </div>
                 <div className="relative flex items-center">
                   <Lock className="w-4 h-4 absolute left-3.5 text-slate-500 pointer-events-none" />
-                  <input 
-                    type={showPassword ? "text" : "password"} 
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••" 
-                    autoComplete="current-password"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 transition font-mono tracking-wider"
-                  />
+                  {activeTab === 'empresa' && (
+                    <input 
+                      type={showPassword ? "text" : "password"} 
+                      name="empresa_login_secret_code"
+                      id="empresa_login_secret_code"
+                      value={empresaPassword || password}
+                      onChange={(e) => {
+                        setEmpresaPassword(e.target.value);
+                        setPassword(e.target.value);
+                      }}
+                      placeholder="••••••••" 
+                      autoComplete="new-password"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 transition font-mono tracking-wider"
+                    />
+                  )}
+                  {activeTab === 'cliente' && (
+                    <input 
+                      type={showPassword ? "text" : "password"} 
+                      name="cliente_login_secret_key"
+                      id="cliente_login_secret_key"
+                      value={clientePassword || password}
+                      onChange={(e) => {
+                        setClientePassword(e.target.value);
+                        setPassword(e.target.value);
+                      }}
+                      placeholder="••••••••" 
+                      autoComplete="new-password"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 transition font-mono tracking-wider"
+                    />
+                  )}
+                  {activeTab === 'admin' && (
+                    <input 
+                      type={showPassword ? "text" : "password"} 
+                      name="superadmin_master_password"
+                      id="superadmin_master_password"
+                      value={adminPassword || password}
+                      onChange={(e) => {
+                        setAdminPassword(e.target.value);
+                        setPassword(e.target.value);
+                      }}
+                      placeholder="••••••••" 
+                      autoComplete="current-password"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 transition font-mono tracking-wider"
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
@@ -1001,7 +1136,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </div>
               </div>
 
-              {/* Dica / Auxiliar de Credenciais do Super Admin */}
+              {/* Dica / Auxiliar de Credenciais do Super Admin (Apenas exibido na aba admin) */}
               {activeTab === 'admin' && (
                 <div className="bg-indigo-950/40 border border-indigo-500/20 rounded-xl p-3 text-xs text-indigo-300 space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -1012,6 +1147,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
+                        setAdminEmail('admin_super@gmail.com');
+                        setAdminPassword('admin124050');
                         setIdentifier('admin_super@gmail.com');
                         setPassword('admin124050');
                         setErrorMessage(null);

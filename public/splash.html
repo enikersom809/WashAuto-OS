@@ -544,20 +544,20 @@
             </div>
 
             <!-- Formulário -->
-            <form id="auth-form" onsubmit="realizarLogin(event)" style="display: flex; flex-direction: column; gap: 14px;">
+            <form id="auth-form" onsubmit="realizarLogin(event)" autocomplete="off" data-lpignore="true" style="display: flex; flex-direction: column; gap: 14px;">
                 <div id="field-company" class="form-group" style="display: none;">
                     <label class="form-label">Nome do Lava-Jato / Centro Automotivo</label>
-                    <input type="text" id="input-company" class="form-input" placeholder="Ex: Auto Clean Spa" />
+                    <input type="text" id="input-company" class="form-input" placeholder="Ex: Auto Clean Spa" autocomplete="off" />
                 </div>
 
                 <div class="form-group">
                     <label class="form-label" id="label-user">E-mail corporativo ou Subdomínio</label>
-                    <input type="text" id="input-user" class="form-input" placeholder="gerente@autoclean.com" required value="gerente@autoclean.com" />
+                    <input type="text" id="input-user" class="form-input" placeholder="gerente@autoclean.com" required value="gerente@autoclean.com" autocomplete="off" data-lpignore="true" />
                 </div>
 
                 <div class="form-group">
                     <label class="form-label">Senha de Acesso</label>
-                    <input type="password" id="input-pass" class="form-input" placeholder="••••••••" required value="123456" />
+                    <input type="password" id="input-pass" class="form-input" placeholder="••••••••" required value="123456" autocomplete="new-password" data-lpignore="true" />
                 </div>
 
                 <button type="submit" id="btn-submit" class="submit-btn">

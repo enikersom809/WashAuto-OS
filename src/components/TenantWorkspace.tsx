@@ -137,13 +137,27 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 }) => {
   const [currentTenant, setCurrentTenant] = useState<Tenant>(() => {
     const saved = localStorage.getItem(`saas_tenant_custom_data_${initialTenant.id}`);
+    const adminPwd = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_password')) || 'admin124050';
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
+        // Higienização de segurança: Se a senha salva no tenant coincide com a senha do Super Admin (vazamento de autofill do navegador), limpa
+        if (parsed.tempPassword === adminPwd || parsed.tempPassword === 'admin124050') {
+          delete parsed.tempPassword;
+          localStorage.removeItem(`saas_tenant_custom_password_${initialTenant.id}`);
+          localStorage.setItem(`saas_tenant_custom_data_${initialTenant.id}`, JSON.stringify(parsed));
+        }
         return { ...initialTenant, ...parsed };
       } catch (e) {
         console.error(e);
       }
+    }
+    // Também checa se o initialTenant veio contaminado com a senha do super admin
+    if (initialTenant.tempPassword === adminPwd || initialTenant.tempPassword === 'admin124050') {
+      const clean = { ...initialTenant };
+      delete clean.tempPassword;
+      localStorage.removeItem(`saas_tenant_custom_password_${initialTenant.id}`);
+      return clean;
     }
     return initialTenant;
   });

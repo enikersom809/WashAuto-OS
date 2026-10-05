@@ -951,6 +951,9 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                   <input
                     type={showTempPassword ? "text" : "password"}
                     readOnly
+                    autoComplete="off"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
                     value={tempPassword}
                     className="bg-transparent text-emerald-400 font-mono font-bold text-base w-full focus:outline-none tracking-wider"
                   />

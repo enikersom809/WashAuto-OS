@@ -351,8 +351,14 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
     e.preventDefault();
     setPwdError(null);
 
+    const savedAdminPassword = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_password')) || 'admin124050';
+
     if (newPassword.length < 6) {
       setPwdError('A nova senha deve possuir pelo menos 6 caracteres.');
+      return;
+    }
+    if (newPassword === savedAdminPassword || newPassword === 'admin124050') {
+      setPwdError('Por segurança, a senha da empresa não pode ser igual à senha do Super Admin.');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -1433,7 +1439,9 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
             </p>
           </div>
 
-          {tenant.tempPassword && (
+          {tenant.tempPassword && 
+           tenant.tempPassword !== (localStorage.getItem('saas_admin_password') || 'admin124050') && 
+           tenant.tempPassword !== 'admin124050' && (
             <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-300 text-xs flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Key className="w-4 h-4 text-amber-400 shrink-0" />
@@ -1464,6 +1472,11 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
                 <input
                   type={showPwd ? 'text' : 'password'}
                   required
+                  name="tenant_security_new_pwd"
+                  id="tenant_security_new_pwd"
+                  autoComplete="new-password"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
                   placeholder="Mínimo de 6 dígitos"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
@@ -1484,6 +1497,11 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
               <input
                 type={showPwd ? 'text' : 'password'}
                 required
+                name="tenant_security_confirm_pwd"
+                id="tenant_security_confirm_pwd"
+                autoComplete="new-password"
+                data-lpignore="true"
+                data-1p-ignore="true"
                 placeholder="Repita a nova senha"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
