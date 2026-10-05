@@ -22,10 +22,10 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
   const [copied, setCopied] = React.useState(false);
   const printContainerRef = useRef<HTMLDivElement>(null);
 
-  // URL dinâmica do PWA apontando para a rota do inquilino
+  // URL dinâmica do PWA apontando diretamente para a tela de cadastro da empresa
   const targetUrl = typeof window !== 'undefined' 
-    ? `${window.location.origin}/${empresa.slug}`
-    : `https://app.saas.com/${empresa.slug}`;
+    ? `${window.location.origin}/?empresa=${empresa.slug}&cadastro=cliente`
+    : `https://app.saas.com/?empresa=${empresa.slug}&cadastro=cliente`;
 
   // Copiar link para o clipboard
   const handleCopyLink = async () => {
@@ -129,13 +129,13 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
           </button>
 
           <a
-            href={`/${empresa.slug}`}
+            href={targetUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-slate-200 font-semibold text-xs border border-slate-800 transition"
           >
             <ExternalLink className="w-3.5 h-3.5" />
-            <span>Testar Experiência do Cliente</span>
+            <span>Testar Tela de Cadastro (Via QR)</span>
           </a>
         </div>
       </div>

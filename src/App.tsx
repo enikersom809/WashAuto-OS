@@ -95,8 +95,19 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<NavTab>('overview');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  // Splash Screen 5-second initial state
-  const [showSplash, setShowSplash] = useState(true);
+  // Splash Screen 5-second initial state (pula splash se o cliente estiver acessando via link/QR Code de um lava-jato)
+  const [showSplash, setShowSplash] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('empresa') || params.get('slug') || params.get('cadastro') || params.get('t')) {
+      return false;
+    }
+    const path = window.location.pathname.replace(/^\//, '').split('/')[0];
+    if (path && path !== 'index.html' && path !== '') {
+      return false;
+    }
+    return true;
+  });
 
   // Auth Session State: Inicia como null para que, após a Splash Screen de 5s, o usuário veja a tela de Login/Cadastro!
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => {

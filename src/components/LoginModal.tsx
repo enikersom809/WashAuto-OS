@@ -17,7 +17,11 @@ import {
   ShieldAlert,
   Shield,
   Key,
-  QrCode
+  QrCode,
+  Plus,
+  Trash2,
+  MapPin,
+  Car
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -28,6 +32,7 @@ import {
   saveTenantToFirestore,
   saveCompanyEmailMapping,
   saveClientEmailMapping,
+  saveClientFullRegistration,
   getCompanyEmailMapping,
   getClientEmailMapping,
   findTenantByCompanyEmailFirestore,
@@ -73,6 +78,42 @@ const getInitialSlugFromUrl = () => {
   return '';
 };
 
+const getInitialActiveTab = (): LoginProfileType => {
+  if (typeof window === 'undefined') return 'empresa';
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('empresa') || params.get('slug') || params.get('cadastro') || params.get('t')) {
+    return 'cliente';
+  }
+  const path = window.location.pathname.replace(/^\//, '').split('/')[0];
+  if (path && path !== 'index.html' && path !== '') {
+    return 'cliente';
+  }
+  return 'empresa';
+};
+
+const getInitialIsSignUp = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('cadastro') === 'cliente' || params.get('cadastro') === 'true' || params.get('empresa') || params.get('slug')) {
+    return true;
+  }
+  const path = window.location.pathname.replace(/^\//, '').split('/')[0];
+  if (path && path !== 'index.html' && path !== '') {
+    return true;
+  }
+  return false;
+};
+
+export interface RegVehicleItem {
+  id: string;
+  type: 'Carro' | 'Moto';
+  brand: string;
+  model: string;
+  color: string;
+  year: string;
+  plate: string;
+}
+
 export const LoginModal: React.FC<LoginModalProps> = ({
   isOpen = true,
   onClose,
@@ -83,8 +124,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLoginAsSuperAdmin,
   onReplaySplash
 }) => {
-  const [activeTab, setActiveTab] = useState<LoginProfileType>('empresa');
-  const [isSignUp, setIsSignUp] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<LoginProfileType>(() => getInitialActiveTab());
+  const [isSignUp, setIsSignUp] = useState<boolean>(() => getInitialIsSignUp());
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
   
@@ -121,6 +162,68 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [regPlan, setRegPlan] = useState<'Basic' | 'Pro' | 'Enterprise'>('Pro');
   const [regPassword, setRegPassword] = useState('');
   const [showRegPassword, setShowRegPassword] = useState(false);
+
+  // Endereço e CEP (Busca Automática ViaCEP)
+  const [regCep, setRegCep] = useState('');
+  const [regAddress, setRegAddress] = useState('');
+  const [regNeighborhood, setRegNeighborhood] = useState('');
+  const [regCity, setRegCity] = useState('');
+  const [regState, setRegState] = useState('');
+  const [isSearchingCep, setIsSearchingCep] = useState(false);
+
+  // Veículos Dinâmicos (+ Novo Veículo Carro/Moto)
+  const [regVehicles, setRegVehicles] = useState<RegVehicleItem[]>([
+    { id: 'v-1', type: 'Carro', brand: '', model: '', color: '', year: '', plate: '' }
+  ]);
+
+  const handleAddVehicleField = () => {
+    setRegVehicles(prev => [
+      ...prev,
+      {
+        id: `v-${Date.now()}-${prev.length + 1}`,
+        type: 'Carro',
+        brand: '',
+        model: '',
+        color: '',
+        year: '',
+        plate: ''
+      }
+    ]);
+  };
+
+  const handleRemoveVehicleField = (index: number) => {
+    if (regVehicles.length <= 1) return;
+    setRegVehicles(prev => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleVehicleChange = (index: number, field: keyof RegVehicleItem, value: string) => {
+    setRegVehicles(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], [field]: value };
+      return updated;
+    });
+  };
+
+  // Busca Automática do CEP via ViaCEP
+  const buscarCEP = async (cepValue: string) => {
+    const clean = cepValue.replace(/\D/g, '');
+    if (clean.length !== 8) return;
+    setIsSearchingCep(true);
+    try {
+      const res = await fetch(`https://viacep.com.br/ws/${clean}/json/`);
+      const data = await res.json();
+      if (!data.erro) {
+        setRegAddress(data.logradouro ? `${data.logradouro}, ` : '');
+        setRegNeighborhood(data.bairro || '');
+        setRegCity(data.localidade || '');
+        setRegState(data.uf || '');
+      }
+    } catch (err) {
+      console.error('Erro ao buscar CEP:', err);
+    } finally {
+      setIsSearchingCep(false);
+    }
+  };
 
   if (isModal && !isOpen) return null;
 
@@ -354,13 +457,39 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           return;
         }
 
+        const validVehicles = regVehicles
+          .filter(v => v.model.trim() || v.plate.trim() || v.brand.trim())
+          .map((v, i) => ({
+            id: v.id || `v-${Date.now()}-${i}`,
+            type: (v.type ? v.type.toLowerCase() : 'carro') as 'carro' | 'moto',
+            brand: v.brand.trim(),
+            model: v.model.trim() || 'Veículo',
+            color: v.color.trim(),
+            year: v.year.trim(),
+            plate: v.plate.trim().toUpperCase()
+          }));
+
+        // Salva veículos para o portal do cliente
+        if (validVehicles.length > 0) {
+          localStorage.setItem(`saas_client_vehicles_${tenantToOpen.id}`, JSON.stringify(validVehicles));
+        }
+
         const clientData = {
           name: regName.trim(),
           email: regEmail.trim(),
-          phone: regPhone.trim() || '(11) 99999-9999'
+          phone: regPhone.trim() || '(11) 99999-9999',
+          cep: regCep.trim(),
+          address: regAddress.trim(),
+          neighborhood: regNeighborhood.trim(),
+          city: regCity.trim(),
+          stateUf: regState.trim(),
+          vehicles: validVehicles
         };
         localStorage.setItem(`saas_client_profile_${tenantToOpen.id}`, JSON.stringify(clientData));
         
+        // 🏢 Salva cadastro completo no Firestore
+        await saveClientFullRegistration(tenantToOpen.id, clientData);
+
         // Associa e-mail do cliente ao lava-jato registrado
         saveClientEmailMapping(
           regEmail.trim(),
@@ -369,7 +498,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           tenantToOpen.name
         );
 
-        setAuthSuccessMsg('Conta criada com sucesso no Firebase Authentication!');
+        setAuthSuccessMsg('Cadastro realizado com sucesso!');
 
         setTimeout(() => {
           onLoginAsClient(tenantToOpen, clientData);
@@ -524,7 +653,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       <div className="absolute -top-40 -left-40 w-96 h-96 bg-blue-600/20 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-600/20 rounded-full blur-3xl pointer-events-none" />
 
-      <div className="w-full max-w-md relative z-10">
+      <div className={`w-full ${isSignUp && activeTab === 'cliente' ? 'max-w-xl' : 'max-w-md'} relative z-10 transition-all duration-300`}>
         
         {/* Close Button only in Modal mode */}
         {isModal && onClose && (
@@ -950,42 +1079,238 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               
               {activeTab === 'cliente' && (
                 <>
+                  <div className="border-b border-slate-800 pb-2 mb-3">
+                    <h3 className="text-base font-bold text-white tracking-tight">Criar Conta de Cliente</h3>
+                    {regSubdomain && (
+                      <p className="text-[#00A3FF] font-bold text-xs mt-0.5">
+                        Bem-vindo ao {resolveTenantByDomain(regSubdomain).name}!
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Dados Pessoais */}
                   <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1">Seu Nome Completo *</label>
+                    <label className="block text-xs font-bold text-slate-300 mb-1">Nome Completo *</label>
                     <input 
                       type="text" 
                       required
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
-                      placeholder="Ex: Carlos Eduardo" 
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 transition"
+                      placeholder="Digite seu nome completo" 
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1">E-mail *</label>
-                    <input 
-                      type="email" 
-                      required
-                      value={regEmail}
-                      onChange={(e) => setRegEmail(e.target.value)}
-                      placeholder="seu@email.com" 
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 transition"
-                    />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">E-mail *</label>
+                      <input 
+                        type="email" 
+                        required
+                        value={regEmail}
+                        onChange={(e) => setRegEmail(e.target.value)}
+                        placeholder="seu@email.com" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">WhatsApp / Celular</label>
+                      <input 
+                        type="text" 
+                        value={regPhone}
+                        onChange={(e) => setRegPhone(e.target.value)}
+                        placeholder="(11) 99999-9999" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
+                      />
+                    </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1">WhatsApp / Celular</label>
-                    <input 
-                      type="text" 
-                      value={regPhone}
-                      onChange={(e) => setRegPhone(e.target.value)}
-                      placeholder="(11) 99999-9999" 
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 transition"
-                    />
+                  {/* Endereço com Busca Automática por CEP */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-xs font-bold text-slate-300">CEP (Busca Automática)</label>
+                        {isSearchingCep && <Loader2 className="w-3 h-3 text-[#00A3FF] animate-spin" />}
+                      </div>
+                      <input 
+                        type="text" 
+                        maxLength={9}
+                        value={regCep}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setRegCep(val);
+                          if (val.replace(/\D/g, '').length === 8) {
+                            buscarCEP(val);
+                          }
+                        }}
+                        onBlur={(e) => buscarCEP(e.target.value)}
+                        placeholder="00000-000" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-bold text-slate-300 mb-1">Endereço Completo</label>
+                      <input 
+                        type="text" 
+                        value={regAddress}
+                        onChange={(e) => setRegAddress(e.target.value)}
+                        placeholder="Rua, Número, Ap" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
+                      />
+                    </div>
                   </div>
 
-                  <div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">Bairro</label>
+                      <input 
+                        type="text" 
+                        value={regNeighborhood}
+                        onChange={(e) => setRegNeighborhood(e.target.value)}
+                        placeholder="Bairro" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">Cidade</label>
+                      <input 
+                        type="text" 
+                        value={regCity}
+                        onChange={(e) => setRegCity(e.target.value)}
+                        placeholder="Cidade" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">Estado</label>
+                      <input 
+                        type="text" 
+                        maxLength={2}
+                        value={regState}
+                        onChange={(e) => setRegState(e.target.value.toUpperCase())}
+                        placeholder="EX: SP" 
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 uppercase font-mono font-bold focus:outline-none focus:border-[#00A3FF] transition"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Seção de Veículos Dinâmicos */}
+                  <div className="pt-2">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                        <Car className="w-3.5 h-3.5 text-[#00A3FF]" />
+                        <span>Veículos</span>
+                        <span className="text-[10px] text-slate-400 font-normal">({regVehicles.length})</span>
+                      </h4>
+                    </div>
+
+                    <div className="space-y-3">
+                      {regVehicles.map((vehicle, idx) => (
+                        <div 
+                          key={vehicle.id} 
+                          className="bg-[#1F2937]/60 border border-[#374151] p-3 rounded-xl border-l-4 border-l-[#00A3FF] transition-all"
+                        >
+                          <div className="flex items-center justify-between mb-2 pb-1 border-b border-slate-800/80">
+                            <span className="text-[11px] font-bold text-cyan-300 flex items-center gap-1">
+                              Veículo #{idx + 1} ({vehicle.type})
+                            </span>
+                            {regVehicles.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveVehicleField(idx)}
+                                className="text-[10px] text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer font-semibold"
+                              >
+                                <Trash2 className="w-3 h-3" /> Remover
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+                            <div>
+                              <label className="block text-[10px] text-slate-400 font-medium mb-0.5">Tipo</label>
+                              <select
+                                value={vehicle.type}
+                                onChange={(e) => handleVehicleChange(idx, 'type', e.target.value as 'Carro' | 'Moto')}
+                                className="w-full p-2 bg-[#0B0F19] border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-[#00A3FF]"
+                              >
+                                <option value="Carro">Carro</option>
+                                <option value="Moto">Moto</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 font-medium mb-0.5">Marca *</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="Ex: Toyota"
+                                value={vehicle.brand}
+                                onChange={(e) => handleVehicleChange(idx, 'brand', e.target.value)}
+                                className="w-full p-2 bg-[#0B0F19] border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-[#00A3FF]"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 font-medium mb-0.5">Modelo *</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="Ex: Corolla"
+                                value={vehicle.model}
+                                onChange={(e) => handleVehicleChange(idx, 'model', e.target.value)}
+                                className="w-full p-2 bg-[#0B0F19] border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-[#00A3FF]"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <div>
+                              <label className="block text-[10px] text-slate-400 font-medium mb-0.5">Cor *</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="Ex: Prata"
+                                value={vehicle.color}
+                                onChange={(e) => handleVehicleChange(idx, 'color', e.target.value)}
+                                className="w-full p-2 bg-[#0B0F19] border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-[#00A3FF]"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 font-medium mb-0.5">Ano *</label>
+                              <input
+                                type="number"
+                                required
+                                placeholder="Ex: 2023"
+                                value={vehicle.year}
+                                onChange={(e) => handleVehicleChange(idx, 'year', e.target.value)}
+                                className="w-full p-2 bg-[#0B0F19] border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-[#00A3FF]"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 font-medium mb-0.5">Placa *</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="Ex: ABC1D23"
+                                value={vehicle.plate}
+                                onChange={(e) => handleVehicleChange(idx, 'plate', e.target.value.toUpperCase())}
+                                className="w-full p-2 bg-[#0B0F19] border border-slate-700 rounded-lg text-white text-xs uppercase font-mono font-bold focus:outline-none focus:border-[#00A3FF]"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleAddVehicleField}
+                      className="w-full mt-2 py-2 px-3 rounded-lg border border-[#00A3FF] text-[#00A3FF] hover:bg-[#00A3FF]/10 text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> + Novo Veículo (Carro / Moto)
+                    </button>
+                  </div>
+
+                  {/* Domínio do Lava-Jato a Agendar */}
+                  <div className="pt-2">
                     <div className="flex justify-between items-center mb-1">
                       <label className="block text-xs font-bold text-slate-300">Domínio do Lava-Jato a Agendar *</label>
                       <button
@@ -1007,19 +1332,17 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         value={regSubdomain}
                         onChange={(e) => setRegSubdomain(e.target.value)}
                         placeholder="Digite o domínio (Ex: autoclean)" 
-                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-24 py-2.5 text-xs text-slate-100 font-bold focus:outline-none focus:border-blue-500 transition font-mono"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-24 py-2.5 text-xs text-slate-100 font-bold focus:outline-none focus:border-[#00A3FF] transition font-mono"
                       />
                       <span className="absolute right-3 text-xs text-slate-500 font-mono font-bold">.saas.com</span>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-1.5 flex items-center gap-1">
-                      <span>💡 Digite o domínio fornecido pelo seu lava-jato ou leia o QR Code no balcão da empresa.</span>
-                    </p>
                   </div>
 
+                  {/* Senha */}
                   <div>
                     <div className="flex justify-between items-center mb-1">
                       <label className="flex items-center gap-1.5 text-xs font-bold text-slate-300">
-                        <span>Crie uma Senha *</span>
+                        <span>Crie uma Senha para Acesso *</span>
                         <span className="inline-flex items-center gap-1 text-[10px] bg-slate-800 text-blue-400 px-1.5 py-0.5 rounded font-mono font-bold border border-blue-500/20">
                           <Shield className="w-2.5 h-2.5 text-blue-400" />
                           Segura
@@ -1034,7 +1357,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         value={regPassword}
                         onChange={(e) => setRegPassword(e.target.value)}
                         placeholder="••••••••" 
-                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 transition font-mono"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition font-mono"
                       />
                       <button
                         type="button"
@@ -1047,20 +1370,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Botão Finalizar Cadastro */}
                   <button 
                     type="submit" 
                     disabled={isSubmitting}
-                    className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold py-3 rounded-xl transition shadow-lg shadow-blue-600/25 flex items-center justify-center gap-2 text-xs mt-3 cursor-pointer"
+                    className="w-full py-3.5 px-5 rounded-xl font-bold text-slate-950 text-sm transition hover:opacity-90 cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/25 mt-4"
+                    style={{ background: 'linear-gradient(90deg, #00A3FF, #00FFCC)' }}
                   >
                     {isSubmitting ? (
                       <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Criando no Firebase Auth...</span>
+                        <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                        <span>Finalizando Cadastro no Lava-Jato...</span>
                       </>
                     ) : (
                       <>
-                        <span>Criar Minha Conta & Acessar</span>
-                        <Sparkles className="w-4 h-4" />
+                        <span>Finalizar Cadastro no Lava-Jato</span>
+                        <Sparkles className="w-4 h-4 text-slate-950" />
                       </>
                     )}
                   </button>
