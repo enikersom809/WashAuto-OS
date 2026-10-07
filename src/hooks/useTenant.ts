@@ -5,6 +5,8 @@ import {
   where, 
   limit, 
   getDocs, 
+  doc,
+  getDoc,
   type DocumentData 
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -91,15 +93,30 @@ export function useTenant(urlSlug: string | undefined): UseTenantReturn {
           setTenant(loadedTenant);
         } else {
           // Fallback: Tenta também na coleção 'tenants' (caso cadastrado como tenants)
-          const fallbackRef = collection(db, 'tenants');
-          const qFallback = query(fallbackRef, where('code', '==', cleanSlug.toUpperCase()), limit(1));
-          const fallbackSnapshot = await getDocs(qFallback);
+          let docSnapFound = null;
 
-          if (!fallbackSnapshot.empty) {
-            const docSnap = fallbackSnapshot.docs[0];
-            const data = docSnap.data();
+          // 2.1 Tenta direto pelo ID do tenant
+          try {
+            const directDoc = await getDoc(doc(db, 'tenants', cleanSlug));
+            if (directDoc.exists()) {
+              docSnapFound = directDoc;
+            }
+          } catch (_) {}
+
+          // 2.2 Tenta pelo código (ex: AC, LJ)
+          if (!docSnapFound) {
+            const fallbackRef = collection(db, 'tenants');
+            const qFallback = query(fallbackRef, where('code', '==', cleanSlug.toUpperCase()), limit(1));
+            const fallbackSnapshot = await getDocs(qFallback);
+            if (!fallbackSnapshot.empty) {
+              docSnapFound = fallbackSnapshot.docs[0];
+            }
+          }
+
+          if (docSnapFound) {
+            const data = docSnapFound.data();
             const fallbackTenant: TenantData = {
-              id: docSnap.id,
+              id: docSnapFound.id,
               nome: data.nome || data.name || 'Lava-Jato',
               slug: cleanSlug,
               ...data

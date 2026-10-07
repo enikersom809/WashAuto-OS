@@ -2,9 +2,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions para validação de IDs
+    // Helper functions para validação de IDs (seguro, tolerante a slugs, emails e IDs gerados)
     function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.:]+$');
+      return id is string && id.size() > 0 && id.size() <= 200;
     }
 
     // 1. Tenants (Empresas de Lava-Jato)
@@ -24,6 +24,12 @@ service cloud.firestore {
         allow create, update, delete: if isValidId(tenantId) && isValidId(washItemId);
       }
 
+      // Subcoleção: Histórico de Lavagens Concluídas
+      match /washHistory/{historyId} {
+        allow get, list: if true;
+        allow create, update, delete: if isValidId(tenantId) && isValidId(historyId);
+      }
+
       // Subcoleção: Clientes da Empresa
       match /clients/{clientId} {
         allow get, list: if true;
@@ -34,6 +40,21 @@ service cloud.firestore {
       match /redemptions/{redemptionId} {
         allow get, list: if true;
         allow create, update, delete: if isValidId(tenantId) && isValidId(redemptionId);
+      }
+
+      // Subcoleção: Pontos de Fidelidade
+      match /fidelityPoints/{clientKey} {
+        allow get, list, create, update, delete: if isValidId(tenantId);
+      }
+
+      // Subcoleção: Equipe / Funcionários
+      match /staff/{staffId} {
+        allow get, list, create, update, delete: if isValidId(tenantId);
+      }
+
+      // Subcoleção: Produtos & Estoque
+      match /products/{productId} {
+        allow get, list, create, update, delete: if isValidId(tenantId);
       }
 
       // Subcoleção: Configurações da Empresa

@@ -68,7 +68,7 @@ const getInitialSlugFromUrl = () => {
   if (typeof window === 'undefined') return '';
   try {
     const searchParams = new URLSearchParams(window.location.search);
-    const qSlug = searchParams.get('empresa') || searchParams.get('slug') || searchParams.get('t') || searchParams.get('lava');
+    const qSlug = searchParams.get('tenantId') || searchParams.get('empresa') || searchParams.get('slug') || searchParams.get('t') || searchParams.get('lava');
     if (qSlug) return extractDomainSlug(qSlug);
     const pathSeg = window.location.pathname.replace(/^\//, '').split('/')[0];
     if (pathSeg && pathSeg !== 'index.html' && pathSeg !== '') {
@@ -425,18 +425,36 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     const raw = domainInput.trim().toLowerCase();
     const cleanSub = extractDomainSlug(raw);
 
-    // 1. Direct match by full domain or sub
+    const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const explicitTenantId = searchParams?.get('tenantId')?.trim().toLowerCase();
+
+    // 0. Match by explicit URL tenantId parameter
+    if (explicitTenantId) {
+      const matchById = tenants.find(t => t.id.toLowerCase() === explicitTenantId);
+      if (matchById) return matchById;
+    }
+
+    // 1. Direct match by id, code, full domain, subdomain or company name
     const matched = tenants.find(t => 
+      t.id.toLowerCase() === raw ||
+      t.id.toLowerCase() === cleanSub ||
+      t.code.toLowerCase() === raw ||
+      t.code.toLowerCase() === cleanSub ||
       t.domain.toLowerCase() === raw ||
       t.domain.toLowerCase() === `${cleanSub}.saas.com` ||
       t.domain.toLowerCase().startsWith(cleanSub) ||
-      t.name.toLowerCase().includes(cleanSub) ||
-      t.id.toLowerCase() === cleanSub
+      t.name.toLowerCase().includes(cleanSub)
     );
 
     if (matched) return matched;
 
-    // 2. Fallback / Create dynamically if not found
+    // 2. If there's only one custom tenant in the database, prioritize it
+    const nonDemoTenants = tenants.filter(t => t.id !== 't-autoclean');
+    if (nonDemoTenants.length === 1 && !raw.includes('autoclean')) {
+      return nonDemoTenants[0];
+    }
+
+    // 3. Fallback / Create dynamically if not found
     const displayName = fallbackName || (cleanSub.length > 2 ? cleanSub.charAt(0).toUpperCase() + cleanSub.slice(1) + ' Auto Spa' : 'Auto Clean Spa');
     return {
       id: `t-${Date.now().toString().slice(-4)}`,

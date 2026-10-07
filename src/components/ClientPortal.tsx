@@ -27,10 +27,22 @@ import {
   Sun,
   Sunrise,
   AlertCircle,
-  Loader2
+  Loader2,
+  RefreshCw,
+  Activity,
+  CalendarCheck
 } from 'lucide-react';
 import { Tenant } from '../types';
-import { saveClientEmailMapping, saveClientFullRegistration } from '../lib/firebaseService';
+import { 
+  saveClientEmailMapping, 
+  saveClientFullRegistration,
+  saveAppointmentToFirestore,
+  subscribeToTenantAppointments,
+  saveFidelityRedemptionToFirestore,
+  subscribeToTenantRedemptions,
+  subscribeToFidelityPoints,
+  subscribeToTenantWashItems
+} from '../lib/firebaseService';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface Vehicle {
@@ -128,7 +140,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     return () => clearInterval(timer);
   }, [slides.length]);
 
-  // Fidelity Points State (Synchronized with Lava-Jato Company Panel)
+  // Fidelity Points State (Synchronized with Lava-Jato Company Panel in Real-Time)
   const [fidelityPoints, setFidelityPoints] = useState<number>(() => {
     const saved = localStorage.getItem(`saas_fidelity_pts_${tenant.id}`);
     return saved ? Number(saved) : 0;
@@ -139,19 +151,41 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     return !!saved;
   });
 
-  // Sync points and redemption requests on mount & interval
-  useEffect(() => {
-    const checkFidelity = () => {
-      const savedPts = localStorage.getItem(`saas_fidelity_pts_${tenant.id}`);
-      if (savedPts !== null) setFidelityPoints(Number(savedPts));
-      const savedRed = localStorage.getItem(`saas_fidelity_redemption_${tenant.id}`);
-      setIsRewardRequested(!!savedRed);
-    };
+  // Fila de lavagem em tempo real (veículos no pátio monitorados pelo cliente)
+  const [patioWashes, setPatioWashes] = useState<any[]>([]);
+  const [isCloudSynced, setIsCloudSynced] = useState<boolean>(true);
 
-    checkFidelity();
-    const interval = setInterval(checkFidelity, 2000);
-    return () => clearInterval(interval);
-  }, [tenant.id]);
+  // Sync points and redemption requests on mount with Firestore in Real-Time
+  useEffect(() => {
+    const clientKey = clientInfo?.phone || clientInfo?.email || 'global';
+    
+    // Escuta pontos da empresa no Firestore
+    const unsubPoints = subscribeToFidelityPoints(tenant.id, clientKey, (livePts) => {
+      setFidelityPoints(livePts);
+      localStorage.setItem(`saas_fidelity_pts_${tenant.id}`, String(livePts));
+      setIsCloudSynced(true);
+    });
+
+    // Escuta resgates de fidelidade no Firestore
+    const unsubReds = subscribeToTenantRedemptions(tenant.id, (reds) => {
+      const myRed = reds.find(r => 
+        (r.clientPhone === clientInfo?.phone || r.clientName === clientInfo?.name) &&
+        r.status === 'pending'
+      );
+      setIsRewardRequested(!!myRed);
+    });
+
+    // Escuta fila do pátio para acompanhar status do carro
+    const unsubWashes = subscribeToTenantWashItems(tenant.id, (washes) => {
+      setPatioWashes(washes);
+    });
+
+    return () => {
+      unsubPoints();
+      unsubReds();
+      unsubWashes();
+    };
+  }, [tenant.id, clientInfo]);
 
   // ================= 1. DADOS CADASTRAIS DO CLIENTE =================
   // Carrega dados pessoais salvos do cadastro ou das props
@@ -310,6 +344,14 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   });
 
   useEffect(() => {
+    // 📡 Sincronização em tempo real via Nuvem (Firestore) entre Computador e Celular
+    const unsub = subscribeToTenantAppointments(tenant.id, (remoteApps) => {
+      if (remoteApps) {
+        setTenantAppointments(remoteApps.filter((a: any) => !a.id?.startsWith('app-init-')));
+        localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remoteApps));
+      }
+    });
+
     const refreshAppointments = () => {
       const saved = localStorage.getItem(`saas_tenant_appointments_${tenant.id}`);
       if (saved) {
@@ -322,6 +364,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     window.addEventListener('storage', refreshAppointments);
     window.addEventListener('saas_data_sync', refreshAppointments);
     return () => {
+      unsub();
       window.removeEventListener('storage', refreshAppointments);
       window.removeEventListener('saas_data_sync', refreshAppointments);
     };
@@ -373,8 +416,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Modo de visualização: Agendamento ou Ficha de Cadastro (Via QR)
-  const [portalTab, setPortalTab] = useState<'agendar' | 'cadastro'>('agendar');
+  // Modo de visualização: Agendamento, Ficha de Cadastro (Via QR) ou Status em Tempo Real
+  const [portalTab, setPortalTab] = useState<'agendar' | 'cadastro' | 'status'>('agendar');
   const [isSearchingCep, setIsSearchingCep] = useState(false);
 
   // Busca Automática de Endereço via CEP (ViaCEP)
@@ -553,7 +596,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     showToast('Veículo removido!');
   };
 
-  const handleRequestFidelityReward = () => {
+  const handleRequestFidelityReward = async () => {
     if (fidelityPoints < 10) {
       showToast(`Você possui ${fidelityPoints} de 10 lavagens necessárias.`);
       return;
@@ -561,7 +604,17 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     setIsRewardRequested(true);
     localStorage.setItem(`saas_fidelity_redemption_${tenant.id}`, 'pending');
     window.dispatchEvent(new Event('storage'));
-    showToast('🎉 Solicitação de Lavagem Grátis enviada para o Lava-Jato!');
+
+    const veh = vehicles[0];
+    await saveFidelityRedemptionToFirestore(tenant.id, {
+      id: `red-${Date.now()}`,
+      clientName: clientProfile.name || 'Cliente',
+      clientPhone: clientProfile.phone || '',
+      vehicle: veh ? `${veh.brand} ${veh.model} (${veh.plate})` : 'Veículo Cadastrado',
+      status: 'pending'
+    });
+
+    showToast('🎉 Solicitação de Lavagem Grátis enviada em tempo real para o Lava-Jato!');
   };
 
   const handleSelectPromotion = (promoServiceName: string, promoPrice: number) => {
@@ -572,7 +625,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     if (elem) elem.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const handleSubmitAppointment = (e: React.FormEvent) => {
+  const handleSubmitAppointment = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (vehicles.length === 0) {
@@ -608,11 +661,15 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       service: selectedService,
       price: selectedPrice,
       dateTime: `${selectedDate} ${selectedTimeSlot}`,
-      addressSummary
+      addressSummary,
+      status: 'Pendente'
     };
 
+    // 🚀 Salva no Firestore instantaneamente para sincronizar com o computador do Lava-Jato
+    await saveAppointmentToFirestore(tenant.id, newAppPayload);
+
     onNewAppointmentCreated(newAppPayload);
-    showToast(`✅ Agendamento de ${selectedTimeSlot} no dia ${formattedDateDisplay} enviado! Aguarde a confirmação da empresa.`);
+    showToast(`✅ Agendamento de ${selectedTimeSlot} no dia ${formattedDateDisplay} enviado! Notificação recebida pela empresa.`);
   };
 
   // ================= CALENDÁRIO DIAS MATRIX =================
@@ -747,8 +804,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
       <div className="max-w-6xl mx-auto px-4 lg:px-8 pt-6 space-y-8">
 
-        {/* ================= ABAS DE SIMULAÇÃO / FLUXO DO CLIENTE ================= */}
-        <div className="flex gap-2.5 p-2 bg-[#111827] border border-[#1F2937] rounded-xl">
+        {/* ================= ABAS DO PORTAL DO CLIENTE ================= */}
+        <div className="flex flex-col sm:flex-row gap-2.5 p-2 bg-[#111827] border border-[#1F2937] rounded-xl">
           <button
             type="button"
             onClick={() => setPortalTab('agendar')}
@@ -771,7 +828,22 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
             }`}
             style={portalTab === 'cadastro' ? { background: 'linear-gradient(90deg, #00A3FF, #00FFCC)' } : undefined}
           >
-            <Edit3 className="w-4 h-4" /> 2. Ficha de Cadastro de Cliente (Via QR)
+            <Edit3 className="w-4 h-4" /> 2. Ficha de Cadastro (Via QR)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setPortalTab('status')}
+            className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer relative ${
+              portalTab === 'status'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
+                : 'text-emerald-400 hover:text-emerald-300 bg-transparent'
+            }`}
+          >
+            <Activity className="w-4 h-4" /> 3. Acompanhar em Tempo Real
+            {tenantAppointments.some(a => a.clientPhone === clientProfile.phone || a.clientName === clientProfile.name) && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping absolute top-2 right-2" />
+            )}
           </button>
         </div>
 
@@ -1051,7 +1123,168 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
           </div>
         )}
 
-        {/* ================= BANNER CARROSSEL (PROMOÇÕES) ================= */}
+        {/* ================= ABA 3: ACOMPANHAR EM TEMPO REAL (CELULAR ⇄ COMPUTADOR) ================= */}
+        {portalTab === 'status' && (
+          <div className="space-y-6 animate-fadeIn">
+            {/* Banner de Sincronização em Tempo Real */}
+            <div className="bg-gradient-to-r from-emerald-950/60 via-slate-900 to-blue-950/60 border border-emerald-500/30 rounded-2xl p-5 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                  <Activity className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-white">Comunicação Celular ⇄ Computador Ativa</h3>
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+                  </div>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Os dados deste celular estão conectados em tempo real com o painel operacional da empresa no computador via Firestore.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPortalTab('agendar')}
+                className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-lg shadow-blue-600/25 shrink-0 flex items-center gap-1.5 cursor-pointer"
+              >
+                <CalendarIcon className="w-4 h-4" /> Novo Agendamento
+              </button>
+            </div>
+
+            {/* Meus Agendamentos Recentes */}
+            <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 shadow-xl space-y-4">
+              <div className="flex items-center justify-between border-b border-[#1e293b] pb-3">
+                <div className="flex items-center gap-2">
+                  <CalendarCheck className="w-5 h-5 text-blue-400" />
+                  <h3 className="text-base font-bold text-white">Meus Agendamentos no Lava-Jato</h3>
+                </div>
+                <span className="text-xs text-slate-400 font-mono">
+                  {tenantAppointments.filter(a => !a.id?.startsWith('app-init-')).length} registro(s)
+                </span>
+              </div>
+
+              {tenantAppointments.filter(a => !a.id?.startsWith('app-init-')).length === 0 ? (
+                <div className="py-12 text-center text-slate-500 space-y-3">
+                  <CalendarIcon className="w-10 h-10 mx-auto opacity-40 text-slate-400" />
+                  <p className="text-xs">Nenhum agendamento realizado ainda neste dispositivo.</p>
+                  <button
+                    type="button"
+                    onClick={() => setPortalTab('agendar')}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600/20 border border-blue-500/40 text-blue-400 hover:text-white rounded-xl text-xs font-bold transition cursor-pointer"
+                  >
+                    Agendar agora um horário livre
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {tenantAppointments
+                    .filter(a => !a.id?.startsWith('app-init-'))
+                    .map((app) => {
+                      const isPending = app.status === 'Pendente' || !app.status;
+                      const isApproved = app.status === 'Aprovado';
+                      const isInWash = app.status === 'Em Lavagem' || app.status === 'Em Execução';
+                      const isDone = app.status === 'Concluído';
+                      const isCancelled = app.status === 'Cancelado' || app.status === 'Recusado';
+
+                      return (
+                        <div
+                          key={app.id}
+                          className="bg-[#020617] border border-[#1e293b] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:border-slate-700 transition"
+                        >
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-sm text-white">{app.service}</span>
+                              <span className="text-xs font-bold text-emerald-400 font-mono bg-emerald-500/10 px-2 py-0.5 rounded">
+                                R$ {Number(app.price || 0).toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                              <span>🚗 {app.vehicle} {app.plate ? `(${app.plate})` : ''}</span>
+                              <span>📅 {app.dateTime}</span>
+                              <span>👤 {app.clientName}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            {isPending && (
+                              <span className="px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold text-xs flex items-center gap-1.5">
+                                <Clock className="w-3.5 h-3.5 animate-spin" /> Aguardando Confirmação
+                              </span>
+                            )}
+                            {isApproved && (
+                              <span className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-bold text-xs flex items-center gap-1.5">
+                                <CheckCircle className="w-3.5 h-3.5" /> Aprovado pela Empresa!
+                              </span>
+                            )}
+                            {isInWash && (
+                              <span className="px-3 py-1.5 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-300 font-bold text-xs flex items-center gap-1.5">
+                                <Droplet className="w-3.5 h-3.5 animate-pulse" /> Em Lavagem no Pátio
+                              </span>
+                            )}
+                            {isDone && (
+                              <span className="px-3 py-1.5 rounded-xl bg-emerald-600/30 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center gap-1.5">
+                                <Star className="w-3.5 h-3.5 fill-emerald-300" /> Lavagem Concluída!
+                              </span>
+                            )}
+                            {isCancelled && (
+                              <span className="px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 font-bold text-xs">
+                                Cancelado
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+
+            {/* Veículos na Operação de Pátio */}
+            <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 shadow-xl space-y-4">
+              <div className="flex items-center justify-between border-b border-[#1e293b] pb-3">
+                <div className="flex items-center gap-2">
+                  <Car className="w-5 h-5 text-cyan-400" />
+                  <h3 className="text-base font-bold text-white">Veículos Atualmente no Pátio da Empresa</h3>
+                </div>
+                <span className="text-xs text-slate-400 font-mono">
+                  {patioWashes.length} no pátio agora
+                </span>
+              </div>
+
+              {patioWashes.length === 0 ? (
+                <p className="text-xs text-slate-500 py-4 text-center">
+                  Nenhum veículo em lavagem no momento no pátio.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {patioWashes.map(w => (
+                    <div key={w.id} className="bg-[#020617] border border-[#1e293b] p-3.5 rounded-xl space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-xs text-white truncate">{w.vehicle}</span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-cyan-300 font-bold">
+                          {w.plate}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-400">{w.service}</div>
+                      <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between">
+                        <span className="text-[10px] text-slate-500">{w.clientName}</span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                          w.status === 'Concluído' ? 'bg-emerald-500/20 text-emerald-400' :
+                          w.status === 'Em Execução' ? 'bg-blue-500/20 text-blue-400 animate-pulse' :
+                          'bg-amber-500/20 text-amber-400'
+                        }`}>
+                          {w.status}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ================= ABA 1: AGENDAMENTO & SERVIÇOS ================= */}
         {portalTab === 'agendar' && (
         <>
         <div className="relative rounded-2xl overflow-hidden border border-[#1e293b] shadow-2xl bg-[#0f172a]">

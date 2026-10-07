@@ -678,3 +678,513 @@ export async function findTenantIdByClientEmailFirestore(email: string): Promise
   }
 }
 
+/**
+ * =================================================================
+ * 6. SINCRONIZAÇÃO EM TEMPO REAL ENTRE CELULAR E COMPUTADOR
+ * Coleções no Firestore:
+ * - /tenants/{tenantId}/appointments/{appointmentId}
+ * - /tenants/{tenantId}/washItems/{washItemId}
+ * - /tenants/{tenantId}/washHistory/{historyId}
+ * - /tenants/{tenantId}/redemptions/{redemptionId}
+ * - /tenants/{tenantId}/fidelityPoints/{clientKey}
+ * - /tenants/{tenantId}/clients/{clientId}
+ * =================================================================
+ */
+
+// Helper para normalizar ID
+function cleanDocId(id: string): string {
+  if (!id) return `doc-${Date.now()}`;
+  return String(id).trim().replace(/[^a-zA-Z0-9_\-.:@]/g, '_') || `doc-${Date.now()}`;
+}
+
+/**
+ * Busca inquilino (Tenant) diretamente no Firestore por ID, slug ou código.
+ * Essencial para inicializar imediatamente o dispositivo móvel com a mesma empresa do computador.
+ */
+export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Tenant | null> {
+  try {
+    const raw = String(idOrSlug || '').trim();
+    if (!raw) return null;
+    const cleanId = cleanDocId(raw);
+    const cleanSlug = raw.toLowerCase().replace(/[^a-z0-9-]/g, '');
+
+    // 1. Tenta buscar direto pelo ID do tenant em /tenants/{cleanId}
+    try {
+      const directDoc = await getDoc(doc(db, 'tenants', cleanId));
+      if (directDoc.exists()) {
+        const data = directDoc.data();
+        return {
+          id: directDoc.id,
+          name: data.name || data.nome || 'Lava-Jato',
+          code: data.code || 'LJ',
+          domain: data.domain || `${directDoc.id}.saas.com`,
+          plan: data.plan || 'Pro',
+          status: data.status || 'Ativo',
+          endUsersCount: data.endUsersCount ?? 1,
+          maxUsers: data.maxUsers ?? 500,
+          mrrAmount: data.mrrAmount ?? 0,
+          createdAt: data.createdAt || new Date().toLocaleDateString('pt-BR'),
+          contactEmail: data.contactEmail || '',
+          contactPhone: data.contactPhone || '',
+          ownerName: data.ownerName || '',
+          lastActive: data.lastActive || 'Agora mesmo',
+          logoUrl: data.logoUrl || undefined,
+          address: data.address || undefined
+        };
+      }
+    } catch (_) {}
+
+    // 2. Tenta buscar pelo slug na coleção /empresas
+    if (cleanSlug) {
+      try {
+        const qEmpresas = query(collection(db, 'empresas'), where('slug', '==', cleanSlug), limit(1));
+        const empSnap = await getDocs(qEmpresas);
+        if (!empSnap.empty) {
+          const empDoc = empSnap.docs[0];
+          const data = empDoc.data();
+          let fullData = data;
+          try {
+            const fullDoc = await getDoc(doc(db, 'tenants', empDoc.id));
+            if (fullDoc.exists()) fullData = fullDoc.data();
+          } catch (_) {}
+          return {
+            id: empDoc.id,
+            name: fullData.name || fullData.nome || data.nome || 'Lava-Jato',
+            code: fullData.code || 'LJ',
+            domain: fullData.domain || `${cleanSlug}.saas.com`,
+            plan: fullData.plan || 'Pro',
+            status: fullData.status || 'Ativo',
+            endUsersCount: fullData.endUsersCount ?? 1,
+            maxUsers: fullData.maxUsers ?? 500,
+            mrrAmount: fullData.mrrAmount ?? 0,
+            createdAt: fullData.createdAt || new Date().toLocaleDateString('pt-BR'),
+            contactEmail: fullData.contactEmail || '',
+            contactPhone: fullData.contactPhone || '',
+            ownerName: fullData.ownerName || '',
+            lastActive: fullData.lastActive || 'Agora mesmo',
+            logoUrl: fullData.logoUrl || data.logoUrl || undefined,
+            address: fullData.address || undefined
+          };
+        }
+      } catch (_) {}
+    }
+
+    // 3. Tenta buscar pelo código em /tenants (ex: AC, LJ)
+    try {
+      const qCode = query(collection(db, 'tenants'), where('code', '==', raw.toUpperCase()), limit(1));
+      const codeSnap = await getDocs(qCode);
+      if (!codeSnap.empty) {
+        const cDoc = codeSnap.docs[0];
+        const data = cDoc.data();
+        return {
+          id: cDoc.id,
+          name: data.name || 'Lava-Jato',
+          code: data.code || raw.toUpperCase(),
+          domain: data.domain || `${cDoc.id}.saas.com`,
+          plan: data.plan || 'Pro',
+          status: data.status || 'Ativo',
+          endUsersCount: data.endUsersCount ?? 1,
+          maxUsers: data.maxUsers ?? 500,
+          mrrAmount: data.mrrAmount ?? 0,
+          createdAt: data.createdAt || new Date().toLocaleDateString('pt-BR'),
+          contactEmail: data.contactEmail || '',
+          contactPhone: data.contactPhone || '',
+          ownerName: data.ownerName || '',
+          lastActive: data.lastActive || 'Agora mesmo',
+          logoUrl: data.logoUrl || undefined,
+          address: data.address || undefined
+        };
+      }
+    } catch (_) {}
+
+    return null;
+  } catch (err) {
+    console.warn('getTenantByIdOrSlugFirestore error:', err);
+    return null;
+  }
+}
+
+// ================= 6.1 AGENDAMENTOS EM TEMPO REAL =================
+export async function saveAppointmentToFirestore(tenantId: string, appointment: any): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const appId = cleanDocId(appointment.id || `app-${Date.now()}`);
+    const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
+    const payload = removeUndefinedFields({
+      ...appointment,
+      id: appId,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(docRef, payload, { merge: true });
+
+    // Salva também na raiz para indexação direta caso necessário
+    try {
+      await setDoc(doc(db, 'appointments', appId), payload, { merge: true });
+    } catch (_) {}
+
+    console.log(`📡 [RealTime Sync] Agendamento ${appId} salvo no Firestore para o lava-jato ${cleanTId}`);
+    return true;
+  } catch (err) {
+    console.error('saveAppointmentToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function updateAppointmentStatusInFirestore(
+  tenantId: string, 
+  appointmentId: string, 
+  status: string,
+  extra: Record<string, any> = {}
+): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const appId = cleanDocId(appointmentId);
+    const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
+    await updateDoc(docRef, removeUndefinedFields({
+      status,
+      ...extra,
+      updatedAt: new Date().toISOString()
+    }));
+    return true;
+  } catch (err) {
+    console.error('updateAppointmentStatusInFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteAppointmentFromFirestore(tenantId: string, appointmentId: string): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const appId = cleanDocId(appointmentId);
+    const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
+    await deleteDoc(docRef);
+    return true;
+  } catch (err) {
+    console.error('deleteAppointmentFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantAppointments(
+  tenantId: string, 
+  callback: (appointments: any[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'appointments');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        });
+      });
+      // Ordena por dateTime decrescente ou mais recente
+      items.sort((a, b) => {
+        const timeA = a.updatedAt || a.dateTime || '';
+        const timeB = b.updatedAt || b.dateTime || '';
+        return String(timeB).localeCompare(String(timeA));
+      });
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantAppointments snapshot error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantAppointments init error:', err);
+    return () => {};
+  }
+}
+
+export async function syncAllLocalAppointmentsToFirestore(tenantId: string, appointments: any[]): Promise<void> {
+  if (!appointments || appointments.length === 0) return;
+  for (const app of appointments) {
+    if (app && app.id && !app.id.startsWith('app-init-')) {
+      await saveAppointmentToFirestore(tenantId, app);
+    }
+  }
+}
+
+// ================= 6.2 ITENS DE LAVAGEM / FILA DO PÁTIO EM TEMPO REAL =================
+export async function saveWashItemToFirestore(tenantId: string, washItem: any): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const washId = cleanDocId(washItem.id || `w-${Date.now()}`);
+    const docRef = doc(db, 'tenants', cleanTId, 'washItems', washId);
+    const payload = removeUndefinedFields({
+      ...washItem,
+      id: washId,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(docRef, payload, { merge: true });
+    console.log(`📡 [RealTime Sync] Veículo ${washItem.plate || washId} salvo no pátio do Firestore`);
+    return true;
+  } catch (err) {
+    console.error('saveWashItemToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function updateWashItemStatusInFirestore(
+  tenantId: string, 
+  washItemId: string, 
+  status: string,
+  extra: Record<string, any> = {}
+): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const washId = cleanDocId(washItemId);
+    const docRef = doc(db, 'tenants', cleanTId, 'washItems', washId);
+    await updateDoc(docRef, removeUndefinedFields({
+      status,
+      ...extra,
+      updatedAt: new Date().toISOString()
+    }));
+    return true;
+  } catch (err) {
+    console.error('updateWashItemStatusInFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteWashItemFromFirestore(tenantId: string, washItemId: string): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const washId = cleanDocId(washItemId);
+    const docRef = doc(db, 'tenants', cleanTId, 'washItems', washId);
+    await deleteDoc(docRef);
+    return true;
+  } catch (err) {
+    console.error('deleteWashItemFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantWashItems(
+  tenantId: string, 
+  callback: (washItems: any[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'washItems');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        });
+      });
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantWashItems snapshot error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantWashItems init error:', err);
+    return () => {};
+  }
+}
+
+export async function syncAllLocalWashesToFirestore(tenantId: string, washes: any[]): Promise<void> {
+  if (!washes || washes.length === 0) return;
+  for (const w of washes) {
+    if (w && w.id && !w.id.startsWith('w-from-app-init-') && !w.id.startsWith('wh-')) {
+      await saveWashItemToFirestore(tenantId, w);
+    }
+  }
+}
+
+// ================= 6.3 HISTÓRICO DE LAVAGENS EM TEMPO REAL =================
+export async function saveWashHistoryToFirestore(tenantId: string, record: any): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const histId = cleanDocId(record.id || `wh-${Date.now()}`);
+    const docRef = doc(db, 'tenants', cleanTId, 'washHistory', histId);
+    const payload = removeUndefinedFields({
+      ...record,
+      id: histId,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(docRef, payload, { merge: true });
+    return true;
+  } catch (err) {
+    console.error('saveWashHistoryToFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantWashHistory(
+  tenantId: string, 
+  callback: (records: any[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'washHistory');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        });
+      });
+      items.sort((a, b) => String(b.date || b.updatedAt || '').localeCompare(String(a.date || a.updatedAt || '')));
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantWashHistory snapshot error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantWashHistory init error:', err);
+    return () => {};
+  }
+}
+
+// ================= 6.4 RESGATES DE FIDELIDADE EM TEMPO REAL =================
+export async function saveFidelityRedemptionToFirestore(tenantId: string, redemption: any): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const redId = cleanDocId(redemption.id || `red-${Date.now()}`);
+    const docRef = doc(db, 'tenants', cleanTId, 'redemptions', redId);
+    const payload = removeUndefinedFields({
+      ...redemption,
+      id: redId,
+      tenantId: cleanTId,
+      status: redemption.status || 'pending',
+      requestedAt: redemption.requestedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(docRef, payload, { merge: true });
+    console.log(`🎁 [RealTime Sync] Resgate de fidelidade ${redId} solicitado`);
+    return true;
+  } catch (err) {
+    console.error('saveFidelityRedemptionToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function updateFidelityRedemptionInFirestore(
+  tenantId: string, 
+  redemptionId: string, 
+  status: 'pending' | 'approved' | 'rejected' | 'used'
+): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const redId = cleanDocId(redemptionId);
+    const docRef = doc(db, 'tenants', cleanTId, 'redemptions', redId);
+    await updateDoc(docRef, removeUndefinedFields({
+      status,
+      updatedAt: new Date().toISOString()
+    }));
+    return true;
+  } catch (err) {
+    console.error('updateFidelityRedemptionInFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantRedemptions(
+  tenantId: string, 
+  callback: (redemptions: any[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'redemptions');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        });
+      });
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantRedemptions snapshot error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantRedemptions init error:', err);
+    return () => {};
+  }
+}
+
+// ================= 6.5 PONTOS DE FIDELIDADE EM TEMPO REAL =================
+export async function saveFidelityPointsToFirestore(
+  tenantId: string, 
+  clientKey: string, 
+  points: number
+): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const cleanKey = cleanDocId(clientKey);
+    const docRef = doc(db, 'tenants', cleanTId, 'fidelityPoints', cleanKey);
+    await setDoc(docRef, removeUndefinedFields({
+      points,
+      clientKey: cleanKey,
+      updatedAt: new Date().toISOString()
+    }), { merge: true });
+    return true;
+  } catch (err) {
+    console.error('saveFidelityPointsToFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToFidelityPoints(
+  tenantId: string, 
+  clientKey: string, 
+  callback: (points: number) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const cleanKey = cleanDocId(clientKey);
+    const docRef = doc(db, 'tenants', cleanTId, 'fidelityPoints', cleanKey);
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        callback(Number(data.points || 0));
+      }
+    }, (err) => {
+      console.warn('subscribeToFidelityPoints snapshot error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToFidelityPoints init error:', err);
+    return () => {};
+  }
+}
+
+// ================= 6.6 CLIENTES DA EMPRESA EM TEMPO REAL =================
+export function subscribeToTenantClients(
+  tenantId: string, 
+  callback: (clients: any[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'clients');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        });
+      });
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantClients snapshot error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantClients init error:', err);
+    return () => {};
+  }
+}
+
+

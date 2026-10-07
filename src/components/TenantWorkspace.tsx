@@ -47,7 +47,26 @@ import { Tenant } from '../types';
 import { ClientPortal } from './ClientPortal';
 import { TenantConfigSettings } from './TenantConfigSettings';
 import { PWAInstallButton } from './PWAInstallButton';
-import { saveTenantToFirestore } from '../lib/firebaseService';
+import { 
+  saveTenantToFirestore,
+  saveAppointmentToFirestore,
+  updateAppointmentStatusInFirestore,
+  deleteAppointmentFromFirestore,
+  subscribeToTenantAppointments,
+  syncAllLocalAppointmentsToFirestore,
+  saveWashItemToFirestore,
+  updateWashItemStatusInFirestore,
+  deleteWashItemFromFirestore,
+  subscribeToTenantWashItems,
+  syncAllLocalWashesToFirestore,
+  saveWashHistoryToFirestore,
+  subscribeToTenantWashHistory,
+  saveFidelityRedemptionToFirestore,
+  updateFidelityRedemptionInFirestore,
+  subscribeToTenantRedemptions,
+  saveFidelityPointsToFirestore,
+  subscribeToTenantClients
+} from '../lib/firebaseService';
 
 interface WashItem {
   id: string;
@@ -345,34 +364,83 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     localStorage.setItem(`saas_tenant_products_${tenant.id}`, JSON.stringify(products));
   }, [products, tenant.id]);
 
-  // Real-time synchronization listener for incoming appointments & updates
+  // ================= 1. SINCRONIZAÇÃO EM TEMPO REAL CELULAR ⇄ COMPUTADOR (FIRESTORE) =================
   useEffect(() => {
+    // 1. Sincroniza dados locais pré-existentes para o Firestore na inicialização
+    if (appointments.length > 0) {
+      syncAllLocalAppointmentsToFirestore(tenant.id, appointments).catch(console.error);
+    }
+    if (washItems.length > 0) {
+      syncAllLocalWashesToFirestore(tenant.id, washItems).catch(console.error);
+    }
+
+    // 2. Escuta Agendamentos em Tempo Real do Firestore
+    const unsubApps = subscribeToTenantAppointments(tenant.id, (remoteApps) => {
+      if (remoteApps && remoteApps.length > 0) {
+        setAppointments(prev => {
+          // Detecta se chegou um novo agendamento vindo do celular
+          const newFromPhone = remoteApps.find(ra => !prev.some(p => p.id === ra.id));
+          if (newFromPhone && !newFromPhone.id?.startsWith('app-manual-')) {
+            showToast(`🔔 Novo agendamento recebido do celular! (${newFromPhone.clientName} - ${newFromPhone.service})`);
+          }
+          return remoteApps;
+        });
+        localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remoteApps));
+      }
+    });
+
+    // 3. Escuta Fila do Pátio (Wash Items) em Tempo Real
+    const unsubWashes = subscribeToTenantWashItems(tenant.id, (remoteWashes) => {
+      if (remoteWashes && remoteWashes.length > 0) {
+        setWashItems(remoteWashes);
+        localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(remoteWashes));
+      }
+    });
+
+    // 4. Escuta Histórico de Lavagens em Tempo Real
+    const unsubHistory = subscribeToTenantWashHistory(tenant.id, (remoteHistory) => {
+      if (remoteHistory && remoteHistory.length > 0) {
+        setWashHistory(remoteHistory);
+        localStorage.setItem(`saas_tenant_wash_history_${tenant.id}`, JSON.stringify(remoteHistory));
+      }
+    });
+
+    // 5. Escuta Resgates de Fidelidade em Tempo Real do celular
+    const unsubReds = subscribeToTenantRedemptions(tenant.id, (remoteReds) => {
+      const pending = remoteReds.find(r => r.status === 'pending');
+      if (pending) {
+        setRedemptionData({
+          clientName: pending.clientName,
+          clientPhone: pending.clientPhone,
+          vehicle: pending.vehicle
+        });
+        showToast(`🎁 Solicitação de Resgate de Lavagem Grátis recebida de ${pending.clientName}!`);
+      }
+    });
+
+    // Fallback de sincronização para eventos de storage local
     const refreshData = () => {
       const savedApps = localStorage.getItem(`saas_tenant_appointments_${tenant.id}`);
       if (savedApps) {
         try {
           const parsed = JSON.parse(savedApps);
           if (Array.isArray(parsed)) {
-            if (!isDemoTenant) {
-              setAppointments(parsed.filter(a => !a.id.startsWith('app-init-')));
-            } else {
-              setAppointments(parsed);
-            }
+            setAppointments(parsed);
           }
-        } catch (e) {
-          console.error(e);
-        }
+        } catch (e) {}
       }
     };
 
     window.addEventListener('storage', refreshData);
     window.addEventListener('saas_data_sync', refreshData);
-    const interval = setInterval(refreshData, 1500);
 
     return () => {
+      unsubApps();
+      unsubWashes();
+      unsubHistory();
+      unsubReds();
       window.removeEventListener('storage', refreshData);
       window.removeEventListener('saas_data_sync', refreshData);
-      clearInterval(interval);
     };
   }, [tenant.id]);
 
@@ -502,6 +570,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     };
 
     setWashItems(prev => [freeWash, ...prev]);
+    saveWashItemToFirestore(tenant.id, freeWash).catch(console.error);
+    updateFidelityRedemptionInFirestore(tenant.id, (redemptionData as any).id || '', 'approved').catch(console.error);
+    saveFidelityPointsToFirestore(tenant.id, redemptionData.clientPhone || redemptionData.clientName || 'global', 0).catch(console.error);
 
     // 2. Reset points and remove redemption request
     localStorage.setItem(`saas_fidelity_pts_${tenant.id}`, '0');
@@ -571,12 +642,14 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         durationMinutes: 45
       };
       setWashHistory(prev => [historyEntry, ...prev]);
+      saveWashHistoryToFirestore(tenant.id, historyEntry).catch(console.error);
 
       // 3. EXCLUSIVELY AUTOMATIC FIDELITY POINT ATTRIBUTION BY LAVA-JATO!
       const keyPts = `saas_fidelity_pts_${tenant.id}`;
       const currentPts = Number(localStorage.getItem(keyPts) || '0');
       const newPts = currentPts + 1;
       localStorage.setItem(keyPts, newPts.toString());
+      saveFidelityPointsToFirestore(tenant.id, item.clientPhone || item.clientName || 'global', newPts).catch(console.error);
 
       if (newPts >= 10) {
         showToast(`✨ +1 Ponto concedido para ${item.clientName}! 🎉 CLIENTE ALCANÇOU 10 PONTOS (Liberado para Resgate Grátis no Portal)! Adicionado ao Histórico.`);
@@ -586,6 +659,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     }
 
     setWashItems(prev => prev.map(w => w.id === washId ? { ...w, status: nextStatus } : w));
+    updateWashItemStatusInFirestore(tenant.id, washId, nextStatus).catch(console.error);
   };
 
   const handleAddWash = (e: React.FormEvent) => {
@@ -612,6 +686,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     };
 
     setWashItems(prev => [newWash, ...prev]);
+    saveWashItemToFirestore(tenant.id, newWash).catch(console.error);
     setShowNewWashModal(false);
     setNewPlate('');
     setNewVehicle('');
@@ -649,10 +724,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     setWashItems(newWashList);
     setAppointments(newAppList);
+    saveWashItemToFirestore(tenant.id, washFromApp).catch(console.error);
+    updateAppointmentStatusInFirestore(tenant.id, app.id, 'Em Lavagem').catch(console.error);
     localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
-    showToast(`✅ Agendamento de ${app.clientName} enviado para a Fila do Pátio e zerado em Agendamentos!`);
+    showToast(`✅ Agendamento de ${app.clientName} enviado para a Fila do Pátio e sincronizado!`);
   };
 
   const handleApproveAllAppointments = () => {
@@ -694,15 +771,22 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     setWashItems(newWashList);
     setAppointments(remainingApps);
+    for (const w of newWashes) {
+      saveWashItemToFirestore(tenant.id, w).catch(console.error);
+    }
+    for (const a of pendingApps) {
+      updateAppointmentStatusInFirestore(tenant.id, a.id, 'Em Lavagem').catch(console.error);
+    }
     localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remainingApps));
     window.dispatchEvent(new Event('storage'));
-    showToast(`🚀 ${pendingApps.length} agendamentos enviados para a Fila do Pátio e zerados em Agendamentos!`);
+    showToast(`🚀 ${pendingApps.length} agendamentos enviados para a Fila do Pátio e sincronizados!`);
   };
 
   const handleCancelAppointment = (appId: string) => {
     const newAppList = appointments.map(a => a.id === appId ? { ...a, status: 'Cancelado' as const } : a);
     setAppointments(newAppList);
+    updateAppointmentStatusInFirestore(tenant.id, appId, 'Cancelado').catch(console.error);
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
     showToast(`Agendamento marcado como cancelado.`);
@@ -715,6 +799,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const handleDeleteAppointment = (appId: string) => {
     const newAppList = appointments.filter(a => a.id !== appId);
     setAppointments(newAppList);
+    deleteAppointmentFromFirestore(tenant.id, appId).catch(console.error);
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
     showToast(`Agendamento excluído.`);
@@ -744,6 +829,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     const updatedApps = [newApp, ...appointments];
     setAppointments(updatedApps);
+    saveAppointmentToFirestore(tenant.id, newApp).catch(console.error);
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updatedApps));
     window.dispatchEvent(new Event('storage'));
 
@@ -840,6 +926,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const handleDeleteWashItem = (washId: string) => {
     const item = washItems.find(w => w.id === washId);
     setWashItems(prev => prev.filter(w => w.id !== washId));
+    deleteWashItemFromFirestore(tenant.id, washId).catch(console.error);
     showToast(`🗑️ Veículo ${item?.plate || ''} removido do pátio.`);
   };
 
@@ -1162,8 +1249,13 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   {activeTab === 'saas-config' && <><Sliders className="w-5 h-5 text-blue-400" /> Módulos SaaS Root</>}
                   {activeTab === 'portal-cliente' && <><Sparkles className="w-5 h-5 text-amber-400" /> Portal do Cliente (Visão Pública)</>}
                 </h2>
-                <p className="text-[11px] text-slate-400 hidden sm:block">
-                  {tenant.nomeFantasia || tenant.name} · Gerenciamento centralizado
+                <p className="text-[11px] text-slate-400 hidden sm:flex items-center gap-2">
+                  <span>{tenant.nomeFantasia || tenant.name}</span>
+                  <span className="text-slate-600">·</span>
+                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-semibold text-[10px]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Celular ⇄ Computador Sincronizados (Nuvem)
+                  </span>
                 </p>
               </div>
             </div>

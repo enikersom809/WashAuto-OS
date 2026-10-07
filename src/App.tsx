@@ -32,7 +32,9 @@ import {
   deleteTenantFromFirestore, 
   subscribeToTenantsFirestore,
   saveCompanyEmailMapping,
-  syncAllLocalTenantsToFirestore
+  syncAllLocalTenantsToFirestore,
+  saveAppointmentToFirestore,
+  getTenantByIdOrSlugFirestore
 } from './lib/firebaseService';
 
 export type AuthSession = 
@@ -154,6 +156,32 @@ export default function App() {
       }
     });
     return () => unsubscribe();
+  }, []);
+
+  // 📱 Detecta imediatamente se o dispositivo (ex: Celular via QR Code ou Link) abriu com tenantId ou empresa na URL
+  // e carrega diretamente do Firestore para garantir comunicação instantânea com o computador da empresa
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const urlTenantId = params.get('tenantId') || params.get('t');
+    const urlEmpresa = params.get('empresa') || params.get('slug') || params.get('lava');
+    const targetKey = urlTenantId || urlEmpresa;
+
+    if (targetKey) {
+      getTenantByIdOrSlugFirestore(targetKey).then(found => {
+        if (found) {
+          setTenants(prev => {
+            const exists = prev.some(t => t.id === found.id);
+            if (!exists) {
+              const updated = [found, ...prev];
+              localStorage.setItem('saas_master_tenants', JSON.stringify(updated));
+              return updated;
+            }
+            return prev;
+          });
+        }
+      }).catch(console.error);
+    }
   }, []);
 
   // Sincronização inicial automática: caso o usuário já tenha cadastrado empresas no navegador
@@ -419,18 +447,25 @@ export default function App() {
             onLogout={() => setAuthSession(null)}
             onNewAppointmentCreated={(newApp) => {
               const tenantId = authSession.tenant.id;
+              const appointmentItem = {
+                id: (newApp as any).id || `app-${Date.now()}`,
+                dateTime: newApp.dateTime,
+                clientName: newApp.clientName,
+                clientPhone: (newApp as any).clientPhone || '',
+                clientEmail: (newApp as any).clientEmail || '',
+                vehicle: newApp.vehicle,
+                plate: newApp.plate,
+                service: newApp.service,
+                price: newApp.price,
+                status: 'Pendente',
+                addressSummary: (newApp as any).addressSummary || ''
+              };
+
+              // 🚀 Comunicação em tempo real Celular -> Computador via Firestore
+              saveAppointmentToFirestore(tenantId, appointmentItem).catch(console.error);
+
               try {
                 const existing = JSON.parse(localStorage.getItem(`saas_tenant_appointments_${tenantId}`) || '[]');
-                const appointmentItem = {
-                  id: (newApp as any).id || `app-${Date.now()}`,
-                  dateTime: newApp.dateTime,
-                  clientName: newApp.clientName,
-                  vehicle: newApp.vehicle,
-                  plate: newApp.plate,
-                  service: newApp.service,
-                  price: newApp.price,
-                  status: 'Pendente'
-                };
                 const updated = [appointmentItem, ...existing.filter((a: any) => a.id !== appointmentItem.id)];
                 localStorage.setItem(`saas_tenant_appointments_${tenantId}`, JSON.stringify(updated));
                 window.dispatchEvent(new Event('storage'));

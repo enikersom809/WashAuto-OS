@@ -22,10 +22,10 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
   const [copied, setCopied] = React.useState(false);
   const printContainerRef = useRef<HTMLDivElement>(null);
 
-  // URL dinâmica do PWA apontando diretamente para a tela de cadastro da empresa
+  // URL dinâmica do PWA apontando diretamente para a tela de cadastro e agendamento da empresa
   const targetUrl = typeof window !== 'undefined' 
-    ? `${window.location.origin}/?empresa=${empresa.slug}&cadastro=cliente`
-    : `https://app.saas.com/?empresa=${empresa.slug}&cadastro=cliente`;
+    ? `${window.location.origin}/?empresa=${encodeURIComponent(empresa.slug)}&tenantId=${encodeURIComponent(empresa.id || '')}&cadastro=cliente`
+    : `https://app.saas.com/?empresa=${encodeURIComponent(empresa.slug)}&tenantId=${encodeURIComponent(empresa.id || '')}&cadastro=cliente`;
 
   // Copiar link para o clipboard
   const handleCopyLink = async () => {
