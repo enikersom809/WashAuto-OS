@@ -15,6 +15,7 @@ import {
 import { 
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
+  signInAnonymously,
   updateProfile, 
   signOut,
   type User
@@ -58,33 +59,13 @@ export function removeUndefinedFields<T>(obj: T): T {
 }
 
 /**
- * Garante uma sessão de autenticação ativa no Firebase Auth.
- * Se nenhum usuário estiver autenticado (ex: ao salvar tenants no Super Admin),
- * autentica automaticamente para satisfazer as regras de segurança do Firestore (request.auth != null).
+ * Obtém a sessão de autenticação ativa no Firebase Auth.
+ * Não força login automático falso de usuário antigo para não travar dispositivos móveis.
  */
 export async function ensureFirebaseAuthSession(): Promise<User | null> {
-  if (auth.currentUser) {
-    return auth.currentUser;
-  }
-
-  const defaultEmail = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_email')) || 'admin_super@gmail.com';
-  const defaultPassword = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_password')) || 'admin124050';
-
-  try {
-    const cred = await signInWithEmailAndPassword(auth, defaultEmail, defaultPassword);
-    return cred.user;
-  } catch (err: any) {
-    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-      try {
-        const createCred = await createUserWithEmailAndPassword(auth, defaultEmail, defaultPassword);
-        return createCred.user;
-      } catch (cErr) {
-        console.warn('Falha ao registrar sessão admin:', cErr);
-      }
-    }
-    return null;
-  }
+  return auth.currentUser;
 }
+
 
 export async function saveTenantToFirestore(tenant: Tenant): Promise<boolean> {
   try {
@@ -410,7 +391,21 @@ export async function registerClientInFirebaseAuth(params: {
       if (tenantId) {
         await setDoc(doc(db, 'tenants', tenantId, 'clients', clientDocId), clientFirestoreData, { merge: true });
       }
-      console.log(`✅ [Firestore] Perfil do cliente salvo nas coleções /clients e /tenants/${tenantId}/clients`);
+
+      // 👤 Coleção oficial 'usuarios' (Para checagem de sessão e sincronização entre PC e Celular)
+      await setDoc(doc(db, 'usuarios', clientDocId), {
+        uid: clientDocId,
+        nome: name || 'Cliente',
+        email: normalizedEmail,
+        telefone: phone || '',
+        role: 'cliente',
+        tenantId: tenantId || 'autoclean',
+        empresaId: tenantId || 'autoclean',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      console.log(`✅ [Firestore] Perfil do cliente salvo nas coleções /clients e /usuarios/${clientDocId}`);
     } catch (dbErr) {
       handleFirestoreError(dbErr, OperationType.CREATE, `clients/${clientDocId}`);
     }
@@ -427,6 +422,155 @@ export async function registerClientInFirebaseAuth(params: {
     };
   }
 }
+
+/**
+ * =================================================================
+ * 3. GESTÃO DE USUÁRIOS NO FIRESTORE (/usuarios)
+ * Sincronização direta na nuvem para fim do isolamento entre dispositivos.
+ * =================================================================
+ */
+
+export async function saveUsuarioFirestore(uid: string, data: any): Promise<void> {
+  try {
+    const payload = removeUndefinedFields({
+      uid,
+      ...data,
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(doc(db, 'usuarios', uid), payload, { merge: true });
+    console.log(`✅ [Firestore] Documento /usuarios/${uid} atualizado com sucesso.`);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `usuarios/${uid}`);
+  }
+}
+
+export async function getUsuarioFirestore(uid: string): Promise<any | null> {
+  try {
+    const snap = await getDoc(doc(db, 'usuarios', uid));
+    if (snap.exists()) {
+      return snap.data();
+    }
+    return null;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `usuarios/${uid}`);
+    return null;
+  }
+}
+
+export async function deleteUsuarioFirestore(uid: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'usuarios', uid));
+    console.log(`🗑️ [Firestore] Documento /usuarios/${uid} excluído.`);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `usuarios/${uid}`);
+  }
+}
+
+/**
+ * Cadastra e autentica Empresa (Lava-Jato) no Firebase Auth e no Firestore (/usuarios e /tenants)
+ */
+export async function registerEmpresaInFirebaseAuth(params: {
+  tenant: Tenant;
+  email: string;
+  password?: string;
+  name?: string;
+}): Promise<{ success: boolean; user?: User; errorMessage?: string }> {
+  const { tenant, email, password, name } = params;
+  const normalizedEmail = email.trim().toLowerCase();
+  const effectivePassword = password && password.trim().length >= 6 
+    ? password.trim() 
+    : 'Admin@' + (tenant.code || 'LJ') + '123456';
+
+  try {
+    let userRecord: User;
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
+      userRecord = userCredential.user;
+      console.log(`🔐 [Firebase Auth] Conta de Empresa criada: ${userRecord.uid} (${normalizedEmail})`);
+    } catch (err: any) {
+      if (err.code === 'auth/email-already-in-use') {
+        const loginCred = await signInWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
+        userRecord = loginCred.user;
+      } else {
+        throw err;
+      }
+    }
+
+    if (userRecord && (name || tenant.name)) {
+      try {
+        await updateProfile(userRecord, { displayName: name || tenant.name });
+      } catch (_) {}
+    }
+
+    // Salva empresa no Firestore /tenants
+    await saveTenantToFirestore(tenant);
+
+    // Salva perfil na coleção oficial /usuarios para verificação de sessão e Dashboard
+    await setDoc(doc(db, 'usuarios', userRecord.uid), {
+      uid: userRecord.uid,
+      nome: name || tenant.ownerName || tenant.name,
+      email: normalizedEmail,
+      role: 'empresa',
+      tenantId: tenant.id,
+      empresaId: tenant.id,
+      empresaNome: tenant.name,
+      empresa: tenant,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    console.log(`✅ [Firestore] Empresa registrada no Auth e /usuarios/${userRecord.uid}`);
+    return { success: true, user: userRecord };
+  } catch (error: any) {
+    console.error('Erro ao registrar empresa no Firebase Auth:', error);
+    return { success: false, errorMessage: error.message || 'Falha ao registrar empresa.' };
+  }
+}
+
+/**
+ * Autentica Empresa (Lava-Jato) no Firebase Auth e sincroniza com /usuarios
+ */
+export async function loginEmpresaInFirebaseAuth(email: string, password: string): Promise<{ success: boolean; user?: User; errorMessage?: string }> {
+  const normalizedEmail = email.trim().toLowerCase();
+  try {
+    const cred = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+    return { success: true, user: cred.user };
+  } catch (error: any) {
+    return { success: false, errorMessage: error.message || 'Senha ou e-mail de empresa incorreto.' };
+  }
+}
+
+/**
+ * Autentica Super Admin no Firebase Auth e garante documento em /usuarios
+ */
+export async function loginSuperAdminInFirebaseAuth(email: string, password: string): Promise<{ success: boolean; user?: User; errorMessage?: string }> {
+  const normalizedEmail = email.trim().toLowerCase();
+  try {
+    let userCredential;
+    try {
+      userCredential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+    } catch (err: any) {
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+        userCredential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+      } else {
+        throw err;
+      }
+    }
+
+    await setDoc(doc(db, 'usuarios', userCredential.user.uid), {
+      uid: userCredential.user.uid,
+      nome: 'Super Admin',
+      email: normalizedEmail,
+      role: 'admin',
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    return { success: true, user: userCredential.user };
+  } catch (error: any) {
+    return { success: false, errorMessage: error.message || 'Falha ao autenticar Super Admin.' };
+  }
+}
+
 
 /**
  * Salva a Ficha Completa de Cadastro do Cliente (com Endereço e Veículos Dinâmicos)
@@ -447,6 +591,7 @@ export async function saveClientFullRegistration(
   }
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanId = data.phone 
       ? data.phone.replace(/\D/g, '') 
       : (data.email ? data.email.replace(/[^a-zA-Z0-9]/g, '_') : `c-${Date.now()}`);
@@ -478,10 +623,27 @@ export async function loginClientInFirebaseAuth(email: string, password?: string
   try {
     const userCredential = await signInWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
     console.log(`🔓 [Firebase Auth] Usuário autenticado com sucesso: ${userCredential.user.uid}`);
+
+    // Garante sincronização em /usuarios caso ainda não conste
+    try {
+      const uDoc = await getDoc(doc(db, 'usuarios', userCredential.user.uid));
+      if (!uDoc.exists()) {
+        await setDoc(doc(db, 'usuarios', userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          nome: userCredential.user.displayName || normalizedEmail.split('@')[0],
+          email: normalizedEmail,
+          role: 'cliente',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+    } catch (_) {}
+
     return {
       success: true,
       user: userCredential.user
     };
+
   } catch (error: any) {
     // Se o usuário não foi encontrado, tenta criar automaticamente para comodidade
     if (error.code === 'auth/user-not-found') {
@@ -703,6 +865,7 @@ function cleanDocId(id: string): string {
  */
 export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Tenant | null> {
   try {
+    await ensureFirebaseAuthSession();
     const raw = String(idOrSlug || '').trim();
     if (!raw) return null;
     const cleanId = cleanDocId(raw);
@@ -807,6 +970,7 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
 // ================= 6.1 AGENDAMENTOS EM TEMPO REAL =================
 export async function saveAppointmentToFirestore(tenantId: string, appointment: any): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const appId = cleanDocId(appointment.id || `app-${Date.now()}`);
     const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
@@ -838,6 +1002,7 @@ export async function updateAppointmentStatusInFirestore(
   extra: Record<string, any> = {}
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const appId = cleanDocId(appointmentId);
     const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
@@ -855,10 +1020,17 @@ export async function updateAppointmentStatusInFirestore(
 
 export async function deleteAppointmentFromFirestore(tenantId: string, appointmentId: string): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const appId = cleanDocId(appointmentId);
     const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
     await deleteDoc(docRef);
+
+    // Remove também da raiz caso tenha sido gravado lá
+    try {
+      await deleteDoc(doc(db, 'appointments', appId));
+    } catch (_) {}
+
     return true;
   } catch (err) {
     console.error('deleteAppointmentFromFirestore error:', err);
@@ -910,6 +1082,7 @@ export async function syncAllLocalAppointmentsToFirestore(tenantId: string, appo
 // ================= 6.2 ITENS DE LAVAGEM / FILA DO PÁTIO EM TEMPO REAL =================
 export async function saveWashItemToFirestore(tenantId: string, washItem: any): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const washId = cleanDocId(washItem.id || `w-${Date.now()}`);
     const docRef = doc(db, 'tenants', cleanTId, 'washItems', washId);
@@ -935,6 +1108,7 @@ export async function updateWashItemStatusInFirestore(
   extra: Record<string, any> = {}
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const washId = cleanDocId(washItemId);
     const docRef = doc(db, 'tenants', cleanTId, 'washItems', washId);
@@ -952,6 +1126,7 @@ export async function updateWashItemStatusInFirestore(
 
 export async function deleteWashItemFromFirestore(tenantId: string, washItemId: string): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const washId = cleanDocId(washItemId);
     const docRef = doc(db, 'tenants', cleanTId, 'washItems', washId);
@@ -1001,6 +1176,7 @@ export async function syncAllLocalWashesToFirestore(tenantId: string, washes: an
 // ================= 6.3 HISTÓRICO DE LAVAGENS EM TEMPO REAL =================
 export async function saveWashHistoryToFirestore(tenantId: string, record: any): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const histId = cleanDocId(record.id || `wh-${Date.now()}`);
     const docRef = doc(db, 'tenants', cleanTId, 'washHistory', histId);
@@ -1048,6 +1224,7 @@ export function subscribeToTenantWashHistory(
 // ================= 6.4 RESGATES DE FIDELIDADE EM TEMPO REAL =================
 export async function saveFidelityRedemptionToFirestore(tenantId: string, redemption: any): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const redId = cleanDocId(redemption.id || `red-${Date.now()}`);
     const docRef = doc(db, 'tenants', cleanTId, 'redemptions', redId);
@@ -1074,6 +1251,7 @@ export async function updateFidelityRedemptionInFirestore(
   status: 'pending' | 'approved' | 'rejected' | 'used'
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const redId = cleanDocId(redemptionId);
     const docRef = doc(db, 'tenants', cleanTId, 'redemptions', redId);
@@ -1121,6 +1299,7 @@ export async function saveFidelityPointsToFirestore(
   points: number
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const cleanKey = cleanDocId(clientKey);
     const docRef = doc(db, 'tenants', cleanTId, 'fidelityPoints', cleanKey);

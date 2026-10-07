@@ -27,6 +27,9 @@ import { ClientPortal } from './components/ClientPortal';
 import { TenantWorkspace } from './components/TenantWorkspace';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SplashScreen } from './components/SplashScreen';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from './lib/firebase';
 import { 
   saveTenantToFirestore, 
   deleteTenantFromFirestore, 
@@ -38,10 +41,11 @@ import {
 } from './lib/firebaseService';
 
 export type AuthSession = 
-  | { role: 'admin'; userEmail: string }
-  | { role: 'empresa'; tenant: Tenant; userEmail: string }
-  | { role: 'cliente'; tenant: Tenant; clientInfo: { name: string; phone: string; email?: string }; userEmail: string }
+  | { role: 'admin'; userEmail: string; userName?: string; uid?: string }
+  | { role: 'empresa'; tenant: Tenant; userEmail: string; userName?: string; uid?: string }
+  | { role: 'cliente'; tenant: Tenant; clientInfo: { name: string; phone: string; email?: string }; userEmail: string; userName?: string; uid?: string }
   | null;
+
 
 const DEFAULT_DEMO_TENANT: Tenant = {
   id: 't-autoclean',
@@ -111,20 +115,21 @@ export default function App() {
     return true;
   });
 
-  // Auth Session State: Inicia como null para que, após a Splash Screen de 5s, o usuário veja a tela de Login/Cadastro!
-  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
-    // Garante que o fluxo padrão após a apresentação (splash) seja a tela de Login/Cadastro
-    localStorage.removeItem('saas_active_session');
-    return null;
-  });
+  // Auth Session State: Inicializado como null (sem dependência de isolamento do localStorage)
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
 
-  useEffect(() => {
-    if (authSession) {
-      localStorage.setItem('saas_active_session', JSON.stringify(authSession));
-    } else {
-      localStorage.removeItem('saas_active_session');
+  // Logout oficial: Força signOut no Firebase Auth e limpa totalmente o armazenamento local
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.warn('Erro ao deslogar do Firebase Auth:', e);
     }
-  }, [authSession]);
+    localStorage.clear();
+    sessionStorage.clear();
+    setAuthSession(null);
+  };
+
 
   // Modals & Overlay state
   const [isNewTenantModalOpen, setIsNewTenantModalOpen] = useState(false);
@@ -157,6 +162,88 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // 🔐 Verificação Obrigatória de Sessão (Regra 1 e Regra 2)
+  // Regra 1: Se o usuário estiver no Firebase Auth mas NÃO existir no Firestore (db.collection('usuarios').doc(user.uid).get()),
+  // força signOut, limpa TODO o localStorage e redireciona para a tela de login vazia (desloga celulares antigos na hora).
+  // Regra 2: Carrega nome do usuário e dados da empresa direto da Nuvem (Firestore), eliminando isolamento de localStorage.
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        try {
+          // Busca obrigatória no Firestore: db.collection('usuarios').doc(user.uid).get()
+          const userDocRef = doc(db, 'usuarios', user.uid);
+          const userDocSnap = await getDoc(userDocRef);
+
+          if (!userDocSnap.exists()) {
+            console.warn(`[Sessão] Usuário ${user.uid} não existe no banco (/usuarios). Forçando logout e limpando dispositivo.`);
+            // 1. Force o signOut
+            await signOut(auth);
+            // 2. Limpe todo o localStorage
+            localStorage.clear();
+            sessionStorage.clear();
+            // 3. Redirecione o usuário de volta para a tela de login vazia
+            setAuthSession(null);
+            return;
+          }
+
+          // FIM DO ISOLAMENTO: Carrega nome do usuário e dados da empresa direto da Nuvem
+          const userData = userDocSnap.data();
+          const userRole = userData.role || 'empresa';
+          const tenantId = userData.tenantId || userData.empresaId;
+
+          let resolvedTenant: Tenant = userData.empresa || DEFAULT_DEMO_TENANT;
+          if (tenantId) {
+            try {
+              const tenantSnap = await getDoc(doc(db, 'tenants', tenantId));
+              if (tenantSnap.exists()) {
+                resolvedTenant = { id: tenantSnap.id, ...tenantSnap.data() } as Tenant;
+              }
+            } catch (tErr) {
+              console.warn('[Sessão] Erro ao carregar tenant da nuvem:', tErr);
+            }
+          }
+
+          if (userRole === 'admin') {
+            setAuthSession({
+              role: 'admin',
+              userEmail: userData.email || user.email || '',
+              userName: userData.nome || 'Super Admin',
+              uid: user.uid
+            });
+          } else if (userRole === 'cliente') {
+            setAuthSession({
+              role: 'cliente',
+              tenant: resolvedTenant,
+              clientInfo: userData.clientInfo || {
+                name: userData.nome || user.displayName || 'Cliente',
+                phone: userData.telefone || userData.phone || '',
+                email: userData.email || user.email || ''
+              },
+              userEmail: userData.email || user.email || '',
+              userName: userData.nome || user.displayName || 'Cliente',
+              uid: user.uid
+            });
+          } else {
+            setAuthSession({
+              role: 'empresa',
+              tenant: resolvedTenant,
+              userEmail: userData.email || user.email || '',
+              userName: userData.nome || resolvedTenant.ownerName || 'Responsável',
+              uid: user.uid
+            });
+          }
+        } catch (err) {
+          console.error('[Sessão] Erro ao validar usuário no Firestore:', err);
+        }
+      } else {
+        setAuthSession(null);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
 
   // 📱 Detecta imediatamente se o dispositivo (ex: Celular via QR Code ou Link) abriu com tenantId ou empresa na URL
   // e carrega diretamente do Firestore para garantir comunicação instantânea com o computador da empresa
@@ -396,7 +483,7 @@ export default function App() {
             )}
             {authSession && (
               <button
-                onClick={() => setAuthSession(null)}
+                onClick={handleLogout}
                 className="text-[11px] text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 px-2 py-1 rounded transition flex items-center gap-1 cursor-pointer font-medium"
                 title="Sair / Trocar de perfil"
               >
@@ -404,6 +491,7 @@ export default function App() {
                 <span className="hidden sm:inline">Sair</span>
               </button>
             )}
+
           </div>
         </div>
         
@@ -444,8 +532,9 @@ export default function App() {
           <ClientPortal
             tenant={authSession.tenant}
             clientInfo={authSession.clientInfo}
-            onLogout={() => setAuthSession(null)}
+            onLogout={handleLogout}
             onNewAppointmentCreated={(newApp) => {
+
               const tenantId = authSession.tenant.id;
               const appointmentItem = {
                 id: (newApp as any).id || `app-${Date.now()}`,
@@ -492,8 +581,9 @@ export default function App() {
         {authSession?.role === 'empresa' && (
           <TenantWorkspace
             tenant={authSession.tenant}
-            onExitImpersonation={() => setAuthSession(null)}
+            onExitImpersonation={handleLogout}
             onReplaySplash={() => setShowSplash(true)}
+
             onUpdateTenant={(updated) => {
               setTenants(prev => prev.map(t => t.id === updated.id ? updated : t));
               setAuthSession(prev => prev ? { ...prev, tenant: updated } : null);

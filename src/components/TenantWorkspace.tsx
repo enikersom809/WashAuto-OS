@@ -67,6 +67,9 @@ import {
   saveFidelityPointsToFirestore,
   subscribeToTenantClients
 } from '../lib/firebaseService';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+
 
 interface WashItem {
   id: string;
@@ -154,32 +157,23 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   onUpdateTenant,
   onReplaySplash
 }) => {
-  const [currentTenant, setCurrentTenant] = useState<Tenant>(() => {
-    const saved = localStorage.getItem(`saas_tenant_custom_data_${initialTenant.id}`);
-    const adminPwd = (typeof localStorage !== 'undefined' && localStorage.getItem('saas_admin_password')) || 'admin124050';
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        // Higienização de segurança: Se a senha salva no tenant coincide com a senha do Super Admin (vazamento de autofill do navegador), limpa
-        if (parsed.tempPassword === adminPwd || parsed.tempPassword === 'admin124050') {
-          delete parsed.tempPassword;
-          localStorage.removeItem(`saas_tenant_custom_password_${initialTenant.id}`);
-          localStorage.setItem(`saas_tenant_custom_data_${initialTenant.id}`, JSON.stringify(parsed));
-        }
-        return { ...initialTenant, ...parsed };
-      } catch (e) {
-        console.error(e);
+  // Carrega informações da empresa diretamente dos dados da nuvem (eliminando isolamento por localStorage)
+  const [currentTenant, setCurrentTenant] = useState<Tenant>(initialTenant);
+
+  // Sincronização em tempo real das informações da empresa direto do Firestore
+  useEffect(() => {
+    if (!initialTenant?.id) return;
+    const unsub = onSnapshot(doc(db, 'tenants', initialTenant.id), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setCurrentTenant(prev => ({ ...prev, ...data, id: docSnap.id }));
       }
-    }
-    // Também checa se o initialTenant veio contaminado com a senha do super admin
-    if (initialTenant.tempPassword === adminPwd || initialTenant.tempPassword === 'admin124050') {
-      const clean = { ...initialTenant };
-      delete clean.tempPassword;
-      localStorage.removeItem(`saas_tenant_custom_password_${initialTenant.id}`);
-      return clean;
-    }
-    return initialTenant;
-  });
+    }, (err) => {
+      console.warn('Aviso: Sincronização de empresa:', err);
+    });
+    return () => unsub();
+  }, [initialTenant?.id]);
+
 
   const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente'>('fila');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -376,7 +370,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     // 2. Escuta Agendamentos em Tempo Real do Firestore
     const unsubApps = subscribeToTenantAppointments(tenant.id, (remoteApps) => {
-      if (remoteApps && remoteApps.length > 0) {
+      if (remoteApps) {
         setAppointments(prev => {
           // Detecta se chegou um novo agendamento vindo do celular
           const newFromPhone = remoteApps.find(ra => !prev.some(p => p.id === ra.id));
@@ -391,7 +385,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     // 3. Escuta Fila do Pátio (Wash Items) em Tempo Real
     const unsubWashes = subscribeToTenantWashItems(tenant.id, (remoteWashes) => {
-      if (remoteWashes && remoteWashes.length > 0) {
+      if (remoteWashes) {
         setWashItems(remoteWashes);
         localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(remoteWashes));
       }
@@ -399,7 +393,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     // 4. Escuta Histórico de Lavagens em Tempo Real
     const unsubHistory = subscribeToTenantWashHistory(tenant.id, (remoteHistory) => {
-      if (remoteHistory && remoteHistory.length > 0) {
+      if (remoteHistory) {
         setWashHistory(remoteHistory);
         localStorage.setItem(`saas_tenant_wash_history_${tenant.id}`, JSON.stringify(remoteHistory));
       }
@@ -469,8 +463,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const [historyLavador, setHistoryLavador] = useState('todos');
   const [historyPayment, setHistoryPayment] = useState('todos');
 
-  // Filtros de Agendamentos
-  const [appointmentStatusFilter, setAppointmentStatusFilter] = useState<'todos' | 'Pendente' | 'Aprovado' | 'Cancelado'>('todos');
+  // Filtros de Agendamentos (Inicia em 'Pendente' para não exibir agendamentos já finalizados por padrão)
+  const [appointmentStatusFilter, setAppointmentStatusFilter] = useState<'todos' | 'Pendente' | 'Aprovado' | 'Em Lavagem' | 'Concluído' | 'Cancelado'>('Pendente');
   const [appointmentSearch, setAppointmentSearch] = useState('');
   
   // New Wash Form (Fila)
@@ -656,6 +650,14 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       } else {
         showToast(`✨ +1 Ponto creditado para ${item.clientName}! (${newPts}/10 carimbos). Registrado no Histórico de Lavagem.`);
       }
+
+      // Sincroniza o agendamento de origem para 'Concluído' se veio de um agendamento
+      const rawAppId = item.id.startsWith('w-from-') ? item.id.replace('w-from-', '').split('-')[0] : null;
+      const matchingApp = appointments.find(a => (rawAppId && a.id === rawAppId) || (a.plate && a.plate.toUpperCase() === item.plate.toUpperCase()));
+      if (matchingApp) {
+        updateAppointmentStatusInFirestore(tenant.id, matchingApp.id, 'Concluído').catch(console.error);
+        setAppointments(prev => prev.map(a => a.id === matchingApp.id ? { ...a, status: 'Concluído' } : a));
+      }
     }
 
     setWashItems(prev => prev.map(w => w.id === washId ? { ...w, status: nextStatus } : w));
@@ -803,6 +805,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
     showToast(`Agendamento excluído.`);
+  };
+
+  const handleClearFinishedAppointments = () => {
+    const toRemove = appointments.filter(a => a.status === 'Concluído' || a.status === 'Cancelado');
+    if (toRemove.length === 0) {
+      showToast('Nenhum agendamento finalizado ou cancelado para limpar.');
+      return;
+    }
+    const remaining = appointments.filter(a => a.status !== 'Concluído' && a.status !== 'Cancelado');
+    setAppointments(remaining);
+    toRemove.forEach(a => deleteAppointmentFromFirestore(tenant.id, a.id).catch(console.error));
+    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remaining));
+    window.dispatchEvent(new Event('storage'));
+    showToast(`🧹 ${toRemove.length} agendamento(s) finalizado(s) removido(s) do banco de dados!`);
   };
 
   const handleCreateAppointment = (e: React.FormEvent) => {
@@ -1611,6 +1627,16 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {appointments.filter(a => a.status === 'Concluído' || a.status === 'Cancelado').length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearFinishedAppointments}
+                    className="bg-slate-800 hover:bg-rose-950/40 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-800/50 px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer"
+                    title="Excluir permanentemente do banco de dados todos os agendamentos já finalizados ou cancelados"
+                  >
+                    <Trash2 className="w-4 h-4 text-rose-400" /> Limpar Finalizados ({appointments.filter(a => a.status === 'Concluído' || a.status === 'Cancelado').length})
+                  </button>
+                )}
                 {appointments.filter(a => a.status === 'Pendente').length > 0 && (
                   <button
                     type="button"
@@ -1631,10 +1657,10 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             </div>
 
             {/* KPIs de Agendamento */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] text-slate-400 font-bold uppercase">Total Agendados</span>
+                  <span className="text-[11px] text-slate-400 font-bold uppercase">Total Geral</span>
                   <Calendar className="w-4 h-4 text-blue-400" />
                 </div>
                 <div className="text-xl font-black text-slate-100 mt-1">{appointments.length}</div>
@@ -1652,11 +1678,21 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
               <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] text-slate-400 font-bold uppercase">Aprovados / Na Fila</span>
+                  <span className="text-[11px] text-slate-400 font-bold uppercase">No Pátio</span>
+                  <Droplet className="w-4 h-4 text-blue-400" />
+                </div>
+                <div className="text-xl font-black text-blue-400 mt-1">
+                  {appointments.filter(a => a.status === 'Aprovado' || a.status === 'Em Lavagem').length}
+                </div>
+              </div>
+
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-slate-400 font-bold uppercase">Finalizados</span>
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div className="text-xl font-black text-emerald-400 mt-1">
-                  {appointments.filter(a => a.status === 'Aprovado').length}
+                  {appointments.filter(a => a.status === 'Concluído').length}
                 </div>
               </div>
 
@@ -1675,10 +1711,21 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             <div className="bg-[#0f172a] border border-[#1e293b] p-4 rounded-xl flex flex-col md:flex-row gap-3 items-center justify-between">
               {/* Filtro de Status */}
               <div className="flex items-center gap-1.5 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
-                {(['todos', 'Pendente', 'Aprovado', 'Cancelado'] as const).map(statusKey => {
-                  const label = statusKey === 'todos' ? 'Todos' : statusKey === 'Pendente' ? 'Pendentes' : statusKey === 'Aprovado' ? 'Confirmados' : 'Cancelados';
+                {(['todos', 'Pendente', 'Em Lavagem', 'Concluído', 'Cancelado'] as const).map(statusKey => {
+                  const label = statusKey === 'todos' 
+                    ? 'Todos' 
+                    : statusKey === 'Pendente' 
+                    ? 'Pendentes' 
+                    : statusKey === 'Em Lavagem' 
+                    ? 'No Pátio' 
+                    : statusKey === 'Concluído' 
+                    ? 'Finalizados' 
+                    : 'Cancelados';
+
                   const count = statusKey === 'todos' 
                     ? appointments.length 
+                    : statusKey === 'Em Lavagem'
+                    ? appointments.filter(a => a.status === 'Em Lavagem' || a.status === 'Aprovado').length
                     : appointments.filter(a => a.status === statusKey).length;
 
                   return (
@@ -1729,13 +1776,19 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   <tbody className="divide-y divide-[#1e293b]">
                     {appointments
                       .filter(app => {
-                        if (appointmentStatusFilter !== 'todos' && app.status !== appointmentStatusFilter) return false;
+                        if (appointmentStatusFilter !== 'todos') {
+                          if (appointmentStatusFilter === 'Em Lavagem') {
+                            if (app.status !== 'Em Lavagem' && app.status !== 'Aprovado') return false;
+                          } else if (app.status !== appointmentStatusFilter) {
+                            return false;
+                          }
+                        }
                         if (appointmentSearch.trim()) {
                           const q = appointmentSearch.toLowerCase();
-                          const matchClient = app.clientName.toLowerCase().includes(q);
-                          const matchPlate = app.plate.toLowerCase().includes(q);
-                          const matchVehicle = app.vehicle.toLowerCase().includes(q);
-                          const matchService = app.service.toLowerCase().includes(q);
+                          const matchClient = (app.clientName || '').toLowerCase().includes(q);
+                          const matchPlate = (app.plate || '').toLowerCase().includes(q);
+                          const matchVehicle = (app.vehicle || '').toLowerCase().includes(q);
+                          const matchService = (app.service || '').toLowerCase().includes(q);
                           if (!matchClient && !matchPlate && !matchVehicle && !matchService) return false;
                         }
                         return true;
@@ -1817,8 +1870,16 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                   <Clock className="w-3 h-3" /> Pendente
                                 </span>
                               ) : app.status === 'Aprovado' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] px-2.5 py-1 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 rounded-full font-bold">
+                                  <CheckCircle className="w-3 h-3" /> Confirmado
+                                </span>
+                              ) : app.status === 'Em Lavagem' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] px-2.5 py-1 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-full font-bold">
+                                  <Droplet className="w-3 h-3 animate-pulse" /> No Pátio
+                                </span>
+                              ) : app.status === 'Concluído' ? (
                                 <span className="inline-flex items-center gap-1 text-[10px] px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full font-bold">
-                                  <CheckCircle className="w-3 h-3" /> Confirmado / Na Fila
+                                  <CheckCircle2 className="w-3 h-3" /> Finalizado
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-1 text-[10px] px-2.5 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/20 rounded-full font-bold">
@@ -1833,7 +1894,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                   <>
                                     <button
                                       onClick={() => handleCancelAppointment(app.id)}
-                                      className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition"
+                                      className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition cursor-pointer"
                                       title="Recusar / Cancelar"
                                     >
                                       <X className="w-4 h-4" />
@@ -1841,25 +1902,36 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                     <button
                                       onClick={() => handleApproveAppointment(app)}
                                       className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm shadow-emerald-600/30 inline-flex items-center gap-1 cursor-pointer"
-                                      title="Enviar este agendamento para a fila de lavagem (zera em agendamentos)"
+                                      title="Enviar este agendamento para a fila de lavagem"
                                     >
-                                      <CheckCircle className="w-3.5 h-3.5" /> Enviar para a Fila (Zerar)
+                                      <CheckCircle className="w-3.5 h-3.5" /> Enviar para Fila
                                     </button>
                                   </>
                                 )}
 
-                                {app.status === 'Aprovado' && (
+                                {(app.status === 'Aprovado' || app.status === 'Em Lavagem') && (
                                   <>
                                     <button
                                       onClick={() => setActiveTab('fila')}
-                                      className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 text-xs font-bold px-2.5 py-1.5 rounded-lg transition inline-flex items-center gap-1"
+                                      className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 text-xs font-bold px-2.5 py-1.5 rounded-lg transition inline-flex items-center gap-1 cursor-pointer"
                                       title="Ver na Fila do Pátio"
                                     >
                                       <Kanban className="w-3.5 h-3.5" /> Ver no Pátio
                                     </button>
                                     <button
+                                      onClick={() => {
+                                        updateAppointmentStatusInFirestore(tenant.id, app.id, 'Concluído').catch(console.error);
+                                        setAppointments(prev => prev.map(a => a.id === app.id ? { ...a, status: 'Concluído' } : a));
+                                        showToast(`✅ Agendamento de ${app.clientName} marcado como Concluído!`);
+                                      }}
+                                      className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold px-2.5 py-1.5 rounded-lg transition inline-flex items-center gap-1 cursor-pointer"
+                                      title="Marcar como Concluído / Finalizado"
+                                    >
+                                      <CheckCircle2 className="w-3.5 h-3.5" /> Concluir
+                                    </button>
+                                    <button
                                       onClick={() => handleCancelAppointment(app.id)}
-                                      className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition"
+                                      className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition cursor-pointer"
                                       title="Cancelar agendamento"
                                     >
                                       <X className="w-4 h-4" />
@@ -1867,26 +1939,50 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                   </>
                                 )}
 
-                                {app.status === 'Cancelado' && (
+                                {app.status === 'Concluído' && (
                                   <>
                                     <button
+                                      onClick={() => handleDeleteAppointment(app.id)}
+                                      className="bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 border border-rose-800/40 text-xs font-semibold px-2.5 py-1 rounded-lg transition inline-flex items-center gap-1 cursor-pointer"
+                                      title="Remover permanentemente do banco de dados"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" /> Limpar do Banco
+                                    </button>
+                                    <button
                                       onClick={() => {
+                                        updateAppointmentStatusInFirestore(tenant.id, app.id, 'Pendente').catch(console.error);
                                         setAppointments(prev => prev.map(a => a.id === app.id ? { ...a, status: 'Pendente' } : a));
-                                        showToast('Agendamento restaurado para pendente.');
+                                        showToast('Agendamento reativado para Pendente.');
                                       }}
-                                      className="text-xs text-blue-400 hover:underline px-2 py-1"
+                                      className="text-xs text-blue-400 hover:underline px-2 py-1 cursor-pointer"
+                                      title="Reativar agendamento"
                                     >
                                       Reativar
                                     </button>
-                                    <button
-                                      onClick={() => handleDeleteAppointment(app.id)}
-                                      className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition"
-                                      title="Excluir permanentemente"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
                                   </>
                                 )}
+
+                                {app.status === 'Cancelado' && (
+                                  <button
+                                    onClick={() => {
+                                      updateAppointmentStatusInFirestore(tenant.id, app.id, 'Pendente').catch(console.error);
+                                      setAppointments(prev => prev.map(a => a.id === app.id ? { ...a, status: 'Pendente' } : a));
+                                      showToast('Agendamento restaurado para pendente.');
+                                    }}
+                                    className="text-xs text-blue-400 hover:underline px-2 py-1 cursor-pointer"
+                                  >
+                                    Reativar
+                                  </button>
+                                )}
+
+                                {/* Botão Excluir permanente em todos os status */}
+                                <button
+                                  onClick={() => handleDeleteAppointment(app.id)}
+                                  className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition cursor-pointer"
+                                  title="Excluir permanentemente do banco"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </div>
                             </td>
                           </tr>
@@ -2350,13 +2446,13 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             }}
             onUpdateTenantDetails={(updated) => {
               setCurrentTenant(updated);
-              localStorage.setItem(`saas_tenant_custom_data_${updated.id}`, JSON.stringify(updated));
               saveTenantToFirestore(updated).catch(console.error);
               if (onUpdateTenant) {
                 onUpdateTenant(updated);
               }
-              showToast('Configurações e logotipo da empresa salvos com sucesso!');
+              showToast('Configurações da empresa salvas na Nuvem (Firestore)!');
             }}
+
           />
         )}
 

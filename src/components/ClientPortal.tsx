@@ -37,6 +37,7 @@ import {
   saveClientEmailMapping, 
   saveClientFullRegistration,
   saveAppointmentToFirestore,
+  deleteAppointmentFromFirestore,
   subscribeToTenantAppointments,
   saveFidelityRedemptionToFirestore,
   subscribeToTenantRedemptions,
@@ -1222,9 +1223,25 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                               </span>
                             )}
                             {isDone && (
-                              <span className="px-3 py-1.5 rounded-xl bg-emerald-600/30 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center gap-1.5">
-                                <Star className="w-3.5 h-3.5 fill-emerald-300" /> Lavagem Concluída!
-                              </span>
+                              <>
+                                <span className="px-3 py-1.5 rounded-xl bg-emerald-600/30 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center gap-1.5">
+                                  <Star className="w-3.5 h-3.5 fill-emerald-300" /> Lavagem Concluída!
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const updated = tenantAppointments.filter(a => a.id !== app.id);
+                                    setTenantAppointments(updated);
+                                    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updated));
+                                    await deleteAppointmentFromFirestore(tenant.id, app.id);
+                                    showToast('Agendamento finalizado arquivado e limpo com sucesso.');
+                                  }}
+                                  className="px-2.5 py-1 text-slate-400 hover:text-white bg-slate-800 hover:bg-rose-950/40 border border-slate-700 hover:border-rose-800/40 rounded-lg text-[11px] font-semibold transition cursor-pointer flex items-center gap-1"
+                                  title="Dispensar e arquivar este agendamento já finalizado"
+                                >
+                                  Dispensar
+                                </button>
+                              </>
                             )}
                             {isCancelled && (
                               <span className="px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 font-bold text-xs">

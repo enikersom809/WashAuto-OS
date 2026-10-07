@@ -2,90 +2,85 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions para validação de IDs (seguro, tolerante a slugs, emails e IDs gerados)
-    function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 200;
-    }
-
-    // 1. Tenants (Empresas de Lava-Jato)
+    // 1. Tenants (Empresas de Lava-Jato) - Multi-tenant PWA e Computador
     match /tenants/{tenantId} {
-      allow get, list: if true;
-      allow create, update, delete: if isValidId(tenantId);
+      allow read, write: if true;
 
-      // Subcoleção: Agendamentos da Empresa
+      // Subcoleção: Agendamentos da Empresa (Celular <-> Computador)
       match /appointments/{appointmentId} {
-        allow get, list: if true;
-        allow create, update, delete: if isValidId(tenantId) && isValidId(appointmentId);
+        allow read, write: if true;
       }
 
-      // Subcoleção: Itens de Lavagem / Fila do Pátio
+      // Subcoleção: Itens de Lavagem / Fila do Pátio em tempo real
       match /washItems/{washItemId} {
-        allow get, list: if true;
-        allow create, update, delete: if isValidId(tenantId) && isValidId(washItemId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Histórico de Lavagens Concluídas
       match /washHistory/{historyId} {
-        allow get, list: if true;
-        allow create, update, delete: if isValidId(tenantId) && isValidId(historyId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Clientes da Empresa
       match /clients/{clientId} {
-        allow get, list: if true;
-        allow create, update, delete: if isValidId(tenantId) && isValidId(clientId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Resgates de Fidelidade
       match /redemptions/{redemptionId} {
-        allow get, list: if true;
-        allow create, update, delete: if isValidId(tenantId) && isValidId(redemptionId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Pontos de Fidelidade
       match /fidelityPoints/{clientKey} {
-        allow get, list, create, update, delete: if isValidId(tenantId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Equipe / Funcionários
       match /staff/{staffId} {
-        allow get, list, create, update, delete: if isValidId(tenantId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Produtos & Estoque
       match /products/{productId} {
-        allow get, list, create, update, delete: if isValidId(tenantId);
+        allow read, write: if true;
       }
 
       // Subcoleção: Configurações da Empresa
       match /config/{configId} {
-        allow get, list, create, update, delete: if isValidId(tenantId);
+        allow read, write: if true;
       }
     }
 
     // 2. Raiz: Agendamentos Gerais
     match /appointments/{appointmentId} {
-      allow get, list, create, update, delete: if isValidId(appointmentId);
+      allow read, write: if true;
     }
 
     // 3. Raiz: Clientes Gerais (Ficha Cadastral e Veículos)
     match /clients/{clientId} {
-      allow get, list, create, update, delete: if isValidId(clientId);
+      allow read, write: if true;
     }
 
-    // 3.1 Raiz: Clientes em tempo real (Coleção 'clientes' compatível com formulário e mobile)
+    // 3.1 Raiz: Clientes em tempo real
     match /clientes/{clienteId} {
       allow read, write: if true;
     }
 
     // 4. Raiz: Empresas (Busca pelo PWA e QR Code)
     match /empresas/{empresaId} {
-      allow get, list, create, update, delete: if isValidId(empresaId);
+      allow read, write: if true;
     }
 
-    // 5. Fallback de teste de conexão
+    // 5. Raiz: Usuários e Autenticação (Sessão sincronizada Nuvem PC e Celular)
+    match /usuarios/{usuarioId} {
+      allow read, write: if true;
+    }
+
+    // 6. Fallback de teste de conexão
     match /test/{testId} {
-      allow read, write: if isValidId(testId);
+      allow read, write: if true;
     }
   }
 }
+

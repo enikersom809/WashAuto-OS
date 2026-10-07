@@ -29,6 +29,9 @@ import { QrCodeScannerModal } from './QrCodeScannerModal';
 import { 
   registerClientInFirebaseAuth, 
   loginClientInFirebaseAuth, 
+  registerEmpresaInFirebaseAuth,
+  loginEmpresaInFirebaseAuth,
+  loginSuperAdminInFirebaseAuth,
   saveTenantToFirestore,
   saveCompanyEmailMapping,
   saveClientEmailMapping,
@@ -38,6 +41,7 @@ import {
   findTenantByCompanyEmailFirestore,
   findTenantIdByClientEmailFirestore 
 } from '../lib/firebaseService';
+
 
 export type LoginProfileType = 'cliente' | 'empresa' | 'admin';
 
@@ -432,6 +436,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     if (explicitTenantId) {
       const matchById = tenants.find(t => t.id.toLowerCase() === explicitTenantId);
       if (matchById) return matchById;
+      // Garante que o celular use o ID exato da empresa no QR Code sem gerar ID aleatório
+      return {
+        id: explicitTenantId,
+        name: fallbackName || (cleanSub.length > 2 ? cleanSub.charAt(0).toUpperCase() + cleanSub.slice(1) : 'Lava-Jato Parceiro'),
+        code: explicitTenantId.slice(0, 4).toUpperCase(),
+        domain: `${cleanSub || explicitTenantId}.saas.com`,
+        plan: 'Pro',
+        status: 'Ativo',
+        endUsersCount: 1,
+        maxUsers: 1000,
+        mrrAmount: 499,
+        createdAt: new Date().toLocaleDateString('pt-BR'),
+        contactEmail: `contato@${cleanSub || explicitTenantId}.com`,
+        ownerName: 'Gestor da Empresa',
+        lastActive: 'Agora mesmo'
+      };
     }
 
     // 1. Direct match by id, code, full domain, subdomain or company name
@@ -448,16 +468,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     if (matched) return matched;
 
-    // 2. If there's only one custom tenant in the database, prioritize it
+    // 2. If there are tenants loaded from Firestore / localStorage, prioritize the existing active tenant
     const nonDemoTenants = tenants.filter(t => t.id !== 't-autoclean');
-    if (nonDemoTenants.length === 1 && !raw.includes('autoclean')) {
+    if (nonDemoTenants.length > 0 && !raw.includes('autoclean')) {
       return nonDemoTenants[0];
     }
+    if (tenants.length > 0) {
+      return tenants[0];
+    }
 
-    // 3. Fallback / Create dynamically if not found
+    // 3. Fallback: only if completely empty, use default stable ID
     const displayName = fallbackName || (cleanSub.length > 2 ? cleanSub.charAt(0).toUpperCase() + cleanSub.slice(1) + ' Auto Spa' : 'Auto Clean Spa');
     return {
-      id: `t-${Date.now().toString().slice(-4)}`,
+      id: 't-autoclean',
       name: displayName,
       code: displayName.slice(0, 2).toUpperCase() || 'LJ',
       domain: `${cleanSub || 'autoclean'}.saas.com`,
@@ -576,13 +599,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           lastActive: 'Agora mesmo'
         };
 
-        // Inicia novo lava-jato com dados zerados
-        localStorage.setItem(`saas_tenant_washes_${createdTenant.id}`, '[]');
-        localStorage.setItem(`saas_tenant_appointments_${createdTenant.id}`, '[]');
-        localStorage.setItem(`saas_tenant_wash_history_${createdTenant.id}`, '[]');
+        // 🏢 Cria a conta de Empresa no Firebase Auth e nas coleções 'tenants' e 'usuarios' do Firestore
+        const empRes = await registerEmpresaInFirebaseAuth({
+          tenant: createdTenant,
+          email: regEmail.trim(),
+          password: regPassword.trim() || undefined,
+          name: regName.trim() || regCompanyName
+        });
 
-        // 🏢 Cria a empresa na coleção 'tenants' do Firestore
-        await saveTenantToFirestore(createdTenant);
+        if (!empRes.success && empRes.errorMessage) {
+          setErrorMessage(empRes.errorMessage);
+          setIsSubmitting(false);
+          return;
+        }
 
         // Associa e-mail corporativo ao subdomínio da empresa
         saveCompanyEmailMapping(regEmail.trim(), createdTenant);
@@ -595,9 +624,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           setIsSubmitting(false);
           return;
         }
-        localStorage.setItem('saas_admin_email', regEmail.trim());
-        localStorage.setItem('saas_admin_password', regPassword.trim());
-        if (regName.trim()) localStorage.setItem('saas_admin_name', regName.trim());
+        const admRes = await loginSuperAdminInFirebaseAuth(regEmail.trim(), regPassword.trim());
+        if (!admRes.success && admRes.errorMessage) {
+          setErrorMessage(admRes.errorMessage);
+          setIsSubmitting(false);
+          return;
+        }
         onLoginAsSuperAdmin();
         if (onClose) onClose();
       }
@@ -618,10 +650,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setErrorMessage(null);
     setAuthSuccessMsg(null);
 
-    const savedAdminEmail = (localStorage.getItem('saas_admin_email') || 'admin_super@gmail.com').trim().toLowerCase();
-    const savedAdminPassword = localStorage.getItem('saas_admin_password') || 'admin124050';
-
-    // 1. ABA SUPER ADMIN (Apenas permite login master nesta aba específica)
+    // 1. ABA SUPER ADMIN
     if (activeTab === 'admin') {
       const typedEmail = (adminEmail || identifier).trim().toLowerCase();
       const typedPassword = (adminPassword || password).trim();
@@ -630,21 +659,26 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         setErrorMessage('Por favor, informe o E-mail Master (admin_super@gmail.com).');
         return;
       }
-      if (typedEmail !== savedAdminEmail && typedEmail !== 'admin_super@gmail.com') {
-        setErrorMessage('Acesso Negado: E-mail Master não autorizado para esta área restrita.');
-        return;
-      }
       if (!typedPassword) {
         setErrorMessage('Por favor, informe a senha administrativa.');
         return;
       }
-      if (typedPassword !== savedAdminPassword && typedPassword !== 'admin124050') {
-        setErrorMessage('Acesso Negado: Senha administrativa incorreta.');
-        return;
-      }
 
-      onLoginAsSuperAdmin();
-      if (onClose) onClose();
+      setIsSubmitting(true);
+      try {
+        const res = await loginSuperAdminInFirebaseAuth(typedEmail, typedPassword);
+        if (!res.success && res.errorMessage) {
+          setErrorMessage(res.errorMessage);
+          setIsSubmitting(false);
+          return;
+        }
+        onLoginAsSuperAdmin();
+        if (onClose) onClose();
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Erro ao realizar login master.');
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
@@ -657,25 +691,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       try {
         const tenantToOpen = resolveTenantByDomain(subdomain || 'autoclean');
         
-        // Tenta autenticar cliente no Firebase Auth se houver credenciais
+        let clientData: { name: string; phone: string; email?: string } = {
+          name: typedClientIdentifier.includes('@') ? typedClientIdentifier.split('@')[0] : (typedClientIdentifier || 'Cliente'),
+          email: typedClientIdentifier.includes('@') ? typedClientIdentifier : '',
+          phone: !typedClientIdentifier.includes('@') ? typedClientIdentifier : '(11) 99999-9999'
+        };
+
+        // Autentica cliente no Firebase Auth se houver e-mail
         if (typedClientIdentifier.includes('@')) {
-          await loginClientInFirebaseAuth(typedClientIdentifier, typedClientPassword || undefined);
+          const res = await loginClientInFirebaseAuth(typedClientIdentifier, typedClientPassword || undefined);
+          if (res.user && res.user.displayName) {
+            clientData.name = res.user.displayName;
+          }
         }
 
-        const savedProfile = localStorage.getItem(`saas_client_profile_${tenantToOpen.id}`);
-        let clientData: { name: string; phone: string; email?: string } | null = null;
-        if (savedProfile) {
-          try { clientData = JSON.parse(savedProfile); } catch (e) {}
-        }
-        if (!clientData) {
-          const isEmail = typedClientIdentifier.includes('@');
-          clientData = {
-            name: isEmail ? typedClientIdentifier.split('@')[0] : (typedClientIdentifier || 'Cliente'),
-            email: isEmail ? typedClientIdentifier : '',
-            phone: !isEmail ? typedClientIdentifier : '(11) 99999-9999'
-          };
-          localStorage.setItem(`saas_client_profile_${tenantToOpen.id}`, JSON.stringify(clientData));
-        }
         onLoginAsClient(tenantToOpen, clientData);
         if (onClose) onClose();
       } catch (err: any) {
@@ -694,27 +723,31 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       const typedEmpresaEmail = (empresaEmail || identifier).trim().toLowerCase();
       const typedEmpresaPassword = (empresaPassword || password).trim();
 
-      // Bloqueio rigoroso: se o navegador ou usuário preencheu com o e-mail do Super Admin na tela da empresa
-      if (typedEmpresaEmail === savedAdminEmail || typedEmpresaEmail === 'admin_super@gmail.com') {
-        setErrorMessage('Atenção: Este e-mail pertence ao Super Admin. Para acessar a área restrita do sistema, mude para a aba "Super Admin" no rodapé.');
+      if (!typedEmpresaEmail) {
+        setErrorMessage('Por favor, informe o e-mail de acesso da sua empresa.');
         return;
       }
 
-      const tenantToOpen = resolveTenantByDomain(subdomain || (typedEmpresaEmail ? typedEmpresaEmail.split('@')[0] : 'autoclean'), 'Auto Clean Spa');
-
-      // Validação de senha da empresa (caso tenha sido configurada senha personalizada ou temporária legítima)
-      const customPwd = localStorage.getItem(`saas_tenant_custom_password_${tenantToOpen.id}`);
-      const expectedPwd = customPwd || tenantToOpen.tempPassword;
-
-      if (expectedPwd && expectedPwd !== savedAdminPassword && expectedPwd !== 'admin124050') {
-        if (typedEmpresaPassword && typedEmpresaPassword !== expectedPwd) {
-          setErrorMessage('Senha de acesso da empresa incorreta.');
-          return;
+      setIsSubmitting(true);
+      try {
+        // Autentica no Firebase Auth se forneceu senha
+        if (typedEmpresaPassword) {
+          const authRes = await loginEmpresaInFirebaseAuth(typedEmpresaEmail, typedEmpresaPassword);
+          if (!authRes.success && authRes.errorMessage) {
+            setErrorMessage(authRes.errorMessage);
+            setIsSubmitting(false);
+            return;
+          }
         }
-      }
 
-      onLoginAsEmpresa(tenantToOpen);
-      if (onClose) onClose();
+        const tenantToOpen = resolveTenantByDomain(subdomain || typedEmpresaEmail.split('@')[0], 'Auto Clean Spa');
+        onLoginAsEmpresa(tenantToOpen);
+        if (onClose) onClose();
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Erro ao realizar login da empresa.');
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
   };
