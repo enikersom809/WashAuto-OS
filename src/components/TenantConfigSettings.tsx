@@ -34,6 +34,7 @@ import {
 import { Tenant } from '../types';
 import { TenantQRCode } from './TenantQRCode';
 import { saveTenantToFirestore } from '../lib/firebaseService';
+import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
 
 interface StaffMember {
   id: string;
@@ -263,22 +264,19 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
     }
   };
 
-  // Auto CEP Lookup
+  // Auto CEP Lookup padronizado
   const handleCepChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = e.target.value.replace(/\D/g, '').slice(0, 8);
-    let formatted = raw;
-    if (raw.length > 5) {
-      formatted = `${raw.slice(0, 5)}-${raw.slice(5)}`;
-    }
+    const formatted = formatCep(e.target.value);
     setCep(formatted);
 
-    if (raw.length === 8) {
-      fetchCepData(raw);
+    const clean = cleanDigits(formatted);
+    if (clean.length === 8) {
+      fetchCepData(clean);
     }
   };
 
   const fetchCepData = async (rawDigits?: string) => {
-    const clean = (rawDigits || cep).replace(/\D/g, '');
+    const clean = cleanDigits(rawDigits || cep).slice(0, 8);
     if (clean.length !== 8) return;
 
     setIsSearchingCep(true);
@@ -696,7 +694,8 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
               <input
                 type="text"
                 value={contactPhone}
-                onChange={(e) => setContactPhone(e.target.value)}
+                maxLength={15}
+                onChange={(e) => setContactPhone(formatCelular(e.target.value))}
                 placeholder="(11) 98765-4321"
                 className="w-full bg-[#020617] border border-[#1e293b] rounded-xl p-3 text-slate-200 focus:outline-none focus:border-blue-500"
               />

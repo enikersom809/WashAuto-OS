@@ -47,6 +47,8 @@ import { Tenant } from '../types';
 import { ClientPortal } from './ClientPortal';
 import { TenantConfigSettings } from './TenantConfigSettings';
 import { PWAInstallButton } from './PWAInstallButton';
+import { ClientesWorkspace } from './ClientesWorkspace';
+
 import { 
   saveTenantToFirestore,
   saveAppointmentToFirestore,
@@ -175,7 +177,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, [initialTenant?.id]);
 
 
-  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente'>('fila');
+  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'clientes' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente'>('fila');
+
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const tenant = currentTenant;
@@ -1013,7 +1016,14 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         : 'bg-slate-800 text-slate-400'
     },
     {
+      id: 'clientes' as const,
+      label: 'Clientes & Balcão',
+      icon: Users,
+      badgeColor: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+    },
+    {
       id: 'historico-lavagem' as const,
+
       label: 'Histórico de Lavagem',
       icon: History,
       badge: washHistory.length > 0 ? `${washHistory.length}` : undefined,
@@ -1258,7 +1268,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 <h2 className="text-base sm:text-lg font-bold text-[#f8fafc] flex items-center gap-2">
                   {activeTab === 'fila' && <><Kanban className="w-5 h-5 text-blue-400" /> Fila de Lavagem & Operação de Pátio</>}
                   {activeTab === 'agendamentos' && <><CalendarCheck className="w-5 h-5 text-blue-400" /> Gestão de Agendamentos</>}
+                  {activeTab === 'clientes' && <><Users className="w-5 h-5 text-cyan-400" /> Clientes & Balcão</>}
                   {activeTab === 'historico-lavagem' && <><History className="w-5 h-5 text-blue-400" /> Histórico de Lavagem</>}
+
                   {activeTab === 'produtos' && <><Package className="w-5 h-5 text-blue-400" /> Produtos & Estoque</>}
                   {activeTab === 'comissoes' && <><Percent className="w-5 h-5 text-blue-400" /> % Comissões da Equipe</>}
                   {activeTab === 'configuracoes-empresa' && <><Building2 className="w-5 h-5 text-blue-400" /> Configurações da Empresa</>}
@@ -2455,6 +2467,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
           />
         )}
+
+        {/* ================= ABA: GESTÃO DE CLIENTES & BALCÃO ================= */}
+        {activeTab === 'clientes' && (
+          <ClientesWorkspace 
+            tenantId={tenant.id}
+            tenantNome={tenant.nomeFantasia || tenant.name}
+          />
+        )}
+
 
         {/* ================= ABA 6: MÓDULOS SAAS ROOT ================= */}
         {activeTab === 'saas-config' && (

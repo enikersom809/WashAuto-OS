@@ -41,6 +41,7 @@ import {
   findTenantByCompanyEmailFirestore,
   findTenantIdByClientEmailFirestore 
 } from '../lib/firebaseService';
+import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
 
 
 export type LoginProfileType = 'cliente' | 'empresa' | 'admin';
@@ -221,15 +222,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     });
   };
 
-  // Busca Automática do CEP via ViaCEP
+  // Busca Automática do CEP via ViaCEP padronizada
   const buscarCEP = async (cepValue: string) => {
-    const clean = cepValue.replace(/\D/g, '');
+    const clean = cleanDigits(cepValue).slice(0, 8);
     if (clean.length !== 8) return;
     setIsSearchingCep(true);
     try {
       const res = await fetch(`https://viacep.com.br/ws/${clean}/json/`);
       const data = await res.json();
       if (!data.erro) {
+        setRegCep(formatCep(clean));
         setRegAddress(data.logradouro ? `${data.logradouro}, ` : '');
         setRegNeighborhood(data.bairro || '');
         setRegCity(data.localidade || '');
@@ -959,7 +961,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       id="superadmin_master_email"
                       value={adminEmail || identifier}
                       onChange={(e) => handleIdentifierChange(e.target.value)}
-                      placeholder="admin_super@gmail.com" 
+                      placeholder="admin@master.com" 
                       autoComplete="username"
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 transition font-medium"
                     />
@@ -1104,14 +1106,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     onClick={(e) => { 
                       e.preventDefault(); 
                       if (activeTab === 'admin') {
-                        localStorage.setItem('saas_admin_email', 'admin_super@gmail.com');
-                        localStorage.setItem('saas_admin_password', 'admin124050');
-                        setAdminEmail('admin_super@gmail.com');
-                        setAdminPassword('admin124050');
-                        setIdentifier('admin_super@gmail.com');
-                        setPassword('admin124050');
-                        setErrorMessage(null);
-                        setAuthSuccessMsg('Credenciais do Super Admin restauradas com sucesso: admin_super@gmail.com / admin124050');
+                        setAuthSuccessMsg('Instruções de recuperação de acesso enviadas para o e-mail cadastrado do Super Admin.');
                       } else {
                         setAuthSuccessMsg('Instruções de recuperação de senha enviadas para o seu e-mail.'); 
                       }
@@ -1186,35 +1181,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </button>
                 </div>
               </div>
-
-              {/* Dica / Auxiliar de Credenciais do Super Admin (Apenas exibido na aba admin) */}
-              {activeTab === 'admin' && (
-                <div className="bg-indigo-950/40 border border-indigo-500/20 rounded-xl p-3 text-xs text-indigo-300 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold flex items-center gap-1.5 text-indigo-200">
-                      <Key className="w-3.5 h-3.5 text-indigo-400" />
-                      Credenciais de Acesso Super Admin:
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail('admin_super@gmail.com');
-                        setAdminPassword('admin124050');
-                        setIdentifier('admin_super@gmail.com');
-                        setPassword('admin124050');
-                        setErrorMessage(null);
-                      }}
-                      className="text-[11px] font-bold text-indigo-400 hover:text-indigo-200 underline cursor-pointer"
-                    >
-                      Preencher credenciais
-                    </button>
-                  </div>
-                  <div className="text-[11px] text-slate-300 font-mono flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 bg-slate-950/60 p-2 rounded-lg border border-indigo-500/10">
-                    <span>E-mail: <strong className="text-white">admin_super@gmail.com</strong></span>
-                    <span>Senha: <strong className="text-amber-400">admin124050</strong></span>
-                  </div>
-                </div>
-              )}
 
               {/* Lembrar Login */}
               <div className="flex items-center justify-between pt-1">
@@ -1306,8 +1272,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       <input 
                         type="text" 
                         value={regPhone}
-                        onChange={(e) => setRegPhone(e.target.value)}
+                        onChange={(e) => setRegPhone(formatCelular(e.target.value))}
                         placeholder="(11) 99999-9999" 
+                        maxLength={15}
                         className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-[#00A3FF] transition"
                       />
                     </div>
@@ -1325,10 +1292,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         maxLength={9}
                         value={regCep}
                         onChange={(e) => {
-                          const val = e.target.value;
-                          setRegCep(val);
-                          if (val.replace(/\D/g, '').length === 8) {
-                            buscarCEP(val);
+                          const formatted = formatCep(e.target.value);
+                          setRegCep(formatted);
+                          if (cleanDigits(formatted).length === 8) {
+                            buscarCEP(formatted);
                           }
                         }}
                         onBlur={(e) => buscarCEP(e.target.value)}
