@@ -177,7 +177,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [regPhone, setRegPhone] = useState('');
   const [regCompanyName, setRegCompanyName] = useState('');
   const [regSubdomain, setRegSubdomain] = useState(() => getInitialSlugFromUrl());
-  const [regPlan, setRegPlan] = useState<'Basic' | 'Pro' | 'Enterprise'>('Pro');
+  const [regPlan, setRegPlan] = useState<'Basic' | 'Pro' | 'Enterprise' | 'Vitalicio'>('Pro');
   const [regPassword, setRegPassword] = useState('');
   const [showRegPassword, setShowRegPassword] = useState(false);
 
@@ -585,16 +585,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         }
 
         const cleanSub = extractDomainSlug(regSubdomain) || extractDomainSlug(regCompanyName) || 'lavajato';
+        const isVitalicio = regPlan === 'Vitalicio';
         const createdTenant: Tenant = {
           id: `t-${Date.now().toString().slice(-4)}`,
           name: regCompanyName.trim(),
           code: regCompanyName.slice(0, 2).toUpperCase() || 'LJ',
           domain: `${cleanSub}.saas.com`,
           plan: regPlan,
-          status: 'Trial',
+          status: isVitalicio ? 'Ativo' : 'Trial',
           endUsersCount: 1,
-          maxUsers: regPlan === 'Basic' ? 50 : regPlan === 'Pro' ? 500 : 5000,
-          mrrAmount: regPlan === 'Basic' ? 199 : regPlan === 'Pro' ? 499 : 1299,
+          maxUsers: regPlan === 'Basic' ? 50 : regPlan === 'Pro' ? 500 : regPlan === 'Enterprise' ? 5000 : 99999,
+          mrrAmount: isVitalicio ? 0 : (regPlan === 'Basic' ? 199 : regPlan === 'Pro' ? 499 : 1299),
+          isLifetime: isVitalicio,
+          purchaseAmount: isVitalicio ? 4000 : undefined,
           createdAt: new Date().toLocaleDateString('pt-BR'),
           contactEmail: regEmail.trim(),
           ownerName: regName.trim() || regCompanyName,
@@ -1603,16 +1606,29 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1">Escolha seu Plano (14 dias grátis)</label>
+                    <label className="block text-xs font-bold text-slate-300 mb-1">Escolha seu Plano ou Compra do Aplicativo</label>
                     <select
                       value={regPlan}
-                      onChange={(e) => setRegPlan(e.target.value as 'Basic' | 'Pro' | 'Enterprise')}
+                      onChange={(e) => setRegPlan(e.target.value as 'Basic' | 'Pro' | 'Enterprise' | 'Vitalicio')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 transition cursor-pointer font-medium"
                     >
                       <option value="Basic">Plano Basic - R$ 199/mês (Até 50 veículos)</option>
                       <option value="Pro">Plano Pro - R$ 499/mês (Até 500 veículos + Comissões)</option>
                       <option value="Enterprise">Plano Enterprise - R$ 1.299/mês (Ilimitado + Multi-Lojas)</option>
+                      <option value="Vitalicio">💎 Plano Vitalício - R$ 4.000,00 (Compra do App - Sem Mensalidade!)</option>
                     </select>
+
+                    {regPlan === 'Vitalicio' && (
+                      <div className="mt-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 text-[11px] leading-relaxed flex items-start gap-2">
+                        <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <div>
+                          <strong>Compra Definitiva do Aplicativo (R$ 4.000,00):</strong>
+                          <p className="text-[10px] text-amber-200/90 mt-0.5">
+                            Você adquire a licença vitalícia para o seu lava-jato. Todos os recursos operacionais liberados para sempre com 0% de mensalidade recorrente!
+                          </p>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div>

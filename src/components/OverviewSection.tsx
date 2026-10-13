@@ -177,6 +177,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
                     <div className="w-full bg-[#020617] h-2 rounded-full overflow-hidden border border-[#1e293b]/50">
                       <div 
                         className={`h-full rounded-full ${
+                          p.name === 'Vitalicio' || p.isLifetime ? 'bg-amber-400' :
                           p.name === 'Enterprise' ? 'bg-purple-500' :
                           p.name === 'Pro' ? 'bg-indigo-500' : 'bg-slate-500'
                         }`}
@@ -252,11 +253,13 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
                 tenants.slice(0, 5).map((tenant) => {
                 const isEnterprise = tenant.plan === 'Enterprise';
                 const isPro = tenant.plan === 'Pro';
+                const isVitalicio = tenant.plan === 'Vitalicio' || tenant.isLifetime;
 
                 return (
                   <tr key={tenant.id} className="hover:bg-slate-800/20 transition">
                     <td className="px-6 py-4 flex items-center gap-3">
                       <div className={`w-9 h-9 rounded flex items-center justify-center font-bold text-xs ${
+                        isVitalicio ? 'bg-amber-500/15 border border-amber-500/30 text-amber-300' :
                         tenant.status === 'Inadimplente' ? 'bg-rose-500/10 border border-rose-500/20 text-rose-400' :
                         tenant.status === 'Suspenso' ? 'bg-slate-500/10 border border-slate-500/20 text-slate-400' :
                         tenant.status === 'Trial' ? 'bg-amber-500/10 border border-amber-500/20 text-amber-400' :
@@ -272,11 +275,12 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
 
                     <td className="px-4 py-4">
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                        isVitalicio ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' :
                         isEnterprise ? 'bg-purple-500/10 text-purple-400 border-purple-500/20' :
                         isPro ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' :
                         'bg-slate-500/10 text-slate-400 border-slate-500/20'
                       }`}>
-                        {tenant.plan}
+                        {isVitalicio ? '💎 Vitalício' : tenant.plan}
                       </span>
                     </td>
 

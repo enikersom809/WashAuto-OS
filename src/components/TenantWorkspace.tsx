@@ -41,7 +41,9 @@ import {
   ExternalLink,
   FileSpreadsheet,
   FileText,
-  Menu
+  Menu,
+  QrCode,
+  Loader2
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { ClientPortal } from './ClientPortal';
@@ -177,7 +179,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, [initialTenant?.id]);
 
 
-  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'clientes' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente'>('fila');
+  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'clientes' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente' | 'comprar-vitalicio'>('fila');
 
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -449,7 +451,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     { id: 'm4', name: 'Módulo de Comissões Automáticas da Equipe', enabled: true },
     { id: 'm5', name: 'Controle de Estoque & Venda no Balcão', enabled: true },
     { id: 'm6', name: 'Notificações via WhatsApp Bot (Disparo Automático)', enabled: tenant.plan !== 'Basic' },
-    { id: 'm7', name: 'Relatórios Financeiros & NF-e Automática', enabled: tenant.plan === 'Enterprise' }
+    { id: 'm7', name: 'Relatórios Financeiros & NF-e Automática', enabled: tenant.plan === 'Enterprise' || tenant.plan === 'Vitalicio' }
   ]);
 
   // Toast / Modals state
@@ -510,9 +512,59 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   // Support Message Form
   const [broadcastMessage, setBroadcastMessage] = useState('');
 
+  // Estados para Compra do Aplicativo (Plano Vitalício)
+  const [isUpgradingLifetime, setIsUpgradingLifetime] = useState(false);
+  const [paymentMethodSelected, setPaymentMethodSelected] = useState<'pix' | 'cartao'>('pix');
+  const [copiedPixKey, setCopiedPixKey] = useState(false);
+  const [showPurchaseSuccessBanner, setShowPurchaseSuccessBanner] = useState(false);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const handleConfirmPurchaseLifetime = async () => {
+    setIsUpgradingLifetime(true);
+    try {
+      const updated: Tenant = {
+        ...tenant,
+        plan: 'Vitalicio',
+        status: 'Ativo',
+        isLifetime: true,
+        purchaseAmount: 4000,
+        mrrAmount: 0,
+        maxUsers: 99999
+      };
+      setCurrentTenant(updated);
+      await saveTenantToFirestore(updated);
+      if (onUpdateTenant) onUpdateTenant(updated);
+
+      try {
+        const savedInvoices = localStorage.getItem('saas_master_invoices');
+        const currentInvoices = savedInvoices ? JSON.parse(savedInvoices) : [];
+        const newInvoice = {
+          id: `INV-${Date.now().toString().slice(-6)}`,
+          tenantId: tenant.id,
+          tenantName: tenant.nomeFantasia || tenant.name,
+          amount: 4000,
+          date: new Date().toLocaleDateString('pt-BR'),
+          dueDate: new Date().toLocaleDateString('pt-BR'),
+          status: 'Pago',
+          planName: 'Vitalicio'
+        };
+        localStorage.setItem('saas_master_invoices', JSON.stringify([newInvoice, ...currentInvoices]));
+      } catch (e) {
+        console.warn('Erro ao salvar fatura vitalícia:', e);
+      }
+
+      setShowPurchaseSuccessBanner(true);
+      showToast('🎉 Parabéns! Compra da Licença Vitalícia confirmada com sucesso!');
+    } catch (err) {
+      console.error('Erro ao ativar plano vitalício:', err);
+      showToast('Erro ao processar ativação vitalícia.');
+    } finally {
+      setIsUpgradingLifetime(false);
+    }
   };
 
   // Manager Alert for Client Free Wash Redemption Requests
@@ -1061,6 +1113,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       icon: Sparkles,
       badge: 'Público',
       badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+    },
+    {
+      id: 'comprar-vitalicio' as const,
+      label: tenant.plan === 'Vitalicio' ? 'Licença Vitalícia' : 'Comprar o Aplicativo',
+      icon: Sparkles,
+      badge: tenant.plan === 'Vitalicio' ? 'VITALÍCIO' : 'R$ 4.000',
+      badgeColor: tenant.plan === 'Vitalicio' 
+        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-black' 
+        : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-black'
     }
   ];
 
@@ -1181,8 +1242,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 {tenant.nomeFantasia || tenant.name}
               </h1>
               <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.2 rounded-full font-bold">
-                  {tenant.plan}
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                  tenant.plan === 'Vitalicio'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-black'
+                    : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                }`}>
+                  {tenant.plan === 'Vitalicio' ? '👑 Licença Vitalícia' : tenant.plan}
                 </span>
                 <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.2 rounded font-mono truncate max-w-[110px]" title={tenant.domain}>
                   {tenant.domain}
@@ -1191,6 +1256,26 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Banner de Aquisição do App / Licença Vitalícia */}
+        {tenant.plan !== 'Vitalicio' && (
+          <div className="mx-3 mt-3 mb-1 p-3 bg-gradient-to-br from-amber-950/30 via-slate-900 to-amber-950/20 border border-amber-500/40 rounded-xl relative overflow-hidden group">
+            <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs mb-1">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+              <span>Comprar o Aplicativo</span>
+            </div>
+            <p className="text-[10px] text-slate-300 leading-tight mb-2.5">
+              Livre-se de mensalidades por <strong>R$ 4.000,00</strong> em pagamento único definitivo.
+            </p>
+            <button
+              onClick={() => setActiveTab('comprar-vitalicio')}
+              className="w-full bg-gradient-to-r from-amber-500 to-yellow-400 hover:brightness-105 text-slate-950 font-black text-[11px] py-2 px-2 rounded-lg shadow-md transition flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-slate-950" />
+              Comprar por R$ 4.000
+            </button>
+          </div>
+        )}
 
         {/* Links de Navegação do Menu Lateral */}
         <div className="p-3 flex-1 overflow-y-auto space-y-1">
@@ -1276,6 +1361,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   {activeTab === 'configuracoes-empresa' && <><Building2 className="w-5 h-5 text-blue-400" /> Configurações da Empresa</>}
                   {activeTab === 'saas-config' && <><Sliders className="w-5 h-5 text-blue-400" /> Módulos SaaS Root</>}
                   {activeTab === 'portal-cliente' && <><Sparkles className="w-5 h-5 text-amber-400" /> Portal do Cliente (Visão Pública)</>}
+                  {activeTab === 'comprar-vitalicio' && <><Sparkles className="w-5 h-5 text-amber-400" /> {tenant.plan === 'Vitalicio' ? 'Certificado de Licença Vitalícia' : 'Comprar o Aplicativo Definitivo (Plano Vitalício)'}</>}
                 </h2>
                 <p className="text-[11px] text-slate-400 hidden sm:flex items-center gap-2">
                   <span>{tenant.nomeFantasia || tenant.name}</span>
@@ -2576,6 +2662,410 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
               showToast(`Agendamento de ${newApp.clientName} recebido no Portal! Aparece na aba Agendamentos.`);
             }}
           />
+        )}
+
+        {/* ================= ABA 7: COMPRA DO APLICATIVO (PLANO VITALÍCIO R$ 4.000) ================= */}
+        {activeTab === 'comprar-vitalicio' && (
+          <div className="space-y-6">
+
+            {/* Sucesso imediato caso tenha acabado de comprar */}
+            {showPurchaseSuccessBanner && (
+              <div className="p-4 bg-emerald-500/20 border border-emerald-500/40 rounded-2xl text-emerald-200 flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                    <CheckCircle2 className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm text-emerald-300">Licença Vitalícia Ativada com Sucesso!</h4>
+                    <p className="text-xs text-emerald-200/90">
+                      O aplicativo agora é de sua posse definitiva. Não haverá mais cobranças de mensalidades.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowPurchaseSuccessBanner(false)}
+                  className="text-emerald-400 hover:text-white p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {tenant.plan === 'Vitalicio' ? (
+              /* ================= VISÃO DO CLIENTE QUE JÁ COMPROU (CERTIFICADO VITALÍCIO) ================= */
+              <div className="bg-gradient-to-br from-amber-950/30 via-slate-950 to-yellow-950/20 border border-amber-500/50 rounded-2xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-96 h-96 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-amber-500/20 pb-6 mb-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-500 to-yellow-400 text-slate-950 flex items-center justify-center shadow-lg shadow-amber-500/30 shrink-0">
+                      <Sparkles className="w-8 h-8" />
+                    </div>
+                    <div>
+                      <span className="text-[11px] font-black tracking-widest uppercase bg-amber-500/20 text-amber-300 px-2.5 py-0.5 rounded-full border border-amber-500/30">
+                        Certificado Oficial de Licença
+                      </span>
+                      <h2 className="text-xl sm:text-2xl font-black text-slate-100 mt-1">
+                        Licença Vitalícia Permanente Ativa
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Aplicativo próprio de uso definitivo para o lava-jato
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="text-left sm:text-right">
+                    <span className="text-xs text-slate-400 block">Status da Mensalidade</span>
+                    <span className="text-sm font-black text-emerald-400 flex items-center sm:justify-end gap-1.5 mt-0.5">
+                      <Check className="w-4 h-4" /> 0% Mensalidade (Isento para sempre)
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                  <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                    <span className="text-[11px] text-slate-400 block mb-1">Empresa Licenciada</span>
+                    <span className="text-sm font-bold text-slate-100">{tenant.nomeFantasia || tenant.name}</span>
+                    <p className="text-[10px] text-slate-500 font-mono mt-0.5">{tenant.domain}</p>
+                  </div>
+
+                  <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                    <span className="text-[11px] text-slate-400 block mb-1">Valor da Aquisição</span>
+                    <span className="text-sm font-bold text-amber-300 font-mono">R$ 4.000,00</span>
+                    <p className="text-[10px] text-emerald-400 font-semibold mt-0.5">Pagamento Único Quitado</p>
+                  </div>
+
+                  <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                    <span className="text-[11px] text-slate-400 block mb-1">Código de Registro</span>
+                    <span className="text-xs font-mono font-bold text-slate-200">
+                      LIC-{tenant.id.toUpperCase()}-LIFETIME
+                    </span>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Assinatura digital validada</p>
+                  </div>
+
+                  <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                    <span className="text-[11px] text-slate-400 block mb-1">Suporte & Atualizações</span>
+                    <span className="text-sm font-bold text-emerald-400">Inclusos Vitalícios</span>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Garantia contínua de funcionamento</p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/50 border border-slate-800/80 rounded-xl p-5 space-y-3">
+                  <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-2">
+                    <Check className="w-4 h-4 text-amber-400" />
+                    Benefícios e Recursos Inclusos na sua Licença Vitalícia:
+                  </h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs text-slate-300">
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Usuários e lavadores ilimitados</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Fila de lavagem e controle de pátio</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Agendamentos online em tempo real</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Disparo de WhatsApp Bot automático</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Relatórios financeiros e DRE completo</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Portal do Cliente via Totem QR Code</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-5 border-t border-amber-500/20 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+                  <span>
+                    ✓ Esta licença concede posse definitiva de uso para <strong>{tenant.name}</strong> sem expiração.
+                  </span>
+                  <button
+                    onClick={() => window.print()}
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 rounded-lg font-semibold transition flex items-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-4 h-4 text-amber-400" /> Imprimir Certificado de Aquisição
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* ================= VISÃO DE COMPRA DO APLICATIVO (R$ 4.000,00) ================= */
+              <div className="space-y-6">
+
+                {/* Hero Banner de Compra Definitiva */}
+                <div className="bg-gradient-to-br from-amber-950/40 via-slate-950 to-indigo-950/30 border border-amber-500/40 rounded-2xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                    <div className="max-w-2xl">
+                      <span className="inline-flex items-center gap-1.5 text-xs font-black uppercase tracking-wider bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 px-3 py-1 rounded-full shadow-md mb-3">
+                        <Sparkles className="w-3.5 h-3.5" /> Compra Definitiva do Aplicativo
+                      </span>
+                      <h2 className="text-2xl sm:text-3xl font-black text-slate-100 leading-tight">
+                        Adquira a Licença Vitalícia por R$ 4.000,00
+                      </h2>
+                      <p className="text-sm text-slate-300 mt-2 leading-relaxed">
+                        Livre seu lava-jato de mensalidades recorrentes para sempre. Comprando a licença do aplicativo por uma taxa única de R$ 4.000,00, o sistema é seu em definitivo, com todos os recursos liberados e suporte incluso.
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-5 text-center shrink-0 min-w-[260px] shadow-xl">
+                      <span className="text-[11px] text-slate-400 uppercase font-bold tracking-wider block">
+                        Valor de Venda do Aplicativo
+                      </span>
+                      <div className="text-3xl sm:text-4xl font-black text-amber-300 mt-1">
+                        R$ 4.000<span className="text-lg font-bold text-amber-400">,00</span>
+                      </div>
+                      <span className="text-xs text-emerald-400 font-semibold block mt-1">
+                        Pagamento Único • Sem Mensalidades
+                      </span>
+                      <p className="text-[11px] text-slate-500 mt-2 border-t border-slate-800 pt-2">
+                        Equivale a menos de 8 meses do plano tradicional!
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Comparativo: Assinatura Mensal vs Compra Vitalícia */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-slate-300">Modelo Mensal Tradicional</h3>
+                      <span className="text-xs text-slate-500 font-mono">R$ 499 /mês</span>
+                    </div>
+                    <ul className="text-xs text-slate-400 space-y-2">
+                      <li className="flex items-center gap-2">
+                        <span className="text-rose-400">✕</span> Custo no 1º ano: <strong>R$ 5.988,00</strong>
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="text-rose-400">✕</span> Custo em 2 anos: <strong>R$ 11.976,00</strong>
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="text-rose-400">✕</span> Cobrança contínua todos os meses
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="text-rose-400">✕</span> Bloqueio imediato em caso de atraso
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-amber-950/20 to-slate-950 border border-amber-500/40 rounded-xl p-5 space-y-3 shadow-lg">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-amber-300 flex items-center gap-1.5">
+                        <Sparkles className="w-4 h-4 text-amber-400" /> Compra Vitalícia (Definitiva)
+                      </h3>
+                      <span className="text-xs text-amber-300 font-bold font-mono">R$ 4.000 (Único)</span>
+                    </div>
+                    <ul className="text-xs text-slate-200 space-y-2">
+                      <li className="flex items-center gap-2">
+                        <span className="text-emerald-400 font-bold">✓</span> Economia de <strong>R$ 1.988,00</strong> logo no 1º ano
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="text-emerald-400 font-bold">✓</span> Economia de <strong>R$ 7.976,00</strong> no 2º ano
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="text-emerald-400 font-bold">✓</span> O aplicativo é seu para sempre
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="text-emerald-400 font-bold">✓</span> Nunca mais se preocupe com faturas mensais
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Grid com 6 Recursos Inclusos na Compra */}
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-6">
+                  <h3 className="text-base font-bold text-slate-100 mb-4 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-400" />
+                    O que está incluso na compra do aplicativo por R$ 4.000,00?
+                  </h3>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                    <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="w-8 h-8 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold text-sm">
+                        1
+                      </div>
+                      <h4 className="font-bold text-sm text-slate-200">Zero Mensalidades</h4>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        0% de cobrança mensal ou taxa escondida. Você nunca mais receberá faturas de assinatura.
+                      </p>
+                    </div>
+
+                    <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center font-bold text-sm">
+                        2
+                      </div>
+                      <h4 className="font-bold text-sm text-slate-200">Veículos & Pátio Ilimitados</h4>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Sem limite de carros na fila, cadastro de clientes, balcão, produtos e controle de estoque.
+                      </p>
+                    </div>
+
+                    <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-sm">
+                        3
+                      </div>
+                      <h4 className="font-bold text-sm text-slate-200">WhatsApp Bot Integrado</h4>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Avisos automáticos de veículo pronto e link do comprovante direto no WhatsApp do cliente.
+                      </p>
+                    </div>
+
+                    <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="w-8 h-8 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center font-bold text-sm">
+                        4
+                      </div>
+                      <h4 className="font-bold text-sm text-slate-200">Relatórios & Comissões</h4>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Cálculo automático de comissão dos lavadores, DRE financeiro e fechamento de caixa do dia.
+                      </p>
+                    </div>
+
+                    <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="w-8 h-8 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center font-bold text-sm">
+                        5
+                      </div>
+                      <h4 className="font-bold text-sm text-slate-200">Portal do Cliente & Totem</h4>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Totem com QR Code exclusivo para seus clientes agendarem e acompanharem o status do carro.
+                      </p>
+                    </div>
+
+                    <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-sm">
+                        6
+                      </div>
+                      <h4 className="font-bold text-sm text-slate-200">Sincronização em Nuvem</h4>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Acesse ao mesmo tempo no celular, tablet e computador com banco de dados em tempo real.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Caixa de Checkout / Pagamento da Licença */}
+                <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                    <div>
+                      <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                        <CreditCard className="w-5 h-5 text-indigo-400" />
+                        Finalizar Compra da Licença Vitalícia
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Escolha o método de pagamento para concluir a compra definitiva
+                      </p>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="text-xs text-slate-400 block">Total a Pagar</span>
+                      <span className="text-2xl font-black text-amber-300 font-mono">R$ 4.000,00</span>
+                    </div>
+                  </div>
+
+                  {/* Seleção do Método */}
+                  <div className="grid grid-cols-2 gap-3 max-w-md">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMethodSelected('pix')}
+                      className={`p-3 rounded-xl border text-xs font-bold text-center transition cursor-pointer flex items-center justify-center gap-2 ${
+                        paymentMethodSelected === 'pix'
+                          ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 shadow-md shadow-emerald-500/10'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>⚡ PIX (À Vista com Liberação Imediata)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMethodSelected('cartao')}
+                      className={`p-3 rounded-xl border text-xs font-bold text-center transition cursor-pointer flex items-center justify-center gap-2 ${
+                        paymentMethodSelected === 'cartao'
+                          ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300 shadow-md shadow-indigo-500/10'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>💳 Cartão de Crédito (Até 12x)</span>
+                    </button>
+                  </div>
+
+                  {/* Detalhes do Pagamento */}
+                  {paymentMethodSelected === 'pix' ? (
+                    <div className="bg-[#020617] border border-slate-800 rounded-xl p-4 sm:p-5 space-y-3">
+                      <div className="flex flex-col sm:flex-row items-center gap-4">
+                        <div className="w-24 h-24 bg-white p-2 rounded-xl flex items-center justify-center shrink-0">
+                          <QrCode className="w-20 h-20 text-slate-950" />
+                        </div>
+                        <div className="space-y-1.5 flex-1">
+                          <span className="text-xs font-bold text-slate-200">Chave PIX Oficial de Faturamento:</span>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              readOnly
+                              value="financeiro@saaslavajato.com.br"
+                              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-emerald-400 w-full"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText('financeiro@saaslavajato.com.br');
+                                setCopiedPixKey(true);
+                                setTimeout(() => setCopiedPixKey(false), 2000);
+                              }}
+                              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-bold transition shrink-0 cursor-pointer"
+                            >
+                              {copiedPixKey ? '✓ Copiado!' : 'Copiar'}
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Banco Digital • Destinatário: Plataforma SaaS Lava-Jato • Valor: R$ 4.000,00
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-[#020617] border border-slate-800 rounded-xl p-4 space-y-2 text-xs text-slate-300">
+                      <p className="font-semibold text-slate-200">Parcelamento no Cartão de Crédito:</p>
+                      <p className="text-[11px] text-slate-400">
+                        12x de R$ 385,00 ou 6x de R$ 720,00 sem burocracia via link seguro de pagamento.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Botão de Confirmação e Ativação Instantânea */}
+                  <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-t border-slate-800">
+                    <p className="text-[11px] text-slate-400 max-w-md leading-relaxed">
+                      Ao confirmar, seu lava-jato é atualizado instantaneamente no banco de dados Firestore para o <strong>Plano Vitalício</strong> com emissão da fatura quitada.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={handleConfirmPurchaseLifetime}
+                      disabled={isUpgradingLifetime}
+                      className="py-3 px-6 bg-gradient-to-r from-amber-500 to-yellow-400 hover:brightness-105 text-slate-950 rounded-xl font-black text-sm shadow-xl shadow-amber-500/20 transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                    >
+                      {isUpgradingLifetime ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" /> Ativando Licença no Firestore...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-5 h-5" /> Confirmar Pagamento & Ativar Licença Vitalícia
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+            )}
+
+          </div>
         )}
 
       </main>

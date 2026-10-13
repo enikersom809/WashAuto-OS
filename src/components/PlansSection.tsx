@@ -11,7 +11,8 @@ import {
   Receipt, 
   X,
   Building2,
-  AlertTriangle
+  AlertTriangle,
+  Sparkles
 } from 'lucide-react';
 import { Plan, Invoice, Tenant } from '../types';
 
@@ -41,11 +42,14 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
   const [newPlanPrice, setNewPlanPrice] = useState<number>(299);
   const [newPlanMaxUsers, setNewPlanMaxUsers] = useState<number>(200);
   const [newPlanFeatures, setNewPlanFeatures] = useState<string>('Suporte 24/7, Analytics, API Access');
+  const [newPlanIsLifetime, setNewPlanIsLifetime] = useState<boolean>(false);
 
   // Revenue Metrics
   const totalBilled = invoices.reduce((acc, inv) => inv.status === 'Pago' ? acc + inv.amount : acc, 0);
   const activeTenantsCount = tenants.filter(t => t.status === 'Ativo').length || 1;
   const arpu = Math.round(totalBilled / activeTenantsCount);
+  const lifetimeSalesCount = tenants.filter(t => t.plan === 'Vitalicio' || t.isLifetime).length;
+  const lifetimeRevenue = lifetimeSalesCount * 4000;
 
   const handleSavePlanEdit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,10 +65,12 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
 
     const created: Plan = {
       id: `plan-${Date.now()}`,
-      name: 'Custom',
+      name: newPlanIsLifetime ? 'Vitalicio' : 'Custom',
       displayName: newPlanName,
       priceMonthly: newPlanPrice,
       maxUsers: newPlanMaxUsers,
+      isLifetime: newPlanIsLifetime,
+      billingCycle: newPlanIsLifetime ? 'lifetime' : 'monthly',
       features: newPlanFeatures.split(',').map(f => f.trim()).filter(Boolean),
       activeTenantsCount: 0
     };
@@ -72,6 +78,8 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
     onAddPlan(created);
     setShowAddPlanModal(false);
     setNewPlanName('');
+    setNewPlanIsLifetime(false);
+    setNewPlanPrice(299);
   };
 
   return (
@@ -85,20 +93,20 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
             Planos de Assinatura & Faturamento
           </h2>
           <p className="text-[11px] text-slate-400 mt-0.5">
-            Configure os preços, recursos inclusos e acompanhe o histórico de faturas geradas.
+            Configure mensalidades, venda de licença definitiva (Plano Vitalício R$ 4.000) e acompanhe faturas geradas.
           </p>
         </div>
 
         <button
           onClick={() => setShowAddPlanModal(true)}
-          className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-indigo-600/30"
+          className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shadow-sm shadow-indigo-600/30 cursor-pointer"
         >
           <Plus className="w-4 h-4" /> Criar Novo Plano
         </button>
       </div>
 
       {/* Financial Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl p-5">
           <div className="flex justify-between items-center text-slate-400 mb-1 text-[11px]">
             <span>Receita Processada (Mês Atual)</span>
@@ -108,6 +116,17 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
             R$ {totalBilled.toLocaleString('pt-BR')}
           </span>
           <p className="text-[11px] text-slate-500 mt-1">Faturas pagas via Gateway</p>
+        </div>
+
+        <div className="bg-[#0f172a] border border-amber-500/30 rounded-xl p-5 bg-gradient-to-b from-amber-950/20 to-[#0f172a]">
+          <div className="flex justify-between items-center text-amber-300 mb-1 text-[11px] font-bold">
+            <span>Vendas Vitalícias (R$ 4.000)</span>
+            <Sparkles className="w-4 h-4 text-amber-400" />
+          </div>
+          <span className="text-2xl font-bold text-amber-300">
+            R$ {lifetimeRevenue.toLocaleString('pt-BR')}
+          </span>
+          <p className="text-[11px] text-slate-400 mt-1">{lifetimeSalesCount} app(s) comprado(s) definitivamente</p>
         </div>
 
         <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl p-5">
@@ -156,23 +175,34 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
         ) : (
           plans.map((plan) => {
             const tenantsOnPlan = tenants.filter(t => t.plan === plan.name).length;
+            const isLifetime = plan.isLifetime || plan.name === 'Vitalicio';
 
             return (
               <div
                 key={plan.id}
-                className={`bg-slate-950 border rounded-xl p-6 flex flex-col justify-between relative transition hover:border-slate-700 ${
-                  plan.isPopular ? 'border-indigo-500 shadow-xl shadow-indigo-500/10' : 'border-slate-800'
+                className={`border rounded-xl p-6 flex flex-col justify-between relative transition hover:border-slate-700 ${
+                  isLifetime 
+                    ? 'bg-gradient-to-b from-amber-950/20 via-slate-950 to-slate-950 border-amber-500/50 shadow-xl shadow-amber-500/10'
+                    : plan.isPopular 
+                      ? 'bg-slate-950 border-indigo-500 shadow-xl shadow-indigo-500/10' 
+                      : 'bg-slate-950 border-slate-800'
                 }`}
               >
-                {plan.isPopular && (
+                {isLifetime ? (
+                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 text-[10px] uppercase font-black tracking-wider px-3 py-0.5 rounded-full shadow flex items-center gap-1">
+                    💎 Licença Vitalícia • Compra do App
+                  </span>
+                ) : plan.isPopular ? (
                   <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-indigo-600 text-white text-[10px] uppercase font-bold tracking-wider px-3 py-0.5 rounded-full shadow">
                     Mais Popular
                   </span>
-                )}
+                ) : null}
 
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-lg font-bold text-slate-100">{plan.displayName}</h3>
+                    <h3 className={`text-lg font-bold ${isLifetime ? 'text-amber-300' : 'text-slate-100'}`}>
+                      {plan.displayName}
+                    </h3>
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => setEditingPlan(plan)}
@@ -194,18 +224,31 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
 
                   <div className="mb-4">
                     <span className="text-3xl font-extrabold text-slate-100">
-                      R$ {plan.priceMonthly}
+                      R$ {plan.priceMonthly.toLocaleString('pt-BR')}
                     </span>
-                    <span className="text-xs text-slate-500"> /mês</span>
+                    {isLifetime ? (
+                      <span className="text-xs text-amber-400 font-bold ml-1.5">
+                        /pagamento único (vitalício)
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-500"> /mês</span>
+                    )}
+                    {isLifetime && (
+                      <p className="text-[11px] text-emerald-400 font-medium mt-0.5">
+                        ✓ Sem mensalidade para sempre • 0% taxa mensal
+                      </p>
+                    )}
                   </div>
 
-                  <div className="bg-slate-900/60 rounded-lg p-2.5 mb-5 flex items-center justify-between text-xs text-slate-400">
+                  <div className={`rounded-lg p-2.5 mb-5 flex items-center justify-between text-xs ${
+                    isLifetime ? 'bg-amber-950/30 border border-amber-500/20 text-amber-200' : 'bg-slate-900/60 text-slate-400'
+                  }`}>
                     <span className="flex items-center gap-1.5">
-                      <Building2 className="w-3.5 h-3.5 text-indigo-400" />
-                      {tenantsOnPlan} Empresas assinantes
+                      <Building2 className={`w-3.5 h-3.5 ${isLifetime ? 'text-amber-400' : 'text-indigo-400'}`} />
+                      {tenantsOnPlan} Empresas {isLifetime ? 'compraram o app' : 'assinantes'}
                     </span>
-                    <span className="font-semibold text-slate-300">
-                      Até {plan.maxUsers} usuários
+                    <span className={`font-semibold ${isLifetime ? 'text-amber-300' : 'text-slate-300'}`}>
+                      {plan.maxUsers >= 10000 ? 'Usuários Ilimitados' : `Até ${plan.maxUsers} usuários`}
                     </span>
                   </div>
 
@@ -216,7 +259,7 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                     </p>
                     {plan.features.map((feat, idx) => (
                       <div key={idx} className="flex items-start gap-2 text-xs text-slate-300">
-                        <Check className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                        <Check className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isLifetime ? 'text-amber-400' : 'text-emerald-400'}`} />
                         <span>{feat}</span>
                       </div>
                     ))}
@@ -277,7 +320,13 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                     {inv.tenantName}
                   </td>
                   <td className="py-3.5 px-4 text-xs text-slate-400">
-                    {inv.planName}
+                    {inv.planName === 'Vitalicio' ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/30 inline-flex items-center gap-1">
+                        <Sparkles className="w-2.5 h-2.5 text-amber-400" /> Vitalício (Compra do App)
+                      </span>
+                    ) : (
+                      inv.planName
+                    )}
                   </td>
                   <td className="py-3.5 px-4 font-mono font-semibold text-slate-200">
                     R$ {inv.amount.toLocaleString('pt-BR')}
@@ -330,7 +379,10 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
               <X className="w-5 h-5" />
             </button>
 
-            <h3 className="text-lg font-bold text-slate-100">
+            <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+              {(editingPlan.isLifetime || editingPlan.name === 'Vitalicio') && (
+                <Sparkles className="w-5 h-5 text-amber-400" />
+              )}
               Editar {editingPlan.displayName}
             </h3>
 
@@ -346,7 +398,11 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-400 mb-1 font-medium">Preço Mensal (R$)</label>
+                <label className="block text-slate-400 mb-1 font-medium">
+                  {editingPlan.isLifetime || editingPlan.name === 'Vitalicio'
+                    ? 'Preço de Venda do Aplicativo (R$ - Pagamento Único Definitivo)'
+                    : 'Preço Mensal (R$)'}
+                </label>
                 <input
                   type="number"
                   value={editingPlan.priceMonthly}
@@ -363,6 +419,27 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                   onChange={(e) => setEditingPlan({ ...editingPlan, maxUsers: Number(e.target.value) })}
                   className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                 />
+                <p className="text-[10px] text-slate-500 mt-1">Dica: 99999 para usuários/veículos ilimitados.</p>
+              </div>
+
+              <div className="pt-2 border-t border-slate-800/80">
+                <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(editingPlan.isLifetime || editingPlan.name === 'Vitalicio')}
+                    onChange={(e) => setEditingPlan({ 
+                      ...editingPlan, 
+                      isLifetime: e.target.checked,
+                      billingCycle: e.target.checked ? 'lifetime' : 'monthly',
+                      name: e.target.checked ? 'Vitalicio' : (editingPlan.name === 'Vitalicio' ? 'Custom' : editingPlan.name)
+                    })}
+                    className="w-4 h-4 rounded border-slate-800 text-amber-500 focus:ring-amber-500/20"
+                  />
+                  <span className="font-semibold text-xs text-amber-300 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    Licença Vitalícia (Sem mensalidades recorrentes)
+                  </span>
+                </label>
               </div>
             </div>
 
@@ -503,7 +580,33 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-400 mb-1 font-medium">Preço Mensal (R$)</label>
+                <label className="block text-slate-400 mb-1 font-medium">Modelo de Cobrança</label>
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => { setNewPlanIsLifetime(false); if (newPlanPrice === 4000) setNewPlanPrice(299); }}
+                    className={`py-2 px-3 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
+                      !newPlanIsLifetime ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-slate-900 border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    Mensalidade Recorrente
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setNewPlanIsLifetime(true); setNewPlanPrice(4000); setNewPlanMaxUsers(99999); }}
+                    className={`py-2 px-3 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
+                      newPlanIsLifetime ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-900 border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    💎 Vitalício (Compra do App)
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">
+                  {newPlanIsLifetime ? 'Preço de Venda do App (R$ - Pagamento Único)' : 'Preço Mensal (R$)'}
+                </label>
                 <input
                   type="number"
                   required
@@ -522,6 +625,9 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                   onChange={(e) => setNewPlanMaxUsers(Number(e.target.value))}
                   className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                 />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  {newPlanIsLifetime ? 'Recomendado: 99999 (Ilimitado)' : 'Limite de operadores do sistema'}
+                </p>
               </div>
 
               <div>

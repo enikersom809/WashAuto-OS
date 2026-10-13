@@ -1,4 +1,4 @@
-export type PlanType = 'Basic' | 'Pro' | 'Enterprise' | 'Custom';
+export type PlanType = 'Basic' | 'Pro' | 'Enterprise' | 'Vitalicio' | 'Custom';
 export type TenantStatus = 'Ativo' | 'Inadimplente' | 'Suspenso' | 'Trial';
 
 export interface Tenant {
@@ -33,6 +33,8 @@ export interface Tenant {
     state?: string;
   };
   logoUrl?: string;
+  isLifetime?: boolean;
+  purchaseAmount?: number;
 }
 
 export interface Plan {
@@ -44,6 +46,8 @@ export interface Plan {
   features: string[];
   activeTenantsCount: number;
   isPopular?: boolean;
+  isLifetime?: boolean;
+  billingCycle?: 'monthly' | 'yearly' | 'lifetime';
 }
 
 export type AdminRole = 'ROOT' | 'ADMIN' | 'SUPORTE' | 'AUDITOR';

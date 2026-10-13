@@ -1,133 +1,6 @@
 import { Tenant, Plan, SuperAdminUser, SystemLog, Invoice, SecuritySetting } from '../types';
 
-export const INITIAL_TENANTS: Tenant[] = [
-  {
-    id: 't-101',
-    name: 'Acme Corp',
-    code: 'AC',
-    domain: 'acme.saas.com',
-    plan: 'Enterprise',
-    status: 'Ativo',
-    endUsersCount: 1240,
-    maxUsers: 5000,
-    mrrAmount: 1299,
-    createdAt: '12/01/2026',
-    contactEmail: 'diretoria@acme.com',
-    ownerName: 'Carlos Eduardo Acme',
-    contactPhone: '+55 11 98765-4321',
-    lastActive: 'Há 5 minutos',
-    notes: 'Conta chave Enterprise com contrato anual renovado.'
-  },
-  {
-    id: 't-102',
-    name: 'Stark Tech',
-    code: 'ST',
-    domain: 'stark.saas.com',
-    plan: 'Pro',
-    status: 'Ativo',
-    endUsersCount: 350,
-    maxUsers: 1000,
-    mrrAmount: 499,
-    createdAt: '03/03/2026',
-    contactEmail: 'tech@stark.com.br',
-    ownerName: 'Tony Stark Silva',
-    contactPhone: '+55 21 99123-8877',
-    lastActive: 'Há 12 minutos'
-  },
-  {
-    id: 't-103',
-    name: 'Global Logistics',
-    code: 'GL',
-    domain: 'globallog.saas.com',
-    plan: 'Basic',
-    status: 'Inadimplente',
-    endUsersCount: 45,
-    maxUsers: 100,
-    mrrAmount: 199,
-    createdAt: '18/05/2026',
-    contactEmail: 'financeiro@globallog.com',
-    ownerName: 'Fernanda Lima',
-    contactPhone: '+55 31 97654-1122',
-    lastActive: 'Ontem às 16:40',
-    notes: 'Cartão recusado no ciclo de faturamento atual.'
-  },
-  {
-    id: 't-104',
-    name: 'Cyberdyne Systems',
-    code: 'CS',
-    domain: 'cyberdyne.saas.com',
-    plan: 'Enterprise',
-    status: 'Ativo',
-    endUsersCount: 2890,
-    maxUsers: 10000,
-    mrrAmount: 2500,
-    createdAt: '02/02/2026',
-    contactEmail: 'admin@cyberdyne.com',
-    ownerName: 'Miles Dyson',
-    lastActive: 'Há 2 minutos'
-  },
-  {
-    id: 't-105',
-    name: 'Initech Software',
-    code: 'IN',
-    domain: 'initech.saas.com',
-    plan: 'Pro',
-    status: 'Trial',
-    endUsersCount: 12,
-    maxUsers: 50,
-    mrrAmount: 0,
-    createdAt: '25/07/2026',
-    contactEmail: 'peter@initech.io',
-    ownerName: 'Peter Gibbons',
-    lastActive: 'Há 1 hora'
-  },
-  {
-    id: 't-106',
-    name: 'Umbrella Health',
-    code: 'UH',
-    domain: 'umbrella.saas.com',
-    plan: 'Enterprise',
-    status: 'Ativo',
-    endUsersCount: 4120,
-    maxUsers: 10000,
-    mrrAmount: 1299,
-    createdAt: '10/11/2025',
-    contactEmail: 'sec@umbrella.com',
-    ownerName: 'Albert Wesker',
-    lastActive: 'Há 30 minutos'
-  },
-  {
-    id: 't-107',
-    name: 'Pied Piper Tech',
-    code: 'PP',
-    domain: 'piper.saas.com',
-    plan: 'Pro',
-    status: 'Suspenso',
-    endUsersCount: 88,
-    maxUsers: 250,
-    mrrAmount: 499,
-    createdAt: '14/04/2026',
-    contactEmail: 'richard@piedpiper.com',
-    ownerName: 'Richard Hendricks',
-    lastActive: 'Há 5 dias',
-    notes: 'Suspenso temporariamente a pedido do cliente por reestruturação.'
-  },
-  {
-    id: 't-108',
-    name: 'Wayne Enterprises',
-    code: 'WE',
-    domain: 'wayne.saas.com',
-    plan: 'Enterprise',
-    status: 'Ativo',
-    endUsersCount: 6500,
-    maxUsers: 20000,
-    mrrAmount: 3800,
-    createdAt: '01/01/2025',
-    contactEmail: 'bruce@wayne.com',
-    ownerName: 'Bruce Wayne',
-    lastActive: 'Há 1 minuto'
-  }
-];
+export const INITIAL_TENANTS: Tenant[] = [];
 
 export const INITIAL_PLANS: Plan[] = [
   {
@@ -177,6 +50,27 @@ export const INITIAL_PLANS: Plan[] = [
       'Auditoria de Logs Avançada & Backup Diário'
     ],
     activeTenantsCount: 22
+  },
+  {
+    id: 'plan-vitalicio',
+    name: 'Vitalicio',
+    displayName: 'Plano Vitalício (Compra do Aplicativo)',
+    priceMonthly: 4000,
+    isLifetime: true,
+    billingCycle: 'lifetime',
+    maxUsers: 99999,
+    isPopular: false,
+    features: [
+      'Compra definitiva do aplicativo (Taxa Única de R$ 4.000,00)',
+      'Sem mensalidades para sempre (0% taxa mensal recorrente)',
+      'Operadores, lavadores e clientes ilimitados',
+      'Fila de lavagem & Pátio com agilidade máxima',
+      'Portal do Cliente e agendamento online ilimitado',
+      'Disparo automático de WhatsApp Bot',
+      'Relatórios financeiros completos, DRE e comissões',
+      'Suporte técnico prioritário e atualizações contínuas'
+    ],
+    activeTenantsCount: 0
   }
 ];
 

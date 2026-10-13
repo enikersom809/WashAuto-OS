@@ -25,6 +25,7 @@ interface TenantsSectionProps {
   onEditTenant: (tenant: Tenant) => void;
   onDeleteTenant: (tenantId: string) => void;
   onImpersonateTenant: (tenant: Tenant) => void;
+  onDeleteDemoTenants?: () => Promise<void> | void;
 }
 
 export const TenantsSection: React.FC<TenantsSectionProps> = ({
@@ -34,7 +35,8 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
   onOpenNewTenantModal,
   onEditTenant,
   onDeleteTenant,
-  onImpersonateTenant
+  onImpersonateTenant,
+  onDeleteDemoTenants
 }) => {
   const [selectedPlanFilter, setSelectedPlanFilter] = useState<string>('all');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>('all');
@@ -46,6 +48,26 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
   const [tenantToDelete, setTenantToDelete] = useState<Tenant | null>(null);
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState<boolean>(false);
   const [deleteSuccessMsg, setDeleteSuccessMsg] = useState<string | null>(null);
+  const [isCleaningDemo, setIsCleaningDemo] = useState(false);
+
+  const demoTenantsCount = useMemo(() => {
+    return tenants.filter(t => t.id.startsWith('t-10') || t.id === 't-autoclean').length;
+  }, [tenants]);
+
+  const handleCleanDemoTenants = async () => {
+    if (!onDeleteDemoTenants) return;
+    if (!window.confirm(`Tem certeza que deseja excluir em definitivo ${demoTenantsCount} empresa(s) fictícia(s) do banco de dados na nuvem (Firestore)?`)) {
+      return;
+    }
+    setIsCleaningDemo(true);
+    try {
+      await onDeleteDemoTenants();
+      setDeleteSuccessMsg(`${demoTenantsCount} empresas fictícias foram apagadas definitivamente do Firestore!`);
+      setTimeout(() => setDeleteSuccessMsg(null), 5000);
+    } finally {
+      setIsCleaningDemo(false);
+    }
+  };
 
   const confirmDeleteSingleTenant = () => {
     if (tenantToDelete) {
@@ -137,6 +159,18 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {demoTenantsCount > 0 && onDeleteDemoTenants && (
+              <button
+                type="button"
+                onClick={handleCleanDemoTenants}
+                disabled={isCleaningDemo}
+                className="bg-rose-950/80 border border-rose-500/40 hover:bg-rose-900 text-rose-300 hover:text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow-sm cursor-pointer"
+                title="Exclui em definitivo todas as empresas fictícias/de teste do Firestore"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span>{isCleaningDemo ? 'Apagando do Firestore...' : `Excluir ${demoTenantsCount} Empresas Fictícias`}</span>
+              </button>
+            )}
             <button
               onClick={handleExportCsv}
               className="bg-[#020617] border border-[#1e293b] hover:bg-slate-900 text-slate-300 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition"
@@ -183,6 +217,7 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
               <option value="Basic" className="bg-[#020617]">Basic (R$ 199)</option>
               <option value="Pro" className="bg-[#020617]">Pro (R$ 499)</option>
               <option value="Enterprise" className="bg-[#020617]">Enterprise (R$ 1.299)</option>
+              <option value="Vitalicio" className="bg-[#020617]">💎 Vitalício (R$ 4.000)</option>
             </select>
           </div>
 
@@ -307,6 +342,7 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                   const isSelected = selectedTenants.includes(tenant.id);
                   const isEnterprise = tenant.plan === 'Enterprise';
                   const isPro = tenant.plan === 'Pro';
+                  const isVitalicio = tenant.plan === 'Vitalicio' || tenant.isLifetime;
 
                   return (
                     <tr 
@@ -324,7 +360,8 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
 
                       <td className="py-4 px-4">
                         <div className="flex items-center gap-3">
-                          <div className={`w-9 h-9 rounded font-bold flex items-center justify-center text-xs ${
+                          <div className={`w-9 h-9 rounded font-bold flex items-center justify-center text-xs shrink-0 ${
+                            isVitalicio ? 'bg-amber-500/15 border border-amber-500/30 text-amber-300' :
                             tenant.status === 'Inadimplente' ? 'bg-rose-500/10 border border-rose-500/20 text-rose-400' :
                             tenant.status === 'Suspenso' ? 'bg-slate-500/10 border border-slate-500/20 text-slate-400' :
                             tenant.status === 'Trial' ? 'bg-amber-500/10 border border-amber-500/20 text-amber-400' :
@@ -335,6 +372,11 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                           <div>
                             <div className="font-semibold text-[#f8fafc] flex items-center gap-2">
                               {tenant.name}
+                              {isVitalicio && (
+                                <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.2 rounded font-black">
+                                  👑 COMPRA DEFINITIVA
+                                </span>
+                              )}
                               <button
                                 onClick={() => setInspectingTenant(tenant)}
                                 className="text-slate-500 hover:text-indigo-400 transition"
@@ -351,14 +393,15 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                       <td className="py-4 px-4">
                         <div className="flex flex-col gap-0.5">
                           <span className={`inline-self-start px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            isVitalicio ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-black' :
                             isEnterprise ? 'bg-purple-500/10 text-purple-400 border-purple-500/20' :
                             isPro ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' :
                             'bg-slate-500/10 text-slate-400 border-slate-500/20'
                           }`}>
-                            {tenant.plan}
+                            {isVitalicio ? 'Vitalício (Compra)' : tenant.plan}
                           </span>
                           <span className="text-[11px] text-slate-400 font-semibold mt-0.5">
-                            R$ {tenant.mrrAmount.toLocaleString('pt-BR')}/mês
+                            {isVitalicio ? 'R$ 4.000 (Licença Paga)' : `R$ ${tenant.mrrAmount.toLocaleString('pt-BR')}/mês`}
                           </span>
                         </div>
                       </td>
@@ -485,11 +528,17 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
             <div className="grid grid-cols-2 gap-4 text-xs">
               <div className="bg-slate-900 p-3 rounded-lg border border-slate-800">
                 <span className="text-slate-500 block mb-1">Plano Atual</span>
-                <span className="text-slate-200 font-semibold text-sm">{inspectingTenant.plan}</span>
+                <span className="text-slate-200 font-semibold text-sm">
+                  {inspectingTenant.plan === 'Vitalicio' ? '👑 Vitalício (Compra Definitiva)' : inspectingTenant.plan}
+                </span>
               </div>
               <div className="bg-slate-900 p-3 rounded-lg border border-slate-800">
-                <span className="text-slate-500 block mb-1">Valor Mensal (MRR)</span>
-                <span className="text-emerald-400 font-semibold text-sm">R$ {inspectingTenant.mrrAmount}/mês</span>
+                <span className="text-slate-500 block mb-1">
+                  {inspectingTenant.plan === 'Vitalicio' ? 'Valor da Aquisição' : 'Valor Mensal (MRR)'}
+                </span>
+                <span className="text-emerald-400 font-semibold text-sm">
+                  {inspectingTenant.plan === 'Vitalicio' ? 'R$ 4.000,00 (Quitado - Sem mensalidade)' : `R$ ${inspectingTenant.mrrAmount}/mês`}
+                </span>
               </div>
               <div className="bg-slate-900 p-3 rounded-lg border border-slate-800">
                 <span className="text-slate-500 block mb-1">Usuários Alocados</span>

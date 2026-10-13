@@ -43,6 +43,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
   // 'rapido' is now Step 1 (default active tab matching user request)
   const [activeTab, setActiveTab] = useState<'rapido' | 'fiscal' | 'geral' | 'acesso' | 'qrcode'>('rapido');
   const [fastCompanyName, setFastCompanyName] = useState('');
+  const [fastPlan, setFastPlan] = useState<PlanType>('Pro');
   
   // Fiscal / Company extended data (Step 1)
   const [razaoSocial, setRazaoSocial] = useState('');
@@ -252,6 +253,9 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
     } else if (val === 'Enterprise') {
       setMrrAmount(1299);
       setMaxUsers(5000);
+    } else if (val === 'Vitalicio') {
+      setMrrAmount(0); // Sem mensalidade!
+      setMaxUsers(99999);
     }
   };
 
@@ -278,11 +282,13 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       name: companyName,
       code,
       domain: `${slug}.saas.com`,
-      plan: 'Pro',
+      plan: fastPlan,
       status: 'Ativo',
       endUsersCount: 1,
-      maxUsers: 500,
-      mrrAmount: 499,
+      maxUsers: fastPlan === 'Vitalicio' ? 99999 : 500,
+      mrrAmount: fastPlan === 'Vitalicio' ? 0 : 499,
+      isLifetime: fastPlan === 'Vitalicio',
+      purchaseAmount: fastPlan === 'Vitalicio' ? 4000 : undefined,
       createdAt: formattedDate,
       contactEmail: `${slug}@empresa.com`,
       contactPhone: '(11) 99999-9999',
@@ -352,7 +358,9 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       status,
       endUsersCount: status === 'Ativo' ? 1 : 0,
       maxUsers,
-      mrrAmount: status === 'Trial' ? 0 : mrrAmount,
+      mrrAmount: plan === 'Vitalicio' ? 0 : (status === 'Trial' ? 0 : mrrAmount),
+      isLifetime: plan === 'Vitalicio',
+      purchaseAmount: plan === 'Vitalicio' ? 4000 : undefined,
       createdAt: formattedDate,
       contactEmail: finalEmail,
       contactPhone: contactPhone.trim() || '',
@@ -602,6 +610,40 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                   <p className="text-[11px] text-slate-400 mt-1.5">
                     O sistema cria automaticamente o link exclusivo, cadastra no Firestore e gera a placa com QR Code para o balcão.
                   </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] font-semibold mb-2">
+                    Plano de Contratação
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFastPlan('Pro')}
+                      className={`p-3 rounded-lg border text-xs font-semibold text-left transition cursor-pointer flex flex-col justify-between ${
+                        fastPlan === 'Pro' 
+                          ? 'bg-blue-600/20 border-blue-500 text-blue-200 shadow-sm shadow-blue-500/20' 
+                          : 'bg-[#1F2937] border-[#374151] text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span className="font-bold text-slate-100">Plano Pro (Mensalidade)</span>
+                      <span className="text-[11px] text-slate-400 mt-0.5">R$ 499 /mês • Até 500 veículos</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFastPlan('Vitalicio')}
+                      className={`p-3 rounded-lg border text-xs font-semibold text-left transition cursor-pointer flex flex-col justify-between ${
+                        fastPlan === 'Vitalicio' 
+                          ? 'bg-amber-500/20 border-amber-500 text-amber-200 shadow-sm shadow-amber-500/20' 
+                          : 'bg-[#1F2937] border-[#374151] text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span className="font-bold flex items-center gap-1.5 text-amber-300">
+                        <Sparkles className="w-3.5 h-3.5 text-amber-400" /> Plano Vitalício (Compra)
+                      </span>
+                      <span className="text-[11px] text-amber-200/90 mt-0.5">R$ 4.000 único • Sem mensalidades</span>
+                    </button>
+                  </div>
                 </div>
 
                 <button
@@ -877,11 +919,12 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                   <select
                     value={plan}
                     onChange={(e) => handlePlanChange(e.target.value as PlanType)}
-                    className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                    className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer font-medium"
                   >
                     <option value="Basic">Basic (R$ 199/mês)</option>
                     <option value="Pro">Pro (R$ 499/mês)</option>
                     <option value="Enterprise">Enterprise (R$ 1.299/mês)</option>
+                    <option value="Vitalicio">💎 Plano Vitalício - Compra do App (R$ 4.000,00 único)</option>
                   </select>
                 </div>
 
@@ -899,6 +942,18 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                 </div>
               </div>
 
+              {plan === 'Vitalicio' && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-xs flex items-start gap-2.5">
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold">Licença Vitalícia Selecionada (R$ 4.000,00):</span>
+                    <p className="text-[11px] text-amber-200/90 mt-0.5 leading-relaxed">
+                      O cliente efetuou a compra definitiva do aplicativo. Todas as funcionalidades são liberadas, sem cobrança de mensalidade recorrente (MRR R$ 0).
+                    </p>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-300 mb-1 font-bold">Limite de Usuários / Operadores</label>
@@ -908,16 +963,24 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                     onChange={(e) => setMaxUsers(Number(e.target.value))}
                     className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                   />
+                  {plan === 'Vitalicio' && (
+                    <p className="text-[10px] text-slate-500 mt-0.5">Ilimitado para plano vitalício.</p>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block text-slate-300 mb-1 font-bold">Valor da Mensalidade MRR (R$)</label>
+                  <label className="block text-slate-300 mb-1 font-bold">
+                    {plan === 'Vitalicio' ? 'Mensalidade Recorrente (R$ - Isento)' : 'Valor da Mensalidade MRR (R$)'}
+                  </label>
                   <input
                     type="number"
                     value={mrrAmount}
                     onChange={(e) => setMrrAmount(Number(e.target.value))}
                     className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                   />
+                  {plan === 'Vitalicio' && (
+                    <p className="text-[10px] text-emerald-400 font-medium mt-0.5">✓ R$ 0 de mensalidade (Licença quitada)</p>
+                  )}
                 </div>
               </div>
             </div>

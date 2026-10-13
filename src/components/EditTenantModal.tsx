@@ -131,12 +131,22 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
               <label className="block text-slate-400 mb-1 font-medium">Plano</label>
               <select
                 value={formData.plan}
-                onChange={(e) => setFormData({ ...formData, plan: e.target.value as PlanType })}
+                onChange={(e) => {
+                  const newPlan = e.target.value as PlanType;
+                  setFormData({ 
+                    ...formData, 
+                    plan: newPlan,
+                    isLifetime: newPlan === 'Vitalicio',
+                    purchaseAmount: newPlan === 'Vitalicio' ? 4000 : formData.purchaseAmount,
+                    mrrAmount: newPlan === 'Vitalicio' ? 0 : formData.mrrAmount
+                  });
+                }}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
               >
-                <option value="Basic">Basic</option>
-                <option value="Pro">Pro</option>
-                <option value="Enterprise">Enterprise</option>
+                <option value="Basic">Basic (R$ 199/mês)</option>
+                <option value="Pro">Pro (R$ 499/mês)</option>
+                <option value="Enterprise">Enterprise (R$ 1.299/mês)</option>
+                <option value="Vitalicio">💎 Vitalício (Compra do App - R$ 4.000)</option>
                 <option value="Custom">Custom</option>
               </select>
             </div>

@@ -137,17 +137,6 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         ) : null}
 
-        {/* Botão Carregar Demo (Opcional) */}
-        {onLoadDemoData && (
-          <button
-            onClick={onLoadDemoData}
-            className="hidden xl:flex items-center gap-1.5 bg-[#0f172a] border border-slate-800 hover:border-blue-500/50 text-slate-400 hover:text-blue-400 px-2.5 py-1.5 rounded-lg text-xs font-medium transition"
-            title="Carregar dados de demonstração"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Dados Demo</span>
-          </button>
-        )}
 
         {/* Botão Bot / Assistente IA */}
         <button

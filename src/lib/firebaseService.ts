@@ -171,12 +171,52 @@ export async function deleteTenantFromFirestore(tenantId: string): Promise<boole
     await ensureFirebaseAuthSession();
     const tenantDocRef = doc(db, 'tenants', tenantId);
     await deleteDoc(tenantDocRef);
-    console.log(`🗑️ [Firestore] Empresa ${tenantId} removida da coleção /tenants`);
+    
+    // Remove também da coleção /empresas se existir registro correspondente
+    try {
+      await deleteDoc(doc(db, 'empresas', tenantId));
+    } catch {
+      // Ignora erro silencioso se não existir na coleção empresas
+    }
+    
+    console.log(`🗑️ [Firestore] Empresa ${tenantId} removida com sucesso das coleções /tenants e /empresas`);
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `tenants/${tenantId}`);
     return false;
   }
+}
+
+/**
+ * Exclui em definitivo todas as empresas fictícias/de demonstração do Firestore
+ * (t-101 a t-108 e t-autoclean) das coleções /tenants e /empresas, e limpa o localStorage.
+ */
+export async function deleteDemoTenantsFromFirestore(): Promise<{ deletedCount: number }> {
+  const demoIds = ['t-101', 't-102', 't-103', 't-104', 't-105', 't-106', 't-107', 't-108', 't-autoclean'];
+  let deletedCount = 0;
+
+  for (const id of demoIds) {
+    try {
+      await deleteDoc(doc(db, 'tenants', id));
+      deletedCount++;
+    } catch {}
+    try {
+      await deleteDoc(doc(db, 'empresas', id));
+    } catch {}
+  }
+
+  // Limpa também as empresas demo do cache do localStorage do navegador
+  try {
+    const raw = localStorage.getItem('saas_master_tenants');
+    if (raw) {
+      const list: Tenant[] = JSON.parse(raw);
+      const filtered = list.filter(t => !demoIds.includes(t.id));
+      localStorage.setItem('saas_master_tenants', JSON.stringify(filtered));
+    }
+  } catch {}
+
+  console.log(`🧹 [Firestore] ${deletedCount} empresas fictícias/demo foram removidas em definitivo.`);
+  return { deletedCount };
 }
 
 /**
@@ -277,9 +317,8 @@ export function subscribeToTenantsFirestore(callback: (tenants: Tenant[]) => voi
           logoUrl: data.logoUrl || undefined
         });
       });
-      if (liveTenants.length > 0) {
-        callback(liveTenants);
-      }
+      // Notifica sempre os ouvintes com a lista em tempo real atualizada
+      callback(liveTenants);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'tenants');
     });

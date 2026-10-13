@@ -33,9 +33,9 @@ import { auth, db } from './lib/firebase';
 import { 
   saveTenantToFirestore, 
   deleteTenantFromFirestore, 
+  deleteDemoTenantsFromFirestore,
   subscribeToTenantsFirestore,
   saveCompanyEmailMapping,
-  syncAllLocalTenantsToFirestore,
   saveAppointmentToFirestore,
   getTenantByIdOrSlugFirestore
 } from './lib/firebaseService';
@@ -66,15 +66,44 @@ const DEFAULT_DEMO_TENANT: Tenant = {
 };
 
 export default function App() {
-  // Persistence with localStorage (Default to empty [] for 100% clean slate testing)
+  // Persistence with localStorage (Limpo de empresas demo fictícias)
   const [tenants, setTenants] = useState<Tenant[]>(() => {
     const saved = localStorage.getItem('saas_master_tenants');
-    return saved ? JSON.parse(saved) : [];
+    if (saved) {
+      try {
+        const parsed: Tenant[] = JSON.parse(saved);
+        const cleaned = parsed.filter(t => !t.id.startsWith('t-10') && t.id !== 't-autoclean');
+        if (cleaned.length !== parsed.length) {
+          localStorage.setItem('saas_master_tenants', JSON.stringify(cleaned));
+        }
+        return cleaned;
+      } catch {
+        return [];
+      }
+    }
+    return [];
   });
 
   const [plans, setPlans] = useState<Plan[]>(() => {
     const saved = localStorage.getItem('saas_master_plans');
-    return saved ? JSON.parse(saved) : INITIAL_PLANS;
+    if (saved) {
+      try {
+        const parsed: Plan[] = JSON.parse(saved);
+        const hasVitalicio = parsed.some(p => p.id === 'plan-vitalicio' || p.name === 'Vitalicio');
+        if (!hasVitalicio) {
+          const vitalicio = INITIAL_PLANS.find(p => p.id === 'plan-vitalicio');
+          if (vitalicio) {
+            const updated = [...parsed, vitalicio];
+            localStorage.setItem('saas_master_plans', JSON.stringify(updated));
+            return updated;
+          }
+        }
+        return parsed;
+      } catch (e) {
+        console.error('Erro ao ler saas_master_plans:', e);
+      }
+    }
+    return INITIAL_PLANS;
   });
 
   const [superAdmins, setSuperAdmins] = useState<SuperAdminUser[]>(() => {
@@ -147,18 +176,9 @@ export default function App() {
   // Sincronização em tempo real com o Firestore (/tenants)
   useEffect(() => {
     const unsubscribe = subscribeToTenantsFirestore((remoteTenants) => {
-      if (remoteTenants && remoteTenants.length > 0) {
-        setTenants(prev => {
-          // Merge mantendo novos cadastros locais com os remotos
-          const merged = [...remoteTenants];
-          prev.forEach(localT => {
-            if (!merged.some(r => r.id === localT.id)) {
-              merged.push(localT);
-            }
-          });
-          return merged;
-        });
-      }
+      // O Firestore é a autoridade central em tempo real: reflete exatamente as empresas cadastradas e deletadas
+      setTenants(remoteTenants);
+      localStorage.setItem('saas_master_tenants', JSON.stringify(remoteTenants));
     });
     return () => unsubscribe();
   }, []);
@@ -271,14 +291,6 @@ export default function App() {
     }
   }, []);
 
-  // Sincronização inicial automática: caso o usuário já tenha cadastrado empresas no navegador
-  // que ainda não subiram para o Firestore (/tenants)
-  useEffect(() => {
-    if (tenants.length > 0) {
-      syncAllLocalTenantsToFirestore(tenants);
-    }
-  }, []);
-
   useEffect(() => {
     localStorage.setItem('saas_master_tenants', JSON.stringify(tenants));
     tenants.forEach(t => {
@@ -368,6 +380,26 @@ export default function App() {
       };
       setLogs(prev => [log, ...prev]);
     }
+  };
+
+  const handleDeleteDemoTenants = async () => {
+    await deleteDemoTenantsFromFirestore();
+    setTenants(prev => {
+      const filtered = prev.filter(t => !t.id.startsWith('t-10') && t.id !== 't-autoclean');
+      localStorage.setItem('saas_master_tenants', JSON.stringify(filtered));
+      return filtered;
+    });
+
+    const log: SystemLog = {
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleString('pt-BR'),
+      level: 'WARN',
+      tenantName: 'Sistema SaaS',
+      event: `Empresas de demonstração excluídas em massa do Firestore e cache limpo`,
+      ipAddress: '177.12.89.201',
+      user: 'Admin Geral'
+    };
+    setLogs(prev => [log, ...prev]);
   };
 
   const handleUpdatePlan = (updatedPlan: Plan) => {
@@ -499,7 +531,7 @@ export default function App() {
         {!authSession && (
           <LoginModal
             isModal={false}
-            tenants={tenants.length > 0 ? tenants : [DEFAULT_DEMO_TENANT]}
+            tenants={tenants}
             onLoginAsClient={(tenant, clientInfo) => {
               setTenants(prev => prev.some(t => t.id === tenant.id) ? prev : [...prev, tenant]);
               setAuthSession({
@@ -650,6 +682,7 @@ export default function App() {
               onEditTenant={(t) => setEditingTenant(t)}
               onDeleteTenant={handleDeleteTenant}
               onImpersonateTenant={(t) => setImpersonatedTenant(t)}
+              onDeleteDemoTenants={handleDeleteDemoTenants}
             />
           )}
 
