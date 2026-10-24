@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle } from 'lucide-react';
+import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle, Key, Eye, EyeOff, RefreshCw, Copy, Check } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
 
 interface EditTenantModalProps {
@@ -20,10 +20,23 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
   const [formData, setFormData] = useState<Tenant | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<boolean>(false);
   const [isProcessingLogo, setIsProcessingLogo] = useState<boolean>(false);
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [copiedPassword, setCopiedPassword] = useState<boolean>(false);
+
+  const generateRandomPassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
+    let pwd = '';
+    for (let i = 0; i < 8; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `Auto#${pwd}`;
+  };
 
   useEffect(() => {
     setFormData(tenant);
     setConfirmDelete(false);
+    setShowPassword(false);
+    setCopiedPassword(false);
   }, [tenant]);
 
   if (!isOpen || !formData) return null;
@@ -209,6 +222,64 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
               />
             </div>
+          </div>
+
+          {/* 🔑 Senha de Acesso do Responsável */}
+          <div className="bg-slate-900 border border-indigo-500/30 rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-indigo-300 font-medium flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5 text-amber-400" /> Senha de Acesso do Dono (Área da Empresa)
+              </label>
+              <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                Acesso do Dono
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={formData.tempPassword || ''}
+                placeholder="Ex: Auto#k8X9!2"
+                onChange={(e) => setFormData({ ...formData, tempPassword: e.target.value })}
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-2 text-emerald-400 font-mono font-bold tracking-wider text-xs focus:outline-none focus:border-indigo-500"
+              />
+
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="p-2 bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-800 transition cursor-pointer"
+                title={showPassword ? "Ocultar" : "Mostrar"}
+              >
+                {showPassword ? <EyeOff className="w-3.5 h-3.5 text-amber-400" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, tempPassword: generateRandomPassword() })}
+                className="px-2.5 py-2 bg-slate-950 hover:bg-slate-800 text-indigo-400 hover:text-indigo-300 rounded-lg border border-slate-800 transition cursor-pointer flex items-center gap-1 font-bold text-xs"
+                title="Gerar nova senha aleatória"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Gerar Nova</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(formData.tempPassword || '');
+                  setCopiedPassword(true);
+                  setTimeout(() => setCopiedPassword(false), 2000);
+                }}
+                className="px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition cursor-pointer flex items-center gap-1 font-bold text-xs"
+                title="Copiar senha"
+              >
+                {copiedPassword ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedPassword ? 'Copiada' : 'Copiar'}</span>
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-500">
+              Esta senha é salva na nuvem Firestore e permite ao responsável entrar no painel de administração da sua unidade.
+            </p>
           </div>
 
           {/* Logotipo Individual da Empresa */}

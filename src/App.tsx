@@ -47,32 +47,17 @@ export type AuthSession =
   | null;
 
 
-const DEFAULT_DEMO_TENANT: Tenant = {
-  id: 't-autoclean',
-  name: 'Auto Clean Spa',
-  code: 'AC',
-  domain: 'autoclean.saas.com',
-  plan: 'Pro',
-  status: 'Ativo',
-  endUsersCount: 142,
-  maxUsers: 500,
-  mrrAmount: 399,
-  createdAt: '01/02/2026',
-  contactEmail: 'gerente@autoclean.com',
-  contactPhone: '+55 11 98888-7777',
-  ownerName: 'Ricardo Santos',
-  notes: 'Centro de Estética Automotiva e Lava-Rápido Premium.',
-  lastActive: 'Agora'
-};
-
 export default function App() {
-  // Persistence with localStorage (Limpo de empresas demo fictícias)
+  // Persistence with localStorage (Filtra permanentemente empresas deletadas e demo)
   const [tenants, setTenants] = useState<Tenant[]>(() => {
+    const rawDeleted = typeof window !== 'undefined' ? localStorage.getItem('saas_deleted_tenant_ids') : null;
+    const deletedList: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+
     const saved = localStorage.getItem('saas_master_tenants');
     if (saved) {
       try {
         const parsed: Tenant[] = JSON.parse(saved);
-        const cleaned = parsed.filter(t => !t.id.startsWith('t-10') && t.id !== 't-autoclean');
+        const cleaned = parsed.filter(t => !t.id.startsWith('t-10') && t.id !== 't-autoclean' && !deletedList.includes(t.id));
         if (cleaned.length !== parsed.length) {
           localStorage.setItem('saas_master_tenants', JSON.stringify(cleaned));
         }
@@ -193,9 +178,25 @@ export default function App() {
         try {
           // Busca obrigatória no Firestore: db.collection('usuarios').doc(user.uid).get()
           const userDocRef = doc(db, 'usuarios', user.uid);
-          const userDocSnap = await getDoc(userDocRef);
+          let userDocSnap = await getDoc(userDocRef);
+
+          // Tolerância para novos cadastros (gravação assíncrona da ficha no Firestore)
+          if (!userDocSnap.exists()) {
+            await new Promise(r => setTimeout(r, 1200));
+            userDocSnap = await getDoc(userDocRef);
+          }
+          if (!userDocSnap.exists()) {
+            await new Promise(r => setTimeout(r, 1500));
+            userDocSnap = await getDoc(userDocRef);
+          }
 
           if (!userDocSnap.exists()) {
+            const isFreshRegistration = typeof window !== 'undefined' && sessionStorage.getItem('saas_active_registration_in_progress');
+            if (isFreshRegistration) {
+              console.log('[Sessão] Registro ativo em andamento, aguardando gravação do documento /usuarios...');
+              return;
+            }
+
             console.warn(`[Sessão] Usuário ${user.uid} não existe no banco (/usuarios). Forçando logout e limpando dispositivo.`);
             // 1. Force o signOut
             await signOut(auth);
@@ -212,16 +213,28 @@ export default function App() {
           const userRole = userData.role || 'empresa';
           const tenantId = userData.tenantId || userData.empresaId;
 
-          let resolvedTenant: Tenant = userData.empresa || DEFAULT_DEMO_TENANT;
+          let resolvedTenant: Tenant | null = userData.empresa && userData.empresa.id !== 't-autoclean' ? userData.empresa : null;
           if (tenantId) {
             try {
               const tenantSnap = await getDoc(doc(db, 'tenants', tenantId));
               if (tenantSnap.exists()) {
                 resolvedTenant = { id: tenantSnap.id, ...tenantSnap.data() } as Tenant;
+              } else {
+                resolvedTenant = null;
               }
             } catch (tErr) {
               console.warn('[Sessão] Erro ao carregar tenant da nuvem:', tErr);
             }
+          }
+
+          // Se a empresa foi excluída pelo Super Admin, força deslogar e limpa o dispositivo
+          if (userRole === 'empresa' && !resolvedTenant) {
+            console.warn(`[Sessão] A empresa (${tenantId}) foi excluída do sistema. Deslogando.`);
+            await signOut(auth);
+            localStorage.clear();
+            sessionStorage.clear();
+            setAuthSession(null);
+            return;
           }
 
           if (userRole === 'admin') {
@@ -232,6 +245,11 @@ export default function App() {
               uid: user.uid
             });
           } else if (userRole === 'cliente') {
+            if (!resolvedTenant) {
+              await signOut(auth);
+              setAuthSession(null);
+              return;
+            }
             setAuthSession({
               role: 'cliente',
               tenant: resolvedTenant,
@@ -247,9 +265,9 @@ export default function App() {
           } else {
             setAuthSession({
               role: 'empresa',
-              tenant: resolvedTenant,
+              tenant: resolvedTenant!,
               userEmail: userData.email || user.email || '',
-              userName: userData.nome || resolvedTenant.ownerName || 'Responsável',
+              userName: userData.nome || resolvedTenant?.ownerName || 'Responsável',
               uid: user.uid
             });
           }
@@ -270,9 +288,9 @@ export default function App() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
-    const urlTenantId = params.get('tenantId') || params.get('t');
     const urlEmpresa = params.get('empresa') || params.get('slug') || params.get('lava');
-    const targetKey = urlTenantId || urlEmpresa;
+    const urlTenantId = params.get('tenantId') || params.get('t');
+    const targetKey = urlEmpresa || urlTenantId;
 
     if (targetKey) {
       getTenantByIdOrSlugFirestore(targetKey).then(found => {
@@ -542,11 +560,12 @@ export default function App() {
               });
             }}
             onLoginAsEmpresa={(tenant) => {
+              if (tenant.id === 't-autoclean' || tenant.id.startsWith('t-10')) return;
               setTenants(prev => prev.some(t => t.id === tenant.id) ? prev : [...prev, tenant]);
               setAuthSession({
                 role: 'empresa',
                 tenant,
-                userEmail: tenant.contactEmail || 'gerente@autoclean.com'
+                userEmail: tenant.contactEmail || 'empresa@lavajato.com'
               });
             }}
             onLoginAsSuperAdmin={() => {
@@ -781,10 +800,11 @@ export default function App() {
           setIsLoginModalOpen(false);
         }}
         onLoginAsEmpresa={(tenant) => {
+          if (tenant.id === 't-autoclean' || tenant.id.startsWith('t-10')) return;
           setAuthSession({
             role: 'empresa',
             tenant,
-            userEmail: 'gerente@autoclean.com'
+            userEmail: tenant.contactEmail || 'empresa@lavajato.com'
           });
           setIsLoginModalOpen(false);
         }}

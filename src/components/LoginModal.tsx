@@ -73,7 +73,8 @@ const getInitialSlugFromUrl = () => {
   if (typeof window === 'undefined') return '';
   try {
     const searchParams = new URLSearchParams(window.location.search);
-    const qSlug = searchParams.get('tenantId') || searchParams.get('empresa') || searchParams.get('slug') || searchParams.get('t') || searchParams.get('lava');
+    // Prioriza o slug amigável da empresa (ex: box1000lavajatoelubrificacao) em vez de IDs brutos
+    const qSlug = searchParams.get('empresa') || searchParams.get('slug') || searchParams.get('lava') || searchParams.get('t') || searchParams.get('tenantId');
     if (qSlug) return extractDomainSlug(qSlug);
     const pathSeg = window.location.pathname.replace(/^\//, '').split('/')[0];
     if (pathSeg && pathSeg !== 'index.html' && pathSeg !== '') {
@@ -427,72 +428,67 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   };
 
   // Helper to find or build tenant by domain or name
+  // Helper to find or build tenant by domain or name
   const resolveTenantByDomain = (domainInput: string, fallbackName?: string): Tenant => {
     const raw = domainInput.trim().toLowerCase();
     const cleanSub = extractDomainSlug(raw);
 
     const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
-    const explicitTenantId = searchParams?.get('tenantId')?.trim().toLowerCase();
+    const urlEmpresa = searchParams?.get('empresa')?.trim().toLowerCase() || searchParams?.get('slug')?.trim().toLowerCase();
+    const explicitTenantId = searchParams?.get('tenantId')?.trim().toLowerCase() || searchParams?.get('t')?.trim().toLowerCase();
 
-    // 0. Match by explicit URL tenantId parameter
-    if (explicitTenantId) {
-      const matchById = tenants.find(t => t.id.toLowerCase() === explicitTenantId);
-      if (matchById) return matchById;
-      // Garante que o celular use o ID exato da empresa no QR Code sem gerar ID aleatório
-      return {
-        id: explicitTenantId,
-        name: fallbackName || (cleanSub.length > 2 ? cleanSub.charAt(0).toUpperCase() + cleanSub.slice(1) : 'Lava-Jato Parceiro'),
-        code: explicitTenantId.slice(0, 4).toUpperCase(),
-        domain: `${cleanSub || explicitTenantId}.saas.com`,
-        plan: 'Pro',
-        status: 'Ativo',
-        endUsersCount: 1,
-        maxUsers: 1000,
-        mrrAmount: 499,
-        createdAt: new Date().toLocaleDateString('pt-BR'),
-        contactEmail: `contato@${cleanSub || explicitTenantId}.com`,
-        ownerName: 'Gestor da Empresa',
-        lastActive: 'Agora mesmo'
-      };
-    }
+    // Slug prioritário normalizado (ex: box1000lavajatoelubrificacao)
+    const targetSlug = cleanSub && !cleanSub.startsWith('t-') ? cleanSub : (urlEmpresa ? extractDomainSlug(urlEmpresa) : cleanSub);
 
-    // 1. Direct match by id, code, full domain, subdomain or company name
-    const matched = tenants.find(t => 
-      t.id.toLowerCase() === raw ||
-      t.id.toLowerCase() === cleanSub ||
-      t.code.toLowerCase() === raw ||
-      t.code.toLowerCase() === cleanSub ||
-      t.domain.toLowerCase() === raw ||
-      t.domain.toLowerCase() === `${cleanSub}.saas.com` ||
-      t.domain.toLowerCase().startsWith(cleanSub) ||
-      t.name.toLowerCase().includes(cleanSub)
-    );
+    // 1. Procura na lista de empresas cadastradas por ID, Domínio, Código ou Nome normalizado
+    const matched = tenants.find(t => {
+      if (t.id === 't-autoclean' || t.id.startsWith('t-10')) return false;
+      const tNormName = (t.name || t.nomeFantasia || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+      const tDomainSlug = extractDomainSlug(t.domain || '');
+      
+      return (
+        (targetSlug && (tDomainSlug === targetSlug || tNormName === targetSlug)) ||
+        (cleanSub && (tDomainSlug === cleanSub || tNormName === cleanSub)) ||
+        t.id.toLowerCase() === raw ||
+        t.id.toLowerCase() === cleanSub ||
+        (targetSlug && targetSlug.length > 3 && tNormName.includes(targetSlug)) ||
+        (cleanSub && cleanSub.length > 3 && tNormName.includes(cleanSub)) ||
+        (targetSlug && targetSlug.length > 3 && cleanSub.includes(tNormName))
+      );
+    });
 
     if (matched) return matched;
 
-    // 2. If there are tenants loaded from Firestore / localStorage, prioritize the existing active tenant
-    const nonDemoTenants = tenants.filter(t => t.id !== 't-autoclean');
-    if (nonDemoTenants.length > 0 && !raw.includes('autoclean')) {
-      return nonDemoTenants[0];
-    }
-    if (tenants.length > 0) {
-      return tenants[0];
+    // Se temos tenantId explícito na URL
+    if (explicitTenantId) {
+      const matchById = tenants.find(t => t.id.toLowerCase() === explicitTenantId);
+      if (matchById) return matchById;
     }
 
-    // 3. Fallback: only if completely empty, use default stable ID
-    const displayName = fallbackName || (cleanSub.length > 2 ? cleanSub.charAt(0).toUpperCase() + cleanSub.slice(1) + ' Auto Spa' : 'Auto Clean Spa');
+    // 2. Se há empresas reais cadastradas no sistema, usa a empresa ativa
+    const activeTenants = tenants.filter(t => t.id !== 't-autoclean' && !t.id.startsWith('t-10'));
+    if (activeTenants.length > 0 && (!targetSlug || targetSlug === 'autoclean')) {
+      return activeTenants[0];
+    }
+
+    // 3. Fallback dinâmico usando o slug da empresa fornecido na URL
+    const companyClean = targetSlug && targetSlug !== 'autoclean' ? targetSlug : 'lavajato';
+    const displayName = fallbackName && fallbackName !== 'Auto Clean Spa' 
+      ? fallbackName 
+      : (companyClean.length > 2 ? companyClean.charAt(0).toUpperCase() + companyClean.slice(1) : 'Lava-Jato');
+    
     return {
-      id: 't-autoclean',
+      id: explicitTenantId || `t-${companyClean}`,
       name: displayName,
       code: displayName.slice(0, 2).toUpperCase() || 'LJ',
-      domain: `${cleanSub || 'autoclean'}.saas.com`,
+      domain: `${companyClean}.saas.com`,
       plan: 'Pro',
       status: 'Ativo',
       endUsersCount: 1,
       maxUsers: 1000,
       mrrAmount: 499,
       createdAt: new Date().toLocaleDateString('pt-BR'),
-      contactEmail: `contato@${cleanSub || 'autoclean'}.com`,
+      contactEmail: `contato@${companyClean}.com`,
       ownerName: 'Gestor da Empresa',
       lastActive: 'Agora mesmo'
     };
@@ -512,23 +508,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           return;
         }
 
-        const tenantToOpen = resolveTenantByDomain(regSubdomain || 'autoclean', regSubdomain ? `${regSubdomain} Lava-Jato` : undefined);
-        
-        // 🔐 Cria o cliente no Firebase Authentication e salva no Firestore
-        const authRes = await registerClientInFirebaseAuth({
-          name: regName.trim(),
-          email: regEmail.trim(),
-          password: regPassword.trim() || undefined,
-          phone: regPhone.trim() || '(11) 99999-9999',
-          tenantId: tenantToOpen.id
-        });
-
-        if (!authRes.success && authRes.errorMessage) {
-          setErrorMessage(authRes.errorMessage);
-          setIsSubmitting(false);
-          return;
+        // Marca registro em andamento para impedir desconexão prematura pelo onAuthStateChanged
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('saas_active_registration_in_progress', 'true');
         }
 
+        const effectiveSlug = regSubdomain || (typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('empresa') : '') || '';
+        const tenantToOpen = resolveTenantByDomain(effectiveSlug, effectiveSlug ? `${effectiveSlug} Lava-Jato` : undefined);
+        
         const validVehicles = regVehicles
           .filter(v => v.model.trim() || v.plate.trim() || v.brand.trim())
           .map((v, i) => ({
@@ -541,11 +528,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             plate: v.plate.trim().toUpperCase()
           }));
 
-        // Salva veículos para o portal do cliente
-        if (validVehicles.length > 0) {
-          localStorage.setItem(`saas_client_vehicles_${tenantToOpen.id}`, JSON.stringify(validVehicles));
-        }
-
         const clientData = {
           name: regName.trim(),
           email: regEmail.trim(),
@@ -557,10 +539,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           stateUf: regState.trim(),
           vehicles: validVehicles
         };
+
+        // 1. Salva IMEDIATAMENTE no armazenamento local para garantir que o cliente nunca perca o acesso
         localStorage.setItem(`saas_client_profile_${tenantToOpen.id}`, JSON.stringify(clientData));
-        
-        // 🏢 Salva cadastro completo no Firestore
-        await saveClientFullRegistration(tenantToOpen.id, clientData);
+        if (validVehicles.length > 0) {
+          localStorage.setItem(`saas_client_vehicles_${tenantToOpen.id}`, JSON.stringify(validVehicles));
+        }
 
         // Associa e-mail do cliente ao lava-jato registrado
         saveClientEmailMapping(
@@ -570,18 +554,53 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           tenantToOpen.name
         );
 
+        // 2. Cria o cliente no Firebase Authentication de forma segura e resiliente
+        try {
+          const authRes = await registerClientInFirebaseAuth({
+            name: regName.trim(),
+            email: regEmail.trim(),
+            password: regPassword.trim() || undefined,
+            phone: regPhone.trim() || '(11) 99999-9999',
+            tenantId: tenantToOpen.id
+          });
+
+          if (!authRes.success && authRes.errorMessage) {
+            console.warn('Aviso no Firebase Auth (prosseguindo com sessão do cliente):', authRes.errorMessage);
+          }
+        } catch (authErr) {
+          console.warn('Erro na autenticação remota (prosseguindo localmente):', authErr);
+        }
+
+        // 3. Salva no Firestore
+        try {
+          await saveClientFullRegistration(tenantToOpen.id, clientData);
+        } catch (dbErr) {
+          console.warn('Erro ao salvar ficha completa no Firestore:', dbErr);
+        }
+
         setAuthSuccessMsg('Cadastro realizado com sucesso!');
 
+        // 4. Conclui o cadastro e transiciona diretamente para o portal do cliente
         setTimeout(() => {
+          if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('saas_active_registration_in_progress');
+          }
+          setIsSubmitting(false);
           onLoginAsClient(tenantToOpen, clientData);
           if (onClose) onClose();
         }, 500);
+
+        return;
 
       } else if (activeTab === 'empresa') {
         if (!regCompanyName.trim() || !regEmail.trim()) {
           setErrorMessage('Por favor, preencha o nome do Lava-Jato e o e-mail principal.');
           setIsSubmitting(false);
           return;
+        }
+
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('saas_active_registration_in_progress', 'true');
         }
 
         const cleanSub = extractDomainSlug(regSubdomain) || extractDomainSlug(regCompanyName) || 'lavajato';
@@ -615,12 +634,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         if (!empRes.success && empRes.errorMessage) {
           setErrorMessage(empRes.errorMessage);
           setIsSubmitting(false);
+          if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('saas_active_registration_in_progress');
+          }
           return;
         }
 
         // Associa e-mail corporativo ao subdomínio da empresa
         saveCompanyEmailMapping(regEmail.trim(), createdTenant);
 
+        if (typeof window !== 'undefined') {
+          sessionStorage.removeItem('saas_active_registration_in_progress');
+        }
+        setIsSubmitting(false);
         onLoginAsEmpresa(createdTenant);
         if (onClose) onClose();
       } else if (activeTab === 'admin') {
@@ -635,14 +661,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           setIsSubmitting(false);
           return;
         }
+        setIsSubmitting(false);
         onLoginAsSuperAdmin();
         if (onClose) onClose();
       }
     } catch (err: any) {
       console.error('Registration error:', err);
       setErrorMessage(err.message || 'Ocorreu um erro no cadastro.');
-    } finally {
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('saas_active_registration_in_progress');
+      }
       setIsSubmitting(false);
+    } finally {
+      setTimeout(() => {
+        setIsSubmitting(false);
+      }, 1000);
     }
   };
 
@@ -694,7 +727,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
       setIsSubmitting(true);
       try {
-        const tenantToOpen = resolveTenantByDomain(subdomain || 'autoclean');
+        const activeSub = subdomain || (tenants.length > 0 ? tenants[0].domain : '');
+        const tenantToOpen = resolveTenantByDomain(activeSub);
         
         let clientData: { name: string; phone: string; email?: string } = {
           name: typedClientIdentifier.includes('@') ? typedClientIdentifier.split('@')[0] : (typedClientIdentifier || 'Cliente'),
@@ -714,7 +748,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         if (onClose) onClose();
       } catch (err: any) {
         console.warn('Client login warning:', err);
-        const tenantToOpen = resolveTenantByDomain(subdomain || 'autoclean');
+        const activeSub = subdomain || (tenants.length > 0 ? tenants[0].domain : '');
+        const tenantToOpen = resolveTenantByDomain(activeSub);
         onLoginAsClient(tenantToOpen, { name: (clienteIdentifier || identifier).split('@')[0] || 'Cliente', phone: '(11) 99999-9999' });
         if (onClose) onClose();
       } finally {
@@ -745,7 +780,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           }
         }
 
-        const tenantToOpen = resolveTenantByDomain(subdomain || typedEmpresaEmail.split('@')[0], 'Auto Clean Spa');
+        const tenantToOpen = resolveTenantByDomain(subdomain || typedEmpresaEmail.split('@')[0]);
         onLoginAsEmpresa(tenantToOpen);
         if (onClose) onClose();
       } catch (err: any) {

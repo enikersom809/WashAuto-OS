@@ -11,11 +11,17 @@ import {
   CheckCircle, 
   AlertCircle,
   Eye,
+  EyeOff,
   X,
   SlidersHorizontal,
-  Users
+  Users,
+  Key,
+  Copy,
+  Check,
+  Share2
 } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
+import { cleanDigits } from '../lib/formatters';
 
 interface TenantsSectionProps {
   tenants: Tenant[];
@@ -49,6 +55,10 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState<boolean>(false);
   const [deleteSuccessMsg, setDeleteSuccessMsg] = useState<string | null>(null);
   const [isCleaningDemo, setIsCleaningDemo] = useState(false);
+  const [credentialTenant, setCredentialTenant] = useState<Tenant | null>(null);
+  const [showCredentialPwd, setShowCredentialPwd] = useState(false);
+  const [copiedCredentialPwd, setCopiedCredentialPwd] = useState(false);
+  const [copiedCredentialFull, setCopiedCredentialFull] = useState(false);
 
   const demoTenantsCount = useMemo(() => {
     return tenants.filter(t => t.id.startsWith('t-10') || t.id === 't-autoclean').length;
@@ -448,6 +458,18 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
 
                       <td className="py-4 px-6 text-right space-x-1">
                         <button
+                          onClick={() => {
+                            setCredentialTenant(tenant);
+                            setShowCredentialPwd(false);
+                            setCopiedCredentialPwd(false);
+                            setCopiedCredentialFull(false);
+                          }}
+                          className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded transition cursor-pointer"
+                          title="Ver senha e credenciais de acesso do dono"
+                        >
+                          <Key className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => onImpersonateTenant(tenant)}
                           className="p-1.5 text-slate-500 hover:text-indigo-400 rounded transition cursor-pointer"
                           title="Acessar como admin"
@@ -749,6 +771,128 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
               >
                 <Trash2 className="w-4 h-4" /> Confirmar e Excluir Todas ({selectedTenants.length})
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CREDENCIAIS DE ACESSO DO DONO DO LAVA-JATO */}
+      {credentialTenant && (
+        <div className="fixed inset-0 z-50 bg-[#020617]/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl relative">
+            <button
+              onClick={() => setCredentialTenant(null)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 border-b border-indigo-500/20 pb-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center">
+                <Key className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Credenciais de Acesso do Responsável</h3>
+                <p className="text-[11px] text-slate-400">{credentialTenant.name} ({credentialTenant.code})</p>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="bg-[#020617] border border-[#1e293b] p-3 rounded-xl space-y-2">
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase font-bold block mb-0.5">Endereço de Acesso (URL)</span>
+                  <div className="flex items-center justify-between text-slate-200 font-mono text-xs">
+                    <span className="truncate">{window.location.origin}</span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(window.location.origin)}
+                      className="text-slate-400 hover:text-white ml-2 cursor-pointer p-1"
+                      title="Copiar link"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800/60">
+                  <span className="text-[10px] text-slate-500 uppercase font-bold block mb-0.5">E-mail de Login do Dono</span>
+                  <div className="flex items-center justify-between text-white font-mono font-semibold text-xs">
+                    <span className="truncate">{credentialTenant.contactEmail || 'Não cadastrado'}</span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(credentialTenant.contactEmail || '')}
+                      className="text-slate-400 hover:text-white ml-2 cursor-pointer p-1"
+                      title="Copiar e-mail"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800/60">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-slate-500 uppercase font-bold">Senha de Primeiro Acesso</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowCredentialPwd(!showCredentialPwd)}
+                      className="text-[10px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      {showCredentialPwd ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                      {showCredentialPwd ? 'Ocultar' : 'Mostrar Senha'}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                    <span className="text-emerald-400 font-mono font-bold tracking-wider text-sm select-all">
+                      {showCredentialPwd 
+                        ? (credentialTenant.tempPassword || 'Definida na criação')
+                        : (credentialTenant.tempPassword ? '••••••••••••' : 'Definida na criação')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(credentialTenant.tempPassword || '');
+                        setCopiedCredentialPwd(true);
+                        setTimeout(() => setCopiedCredentialPwd(false), 2000);
+                      }}
+                      className="text-slate-300 hover:text-white p-1 rounded bg-slate-800 ml-2 cursor-pointer"
+                      title="Copiar senha"
+                    >
+                      {copiedCredentialPwd ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = `🚗 *Acesso ao Sistema do Lava-Jato - ${credentialTenant.name}*\n\nOlá! Seguem os dados para acessar seu painel de gestão:\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${credentialTenant.contactEmail}\n🔑 *Senha de Acesso:* ${credentialTenant.tempPassword || 'Utilize a senha definida no cadastro'}\n\nFaça login clicando em "Login Empresa".`;
+                    navigator.clipboard.writeText(text);
+                    setCopiedCredentialFull(true);
+                    setTimeout(() => setCopiedCredentialFull(false), 2500);
+                  }}
+                  className={`flex-1 py-2.5 px-3 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                    copiedCredentialFull 
+                      ? 'bg-emerald-600 text-white' 
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  }`}
+                >
+                  {copiedCredentialFull ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedCredentialFull ? 'Acesso Copiado!' : 'Copiar Todas as Credenciais'}
+                </button>
+
+                <a
+                  href={`https://wa.me/${cleanDigits(credentialTenant.contactPhone || '')}?text=${encodeURIComponent(
+                    `🚗 *Acesso ao Sistema do Lava-Jato - ${credentialTenant.name}*\n\nOlá! Seguem os dados para acessar seu painel de gestão:\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${credentialTenant.contactEmail}\n🔑 *Senha de Acesso:* ${credentialTenant.tempPassword || 'Utilize a senha definida no cadastro'}\n\nFaça login clicando em "Login Empresa".`
+                  )}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  <Share2 className="w-3.5 h-3.5" /> Enviar no WhatsApp
+                </a>
+              </div>
             </div>
           </div>
         </div>

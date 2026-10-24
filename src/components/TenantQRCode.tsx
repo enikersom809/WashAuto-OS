@@ -22,10 +22,25 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
   const [copied, setCopied] = React.useState(false);
   const printContainerRef = useRef<HTMLDivElement>(null);
 
-  // URL dinâmica do PWA apontando diretamente para a tela de cadastro e agendamento da empresa
+  // Garante que o slug seja derivado do nome amigável da empresa (ex: box1000lavajatoelubrificacao)
+  // e nunca use IDs internos brutos como t-234764912345
+  const cleanSlug = React.useMemo(() => {
+    const raw = (empresa.slug && !empresa.slug.toLowerCase().startsWith('t-'))
+      ? empresa.slug
+      : (empresa.nome || 'lavajato');
+    
+    return raw
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '')
+      .trim() || 'empresa';
+  }, [empresa.slug, empresa.nome]);
+
+  // URL dinâmica do PWA apontando diretamente para o lava-jato com slug amigável (100% funcional no Netlify/produção)
   const targetUrl = typeof window !== 'undefined' 
-    ? `${window.location.origin}/?empresa=${encodeURIComponent(empresa.slug)}&tenantId=${encodeURIComponent(empresa.id || '')}&cadastro=cliente`
-    : `https://app.saas.com/?empresa=${encodeURIComponent(empresa.slug)}&tenantId=${encodeURIComponent(empresa.id || '')}&cadastro=cliente`;
+    ? `${window.location.origin}/?empresa=${encodeURIComponent(cleanSlug)}&cadastro=cliente`
+    : `https://app.saas.com/?empresa=${encodeURIComponent(cleanSlug)}&cadastro=cliente`;
 
   // Copiar link para o clipboard
   const handleCopyLink = async () => {
@@ -198,7 +213,7 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
           {/* Rodapé da Placa */}
           <div className="text-[10px] text-slate-600 font-mono tracking-tighter flex items-center gap-1">
             <span>Powered by AutoClean SaaS •</span>
-            <span className="font-semibold text-slate-700">/{empresa.slug}</span>
+            <span className="font-semibold text-slate-700">/{cleanSlug}</span>
           </div>
         </div>
       </div>

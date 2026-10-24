@@ -77,7 +77,12 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    // 6. Fallback de teste de conexão
+    // 6. Coleções de Sistema e Tombstones de Exclusão
+    match /system/{document=**} {
+      allow read, write: if true;
+    }
+
+    // 7. Fallback de teste de conexão
     match /test/{testId} {
       allow read, write: if true;
     }

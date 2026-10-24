@@ -814,7 +814,9 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
             empresa={{
               id: tenant.id,
               nome: tenant.name,
-              slug: (tenant.domain ? tenant.domain.replace('.saas.com', '').replace(/[^a-z0-9-]/g, '') : tenant.code.toLowerCase()) || tenant.id,
+              slug: (tenant.domain && !tenant.domain.toLowerCase().startsWith('t-')
+                ? tenant.domain.replace('.saas.com', '').replace(/[^a-z0-9-]/g, '')
+                : (tenant.name || tenant.code).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '')) || 'empresa',
               logoUrl: tenant.logoUrl
             }}
           />

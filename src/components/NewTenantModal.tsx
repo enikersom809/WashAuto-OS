@@ -20,10 +20,12 @@ import {
   Eye,
   EyeOff,
   Shield,
-  QrCode
+  QrCode,
+  Share2,
+  ExternalLink
 } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
-import { saveTenantToFirestore, saveCompanyEmailMapping } from '../lib/firebaseService';
+import { saveTenantToFirestore, saveCompanyEmailMapping, registerEmpresaInFirebaseAuth } from '../lib/firebaseService';
 import { TenantQRCode } from './TenantQRCode';
 import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
 
@@ -40,10 +42,25 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
   onAddTenant,
   onTestClientPortal
 }) => {
+  // Temporary password generation
+  const generateRandomPassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
+    let pwd = '';
+    for (let i = 0; i < 8; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `Auto#${pwd}`;
+  };
+
   // 'rapido' is now Step 1 (default active tab matching user request)
   const [activeTab, setActiveTab] = useState<'rapido' | 'fiscal' | 'geral' | 'acesso' | 'qrcode'>('rapido');
   const [fastCompanyName, setFastCompanyName] = useState('');
   const [fastPlan, setFastPlan] = useState<PlanType>('Pro');
+  const [fastOwnerEmail, setFastOwnerEmail] = useState('');
+  const [fastOwnerPassword, setFastOwnerPassword] = useState(() => generateRandomPassword());
+  const [showFastPassword, setShowFastPassword] = useState(false);
+  const [copiedFastPwd, setCopiedFastPwd] = useState(false);
+  const [copiedCredentials, setCopiedCredentials] = useState(false);
   
   // Fiscal / Company extended data (Step 1)
   const [razaoSocial, setRazaoSocial] = useState('');
@@ -75,16 +92,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
   const [isSearchingCep, setIsSearchingCep] = useState(false);
   const [autoFillMessage, setAutoFillMessage] = useState<string | null>(null);
 
-  // Temporary password generation (Step 3)
-  const generateRandomPassword = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
-    let pwd = '';
-    for (let i = 0; i < 8; i++) {
-      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return `Auto#${pwd}`;
-  };
-
+  // Full form temporary password
   const [tempPassword, setTempPassword] = useState(() => generateRandomPassword());
   const [showTempPassword, setShowTempPassword] = useState(false);
   const [copiedPwd, setCopiedPwd] = useState(false);
@@ -276,6 +284,8 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
     const slug = generateSlug(companyName) || `lavajato-${Date.now()}`;
     const code = companyName.slice(0, 2).toUpperCase() || 'WA';
     const formattedDate = new Date().toLocaleDateString('pt-BR');
+    const finalEmail = fastOwnerEmail.trim() || `${slug}@empresa.com`;
+    const finalPassword = fastOwnerPassword.trim() || generateRandomPassword();
 
     const createdTenant: Tenant = {
       id: `t-${Date.now()}`,
@@ -290,11 +300,11 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       isLifetime: fastPlan === 'Vitalicio',
       purchaseAmount: fastPlan === 'Vitalicio' ? 4000 : undefined,
       createdAt: formattedDate,
-      contactEmail: `${slug}@empresa.com`,
+      contactEmail: finalEmail,
       contactPhone: '(11) 99999-9999',
       ownerName: companyName,
       lastActive: 'Agora mesmo',
-      tempPassword: generateRandomPassword(),
+      tempPassword: finalPassword,
       razaoSocial: companyName,
       nomeFantasia: companyName,
       cnpj: '',
@@ -318,7 +328,14 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       localStorage.setItem(`saas_tenant_appointments_${createdTenant.id}`, '[]');
       localStorage.setItem(`saas_tenant_wash_history_${createdTenant.id}`, '[]');
 
-      await saveTenantToFirestore(createdTenant);
+      // 🔐 Cria o acesso no Firebase Auth e nas coleções /tenants e /usuarios
+      const authRes = await registerEmpresaInFirebaseAuth({
+        tenant: createdTenant,
+        email: finalEmail,
+        password: finalPassword,
+        name: companyName
+      });
+
       if (createdTenant.contactEmail) {
         saveCompanyEmailMapping(createdTenant.contactEmail, createdTenant);
       }
@@ -348,6 +365,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
 
     const code = finalName.slice(0, 2).toUpperCase();
     const formattedDate = new Date().toLocaleDateString('pt-BR');
+    const finalPassword = tempPassword.trim() || generateRandomPassword();
 
     const createdTenant: Tenant = {
       id: `t-${Date.now()}`,
@@ -366,7 +384,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       contactPhone: contactPhone.trim() || '',
       ownerName: ownerName.trim() || finalName,
       lastActive: 'Agora mesmo',
-      tempPassword: tempPassword.trim() || '',
+      tempPassword: finalPassword,
       razaoSocial: razaoSocial.trim() || '',
       nomeFantasia: nomeFantasia.trim() || finalName,
       cnpj: cnpj.trim() || '',
@@ -390,8 +408,14 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       localStorage.setItem(`saas_tenant_appointments_${createdTenant.id}`, '[]');
       localStorage.setItem(`saas_tenant_wash_history_${createdTenant.id}`, '[]');
 
-      // 🏢 Cria a empresa na coleção 'tenants' e 'empresas' do Firestore
-      await saveTenantToFirestore(createdTenant);
+      // 🏢 Cria a empresa na coleção 'tenants', 'usuarios' e cria conta oficial no Firebase Auth
+      await registerEmpresaInFirebaseAuth({
+        tenant: createdTenant,
+        email: finalEmail,
+        password: finalPassword,
+        name: ownerName.trim() || finalName
+      });
+
       if (createdTenant.contactEmail) {
         saveCompanyEmailMapping(createdTenant.contactEmail, createdTenant);
       }
@@ -455,6 +479,80 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
               </div>
             </div>
 
+            {/* 🔑 CARD DESTACADO COM AS CREDENCIAIS DE ACESSO DO DONO */}
+            <div className="bg-[#020617] border-2 border-indigo-500/40 p-4 rounded-xl space-y-3 shadow-xl">
+              <div className="flex items-center justify-between border-b border-indigo-500/20 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-indigo-500/10 text-indigo-400 rounded-lg">
+                    <Key className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-white">Credenciais de Acesso do Dono do Lava-Jato</h3>
+                    <p className="text-[11px] text-slate-400">Envie estes dados para o proprietário acessar o painel administrativo</p>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                  Conta Pronta no Firebase Auth
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div className="bg-[#0f172a] p-2.5 rounded-lg border border-[#1e293b]">
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block mb-0.5">E-mail de Login</span>
+                  <span className="text-white font-mono font-semibold select-all break-all">{createdSuccessTenant.contactEmail}</span>
+                </div>
+                <div className="bg-[#0f172a] p-2.5 rounded-lg border border-[#1e293b] flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block mb-0.5">Senha Provisória</span>
+                    <span className="text-emerald-400 font-mono font-bold select-all tracking-wider text-sm">{createdSuccessTenant.tempPassword || 'Definida no sistema'}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(createdSuccessTenant.tempPassword || '');
+                      setCopiedPwd(true);
+                      setTimeout(() => setCopiedPwd(false), 2000);
+                    }}
+                    className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs flex items-center gap-1 cursor-pointer"
+                    title="Copiar senha"
+                  >
+                    {copiedPwd ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = `🚗 *Acesso ao Sistema do Lava-Jato - ${createdSuccessTenant.name}*\n\nOlá! Seu sistema de gestão já está configurado e liberado para uso.\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${createdSuccessTenant.contactEmail}\n🔑 *Senha de Acesso:* ${createdSuccessTenant.tempPassword}\n\nGuarde esta senha para acessar sua área de administração.`;
+                    navigator.clipboard.writeText(text);
+                    setCopiedCredentials(true);
+                    setTimeout(() => setCopiedCredentials(false), 2500);
+                  }}
+                  className={`flex-1 py-2 px-3 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                    copiedCredentials 
+                      ? 'bg-emerald-600 text-white' 
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  }`}
+                >
+                  {copiedCredentials ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedCredentials ? 'Credenciais Copiadas!' : 'Copiar Todas as Credenciais'}
+                </button>
+
+                <a
+                  href={`https://wa.me/${cleanDigits(createdSuccessTenant.contactPhone || '')}?text=${encodeURIComponent(
+                    `🚗 *Acesso ao Sistema do Lava-Jato - ${createdSuccessTenant.name}*\n\nOlá! Seu sistema de gestão já está configurado e liberado para uso.\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${createdSuccessTenant.contactEmail}\n🔑 *Senha de Acesso:* ${createdSuccessTenant.tempPassword}\n\nGuarde esta senha para acessar sua área de administração.`
+                  )}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  <Share2 className="w-3.5 h-3.5" /> Enviar no WhatsApp do Dono
+                </a>
+              </div>
+            </div>
+
             <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-300 text-xs flex items-center gap-2.5">
               <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>
@@ -466,11 +564,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
               empresa={{
                 id: createdSuccessTenant.id,
                 nome: createdSuccessTenant.name,
-                slug: (createdSuccessTenant.domain ? createdSuccessTenant.domain.split('.')[0] : createdSuccessTenant.name)
-                  .toLowerCase()
-                  .normalize('NFD')
-                  .replace(/[\u0300-\u036f]/g, '')
-                  .replace(/[^a-z0-9]/g, '') || createdSuccessTenant.id,
+                slug: generateSlug(createdSuccessTenant.name || createdSuccessTenant.nomeFantasia || 'lavajato') || 'empresa',
                 logoUrl: createdSuccessTenant.logoUrl
               }}
             />
@@ -598,7 +692,14 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                     type="text"
                     placeholder="Ex: Estética Automotiva Brilho"
                     value={fastCompanyName}
-                    onChange={(e) => setFastCompanyName(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setFastCompanyName(val);
+                      const slug = generateSlug(val);
+                      if (!fastOwnerEmail || fastOwnerEmail.endsWith('@empresa.com')) {
+                        setFastOwnerEmail(slug ? `${slug}@empresa.com` : '');
+                      }
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
@@ -609,6 +710,85 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                   />
                   <p className="text-[11px] text-slate-400 mt-1.5">
                     O sistema cria automaticamente o link exclusivo, cadastra no Firestore e gera a placa com QR Code para o balcão.
+                  </p>
+                </div>
+
+                {/* E-mail de Login do Dono */}
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] font-semibold mb-1">
+                    E-mail de Login do Responsável / Dono
+                  </label>
+                  <div className="relative flex items-center">
+                    <Mail className="w-4 h-4 text-slate-500 absolute left-3" />
+                    <input
+                      type="email"
+                      required
+                      placeholder="Ex: dono@brilho.com"
+                      value={fastOwnerEmail}
+                      onChange={(e) => setFastOwnerEmail(e.target.value)}
+                      className="w-full pl-9 p-2.5 bg-[#1F2937] border border-[#374151] rounded-lg text-white font-medium focus:outline-none focus:border-[#00A3FF] text-xs"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">E-mail oficial para entrar no painel de administração da empresa.</p>
+                </div>
+
+                {/* 🔑 Senha de Acesso Gerada para o Dono */}
+                <div className="bg-[#0f172a] border border-indigo-500/30 p-3.5 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-indigo-300 font-bold flex items-center gap-1.5">
+                      <Key className="w-3.5 h-3.5 text-amber-400" /> Senha de Acesso do Dono (Gerada Automaticamente)
+                    </label>
+                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                      Pronta para Login
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type={showFastPassword ? "text" : "password"}
+                        value={fastOwnerPassword}
+                        onChange={(e) => setFastOwnerPassword(e.target.value)}
+                        className="w-full p-2.5 bg-[#020617] border border-[#1e293b] rounded-lg text-emerald-400 font-mono font-bold tracking-wider text-xs focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowFastPassword(!showFastPassword)}
+                      className="p-2.5 bg-[#020617] hover:bg-slate-800 text-slate-300 border border-[#1e293b] rounded-lg transition cursor-pointer"
+                      title={showFastPassword ? "Ocultar senha" : "Ver senha"}
+                    >
+                      {showFastPassword ? <EyeOff className="w-4 h-4 text-amber-400" /> : <Eye className="w-4 h-4 text-slate-400" />}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setFastOwnerPassword(generateRandomPassword())}
+                      className="p-2.5 bg-[#020617] hover:bg-slate-800 text-indigo-400 border border-[#1e293b] rounded-lg transition cursor-pointer flex items-center gap-1 font-bold text-xs"
+                      title="Gerar nova senha aleatória"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Gerar Outra</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(fastOwnerPassword);
+                        setCopiedFastPwd(true);
+                        setTimeout(() => setCopiedFastPwd(false), 2000);
+                      }}
+                      className={`px-3 py-2.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition cursor-pointer ${
+                        copiedFastPwd ? 'bg-emerald-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                      }`}
+                    >
+                      {copiedFastPwd ? <Check className="w-3.5 h-3.5 text-white" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedFastPwd ? 'Copiada!' : 'Copiar'}</span>
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    💡 Esta senha é configurada diretamente na conta do proprietário para ele acessar a área do lava-jato no botão "Login Empresa".
                   </p>
                 </div>
 

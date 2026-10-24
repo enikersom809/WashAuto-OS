@@ -59,6 +59,38 @@ export function removeUndefinedFields<T>(obj: T): T {
 }
 
 /**
+ * Helper para executar promessas com tempo limite máximo para evitar
+ * travamentos infinitos no celular ou navegador (ex: "finalizando...")
+ */
+export async function withTimeout<T>(promise: Promise<T>, ms = 6000, fallbackValue?: T): Promise<T> {
+  let timer: any;
+  const timeoutPromise = new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      if (fallbackValue !== undefined) {
+        resolve(fallbackValue);
+      } else {
+        reject(new Error(`Operação excedeu o tempo limite (${ms}ms)`));
+      }
+    }, ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Calcula o slug limpo e legível da empresa (ex: box1000lavajatoelubrificacao)
+ * eliminando acentos, espaços e evitando IDs brutos como t-234764912345
+ */
+export function computeTenantSlug(name: string, fallbackId: string): string {
+  const clean = (name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+  return clean || fallbackId;
+}
+
+/**
  * Obtém a sessão de autenticação ativa no Firebase Auth.
  * Não força login automático falso de usuário antigo para não travar dispositivos móveis.
  */
@@ -168,18 +200,68 @@ export async function saveTenantToFirestore(tenant: Tenant): Promise<boolean> {
 
 export async function deleteTenantFromFirestore(tenantId: string): Promise<boolean> {
   try {
-    await ensureFirebaseAuthSession();
+    // 1. Registra no tombstone local para nunca ressuscitar no navegador
+    try {
+      const rawDeleted = localStorage.getItem('saas_deleted_tenant_ids');
+      const deletedList: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+      if (!deletedList.includes(tenantId)) {
+        deletedList.push(tenantId);
+        localStorage.setItem('saas_deleted_tenant_ids', JSON.stringify(deletedList));
+      }
+    } catch {}
+
+    // 2. Limpa todos os caches de localStorage deste tenant
+    try {
+      localStorage.removeItem(`saas_tenant_washes_${tenantId}`);
+      localStorage.removeItem(`saas_tenant_appointments_${tenantId}`);
+      localStorage.removeItem(`saas_tenant_wash_history_${tenantId}`);
+      localStorage.removeItem(`saas_tenant_staff_${tenantId}`);
+      localStorage.removeItem(`saas_tenant_products_${tenantId}`);
+
+      const rawMap = localStorage.getItem('saas_company_email_map');
+      if (rawMap) {
+        const map: Record<string, any> = JSON.parse(rawMap);
+        Object.keys(map).forEach(email => {
+          if (map[email]?.tenantId === tenantId) delete map[email];
+        });
+        localStorage.setItem('saas_company_email_map', JSON.stringify(map));
+      }
+
+      const rawTenants = localStorage.getItem('saas_master_tenants');
+      if (rawTenants) {
+        const list: Tenant[] = JSON.parse(rawTenants);
+        const filtered = list.filter(t => t.id !== tenantId);
+        localStorage.setItem('saas_master_tenants', JSON.stringify(filtered));
+      }
+    } catch {}
+
+    // 3. Remove do Firestore /tenants/{tenantId}
     const tenantDocRef = doc(db, 'tenants', tenantId);
     await deleteDoc(tenantDocRef);
     
-    // Remove também da coleção /empresas se existir registro correspondente
+    // 4. Remove também da coleção /empresas/{tenantId}
     try {
       await deleteDoc(doc(db, 'empresas', tenantId));
-    } catch {
-      // Ignora erro silencioso se não existir na coleção empresas
-    }
+    } catch {}
+
+    // 5. Remove qualquer usuário da coleção /usuarios associado a este tenant
+    try {
+      const qUsers = query(collection(db, 'usuarios'), where('tenantId', '==', tenantId));
+      const userSnaps = await getDocs(qUsers);
+      for (const uDoc of userSnaps.docs) {
+        await deleteDoc(uDoc.ref);
+      }
+    } catch {}
+
+    // 6. Registra na coleção de sistema no Firestore para sincronizar exclusão com outros computadores/celulares
+    try {
+      await setDoc(doc(db, 'system', 'deleted_tenants'), {
+        lastDeletedId: tenantId,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    } catch {}
     
-    console.log(`🗑️ [Firestore] Empresa ${tenantId} removida com sucesso das coleções /tenants e /empresas`);
+    console.log(`🗑️ [Firestore] Empresa ${tenantId} removida em definitivo de todas as coleções.`);
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `tenants/${tenantId}`);
@@ -210,9 +292,15 @@ export async function deleteDemoTenantsFromFirestore(): Promise<{ deletedCount: 
     const raw = localStorage.getItem('saas_master_tenants');
     if (raw) {
       const list: Tenant[] = JSON.parse(raw);
-      const filtered = list.filter(t => !demoIds.includes(t.id));
+      const filtered = list.filter(t => !demoIds.includes(t.id) && !t.id.startsWith('t-10'));
       localStorage.setItem('saas_master_tenants', JSON.stringify(filtered));
     }
+    const rawDeleted = localStorage.getItem('saas_deleted_tenant_ids');
+    const deletedList: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+    demoIds.forEach(id => {
+      if (!deletedList.includes(id)) deletedList.push(id);
+    });
+    localStorage.setItem('saas_deleted_tenant_ids', JSON.stringify(deletedList));
   } catch {}
 
   console.log(`🧹 [Firestore] ${deletedCount} empresas fictícias/demo foram removidas em definitivo.`);
@@ -253,16 +341,32 @@ export async function syncAllLocalTenantsToFirestore(tenants: Tenant[]): Promise
 
 export async function loadTenantsFromFirestore(): Promise<Tenant[]> {
   try {
-    await ensureFirebaseAuthSession();
+    const rawDeleted = typeof window !== 'undefined' ? localStorage.getItem('saas_deleted_tenant_ids') : null;
+    const deletedList: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+
     const querySnapshot = await getDocs(collection(db, 'tenants'));
     const loadedTenants: Tenant[] = [];
     querySnapshot.forEach((docSnap) => {
       const data = docSnap.data();
+      const id = data.id || docSnap.id;
+      
+      // Auto-purge se for demo ou estiver na lista de deletados
+      if (id === 't-autoclean' || id.startsWith('t-10') || deletedList.includes(id)) {
+        deleteDoc(docSnap.ref).catch(() => {});
+        return;
+      }
+
+      const companyName = data.name || data.nomeFantasia || data.razaoSocial || 'Lava-Jato';
+      const cleanSlug = computeTenantSlug(companyName, docSnap.id);
+      const cleanDomain = (data.domain && !data.domain.toLowerCase().startsWith('t-'))
+        ? data.domain
+        : `${cleanSlug}.saas.com`;
+
       loadedTenants.push({
-        id: data.id || docSnap.id,
-        name: data.name || 'Lava-Jato',
+        id,
+        name: companyName,
         code: data.code || 'LJ',
-        domain: data.domain || `${docSnap.id}.saas.com`,
+        domain: cleanDomain,
         plan: data.plan || 'Pro',
         status: data.status || 'Ativo',
         endUsersCount: data.endUsersCount || 1,
@@ -278,7 +382,10 @@ export async function loadTenantsFromFirestore(): Promise<Tenant[]> {
         cnpj: data.cnpj || undefined,
         inscricaoEstadual: data.inscricaoEstadual || undefined,
         address: data.address || undefined,
-        logoUrl: data.logoUrl || undefined
+        logoUrl: data.logoUrl || undefined,
+        tempPassword: data.tempPassword || undefined,
+        isLifetime: data.isLifetime || data.plan === 'Vitalicio' || undefined,
+        purchaseAmount: data.purchaseAmount || (data.plan === 'Vitalicio' ? 4000 : undefined)
       });
     });
     return loadedTenants;
@@ -291,14 +398,34 @@ export async function loadTenantsFromFirestore(): Promise<Tenant[]> {
 export function subscribeToTenantsFirestore(callback: (tenants: Tenant[]) => void): () => void {
   try {
     const unsubscribe = onSnapshot(collection(db, 'tenants'), (snapshot) => {
+      const rawDeleted = typeof window !== 'undefined' ? localStorage.getItem('saas_deleted_tenant_ids') : null;
+      const deletedList: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+
       const liveTenants: Tenant[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data();
+        const id = data.id || docSnap.id;
+
+        // Auto-purge definitivo: se for t-autoclean, demo t-10 ou deletado pelo usuário, apaga da nuvem e ignora
+        if (id === 't-autoclean' || id.startsWith('t-10') || deletedList.includes(id)) {
+          deleteDoc(docSnap.ref).catch(() => {});
+          try {
+            deleteDoc(doc(db, 'empresas', id)).catch(() => {});
+          } catch {}
+          return;
+        }
+
+        const companyName = data.name || data.nomeFantasia || data.razaoSocial || 'Lava-Jato';
+        const cleanSlug = computeTenantSlug(companyName, docSnap.id);
+        const cleanDomain = (data.domain && !data.domain.toLowerCase().startsWith('t-'))
+          ? data.domain
+          : `${cleanSlug}.saas.com`;
+
         liveTenants.push({
-          id: data.id || docSnap.id,
-          name: data.name || 'Lava-Jato',
+          id,
+          name: companyName,
           code: data.code || 'LJ',
-          domain: data.domain || `${docSnap.id}.saas.com`,
+          domain: cleanDomain,
           plan: data.plan || 'Pro',
           status: data.status || 'Ativo',
           endUsersCount: data.endUsersCount || 1,
@@ -314,7 +441,10 @@ export function subscribeToTenantsFirestore(callback: (tenants: Tenant[]) => voi
           cnpj: data.cnpj || undefined,
           inscricaoEstadual: data.inscricaoEstadual || undefined,
           address: data.address || undefined,
-          logoUrl: data.logoUrl || undefined
+          logoUrl: data.logoUrl || undefined,
+          tempPassword: data.tempPassword || undefined,
+          isLifetime: data.isLifetime || data.plan === 'Vitalicio' || undefined,
+          purchaseAmount: data.purchaseAmount || (data.plan === 'Vitalicio' ? 4000 : undefined)
         });
       });
       // Notifica sempre os ouvintes com a lista em tempo real atualizada
@@ -362,8 +492,11 @@ export async function registerClientInFirebaseAuth(params: {
     let userRecord: User;
 
     try {
-      // 1. Tenta criar usuário novo no Firebase Authentication
-      const userCredential = await createUserWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
+      // 1. Tenta criar usuário novo no Firebase Authentication com timeout seguro de 6s
+      const userCredential = await withTimeout(
+        createUserWithEmailAndPassword(auth, normalizedEmail, effectivePassword),
+        6000
+      );
       userRecord = userCredential.user;
       console.log(`🔐 [Firebase Auth] Novo usuário criado com sucesso: ${userRecord.uid} (${normalizedEmail})`);
     } catch (authErr: any) {
@@ -371,13 +504,16 @@ export async function registerClientInFirebaseAuth(params: {
       if (authErr.code === 'auth/email-already-in-use') {
         console.log(`ℹ️ [Firebase Auth] E-mail já cadastrado, efetuando login: ${normalizedEmail}`);
         try {
-          const loginCred = await signInWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
+          const loginCred = await withTimeout(
+            signInWithEmailAndPassword(auth, normalizedEmail, effectivePassword),
+            6000
+          );
           userRecord = loginCred.user;
         } catch (loginErr: any) {
-          // Se falhar a senha, mas usuário já existe
+          // Se falhar a senha, mas usuário já existe, prossegue com os dados cadastrais
           return {
             success: true,
-            errorMessage: 'E-mail já cadastrado no Authentication. Login realizado com seu cadastro.',
+            errorMessage: 'E-mail já cadastrado. Cadastro atualizado no lava-jato.',
             isExistingUser: true
           };
         }
@@ -392,8 +528,8 @@ export async function registerClientInFirebaseAuth(params: {
           errorMessage: 'A senha deve ter pelo menos 6 caracteres.'
         };
       } else {
-        console.warn('Firebase Auth creation notice:', authErr);
-        // Prossegue mesmo se houver restrição de rede no browser
+        console.warn('Firebase Auth creation notice (prosseguindo de modo resiliente):', authErr);
+        // Cria um fallback de identificação para não travar a experiência do usuário em navegadores móveis
         return {
           success: true,
           errorMessage: authErr.message
@@ -401,17 +537,36 @@ export async function registerClientInFirebaseAuth(params: {
       }
     }
 
-    // 2. Atualiza o Nome de Exibição (displayName) no Firebase Auth
-    if (userRecord && name) {
-      try {
-        await updateProfile(userRecord, { displayName: name });
-      } catch (profErr) {
-        console.warn('UpdateProfile warning:', profErr);
-      }
+    const clientDocId = userRecord ? userRecord.uid : `c-${Date.now()}`;
+
+    // 👤 2. Grava PRIMEIRO na coleção oficial 'usuarios' para que a checagem de sessão no App.tsx não deslogue o usuário
+    try {
+      await withTimeout(
+        setDoc(doc(db, 'usuarios', clientDocId), {
+          uid: clientDocId,
+          nome: name || 'Cliente',
+          email: normalizedEmail,
+          telefone: phone || '',
+          role: 'cliente',
+          tenantId: tenantId || 'autoclean',
+          empresaId: tenantId || 'autoclean',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }, { merge: true }),
+        4000
+      );
+    } catch (uErr) {
+      console.warn('Gravação em /usuarios notice:', uErr);
     }
 
-    // 3. Registra os dados cadastrais do cliente no Firestore
-    const clientDocId = userRecord ? userRecord.uid : `c-${Date.now()}`;
+    // 3. Atualiza o Nome de Exibição (displayName) no Firebase Auth em segundo plano
+    if (userRecord && name) {
+      try {
+        updateProfile(userRecord, { displayName: name }).catch(() => {});
+      } catch (_) {}
+    }
+
+    // 4. Registra os dados cadastrais do cliente no Firestore
     const clientFirestoreData = removeUndefinedFields({
       uid: clientDocId,
       name: name || '',
@@ -423,26 +578,19 @@ export async function registerClientInFirebaseAuth(params: {
     });
 
     try {
-      // Salva no registro geral de clientes
-      await setDoc(doc(db, 'clients', clientDocId), clientFirestoreData, { merge: true });
+      // Salva no registro geral de clientes com timeout
+      await withTimeout(
+        setDoc(doc(db, 'clients', clientDocId), clientFirestoreData, { merge: true }),
+        4000
+      );
       
       // Se pertence a uma empresa, salva também na subcoleção do tenant
       if (tenantId) {
-        await setDoc(doc(db, 'tenants', tenantId, 'clients', clientDocId), clientFirestoreData, { merge: true });
+        await withTimeout(
+          setDoc(doc(db, 'tenants', tenantId, 'clients', clientDocId), clientFirestoreData, { merge: true }),
+          4000
+        );
       }
-
-      // 👤 Coleção oficial 'usuarios' (Para checagem de sessão e sincronização entre PC e Celular)
-      await setDoc(doc(db, 'usuarios', clientDocId), {
-        uid: clientDocId,
-        nome: name || 'Cliente',
-        email: normalizedEmail,
-        telefone: phone || '',
-        role: 'cliente',
-        tenantId: tenantId || 'autoclean',
-        empresaId: tenantId || 'autoclean',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
 
       console.log(`✅ [Firestore] Perfil do cliente salvo nas coleções /clients e /usuarios/${clientDocId}`);
     } catch (dbErr) {
@@ -641,9 +789,9 @@ export async function saveClientFullRegistration(
       updatedAt: new Date().toISOString()
     });
 
-    await setDoc(doc(db, 'clients', cleanId), payload, { merge: true });
+    await withTimeout(setDoc(doc(db, 'clients', cleanId), payload, { merge: true }), 4000);
     if (tenantId) {
-      await setDoc(doc(db, 'tenants', tenantId, 'clients', cleanId), payload, { merge: true });
+      await withTimeout(setDoc(doc(db, 'tenants', tenantId, 'clients', cleanId), payload, { merge: true }), 4000);
     }
     console.log(`✅ [Firestore] Ficha de cadastro do cliente e veículos gravada com sucesso: ${cleanId}`);
     return true;
@@ -910,16 +1058,23 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
     const cleanId = cleanDocId(raw);
     const cleanSlug = raw.toLowerCase().replace(/[^a-z0-9-]/g, '');
 
+    const rawDeleted = typeof window !== 'undefined' ? localStorage.getItem('saas_deleted_tenant_ids') : null;
+    const deletedList: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+    if (cleanId === 't-autoclean' || cleanId.startsWith('t-10') || deletedList.includes(cleanId) || deletedList.includes(cleanSlug)) {
+      return null;
+    }
     // 1. Tenta buscar direto pelo ID do tenant em /tenants/{cleanId}
     try {
       const directDoc = await getDoc(doc(db, 'tenants', cleanId));
       if (directDoc.exists()) {
         const data = directDoc.data();
+        const compName = data.name || data.nome || 'Lava-Jato';
+        const derivedSlug = computeTenantSlug(compName, directDoc.id);
         return {
           id: directDoc.id,
-          name: data.name || data.nome || 'Lava-Jato',
+          name: compName,
           code: data.code || 'LJ',
-          domain: data.domain || `${directDoc.id}.saas.com`,
+          domain: (data.domain && !data.domain.toLowerCase().startsWith('t-')) ? data.domain : `${derivedSlug}.saas.com`,
           plan: data.plan || 'Pro',
           status: data.status || 'Ativo',
           endUsersCount: data.endUsersCount ?? 1,
@@ -949,11 +1104,12 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
             const fullDoc = await getDoc(doc(db, 'tenants', empDoc.id));
             if (fullDoc.exists()) fullData = fullDoc.data();
           } catch (_) {}
+          const compName = fullData.name || fullData.nome || data.nome || 'Lava-Jato';
           return {
             id: empDoc.id,
-            name: fullData.name || fullData.nome || data.nome || 'Lava-Jato',
+            name: compName,
             code: fullData.code || 'LJ',
-            domain: fullData.domain || `${cleanSlug}.saas.com`,
+            domain: (fullData.domain && !fullData.domain.toLowerCase().startsWith('t-')) ? fullData.domain : `${cleanSlug}.saas.com`,
             plan: fullData.plan || 'Pro',
             status: fullData.status || 'Ativo',
             endUsersCount: fullData.endUsersCount ?? 1,
@@ -969,6 +1125,34 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
           };
         }
       } catch (_) {}
+
+      // 2.1 Tenta buscar pelo domínio exato em /tenants
+      try {
+        const qDom = query(collection(db, 'tenants'), where('domain', '==', `${cleanSlug}.saas.com`), limit(1));
+        const domSnap = await getDocs(qDom);
+        if (!domSnap.empty) {
+          const dDoc = domSnap.docs[0];
+          const data = dDoc.data();
+          return {
+            id: dDoc.id,
+            name: data.name || 'Lava-Jato',
+            code: data.code || 'LJ',
+            domain: data.domain || `${cleanSlug}.saas.com`,
+            plan: data.plan || 'Pro',
+            status: data.status || 'Ativo',
+            endUsersCount: data.endUsersCount ?? 1,
+            maxUsers: data.maxUsers ?? 500,
+            mrrAmount: data.mrrAmount ?? 0,
+            createdAt: data.createdAt || new Date().toLocaleDateString('pt-BR'),
+            contactEmail: data.contactEmail || '',
+            contactPhone: data.contactPhone || '',
+            ownerName: data.ownerName || '',
+            lastActive: data.lastActive || 'Agora mesmo',
+            logoUrl: data.logoUrl || undefined,
+            address: data.address || undefined
+          };
+        }
+      } catch (_) {}
     }
 
     // 3. Tenta buscar pelo código em /tenants (ex: AC, LJ)
@@ -978,11 +1162,13 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
       if (!codeSnap.empty) {
         const cDoc = codeSnap.docs[0];
         const data = cDoc.data();
+        const compName = data.name || 'Lava-Jato';
+        const derivedSlug = computeTenantSlug(compName, cDoc.id);
         return {
           id: cDoc.id,
-          name: data.name || 'Lava-Jato',
+          name: compName,
           code: data.code || raw.toUpperCase(),
-          domain: data.domain || `${cDoc.id}.saas.com`,
+          domain: (data.domain && !data.domain.toLowerCase().startsWith('t-')) ? data.domain : `${derivedSlug}.saas.com`,
           plan: data.plan || 'Pro',
           status: data.status || 'Ativo',
           endUsersCount: data.endUsersCount ?? 1,
