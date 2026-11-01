@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle, Key, Eye, EyeOff, RefreshCw, Copy, Check } from 'lucide-react';
+import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle, Key, Eye, EyeOff, RefreshCw, Copy, Check, Mail, Loader2, AlertCircle } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
+import { sendUserPasswordResetEmail } from '../lib/firebaseService';
 
 interface EditTenantModalProps {
   tenant: Tenant | null;
@@ -22,6 +23,8 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
   const [isProcessingLogo, setIsProcessingLogo] = useState<boolean>(false);
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [copiedPassword, setCopiedPassword] = useState<boolean>(false);
+  const [isSendingResetEmail, setIsSendingResetEmail] = useState<boolean>(false);
+  const [resetEmailFeedback, setResetEmailFeedback] = useState<{ success: boolean; msg: string } | null>(null);
 
   const generateRandomPassword = () => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
@@ -33,7 +36,15 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
   };
 
   useEffect(() => {
-    setFormData(tenant);
+    if (tenant) {
+      const storedPwd = (typeof window !== 'undefined' && localStorage.getItem(`saas_tenant_custom_password_${tenant.id}`)) || '';
+      setFormData({
+        ...tenant,
+        tempPassword: tenant.tempPassword || storedPwd || `Auto#${(tenant.code || 'LJ').toUpperCase()}123`
+      });
+    } else {
+      setFormData(null);
+    }
     setConfirmDelete(false);
     setShowPassword(false);
     setCopiedPassword(false);
@@ -94,6 +105,9 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (formData) {
+      if (formData.tempPassword) {
+        localStorage.setItem(`saas_tenant_custom_password_${formData.id}`, formData.tempPassword);
+      }
       onSaveTenant(formData);
       onClose();
     }
@@ -224,39 +238,40 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
             </div>
           </div>
 
-          {/* 🔑 Senha de Acesso do Responsável */}
-          <div className="bg-slate-900 border border-indigo-500/30 rounded-lg p-3 space-y-2">
+          {/* 🔑 Senha Temporária / Senha de Acesso do Responsável */}
+          <div className="bg-slate-900 border-2 border-indigo-500/40 rounded-xl p-3.5 space-y-2 shadow-lg shadow-indigo-950/40">
             <div className="flex items-center justify-between">
-              <label className="text-indigo-300 font-medium flex items-center gap-1.5">
-                <Key className="w-3.5 h-3.5 text-amber-400" /> Senha de Acesso do Dono (Área da Empresa)
+              <label className="text-indigo-200 font-bold flex items-center gap-1.5 text-xs">
+                <Key className="w-4 h-4 text-amber-400" /> Senha Temporária de Acesso (Dono da Empresa) *
               </label>
               <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                Acesso do Dono
+                Campo Editável
               </span>
             </div>
 
             <div className="flex items-center gap-2">
               <input
                 type={showPassword ? "text" : "password"}
+                required
                 value={formData.tempPassword || ''}
                 placeholder="Ex: Auto#k8X9!2"
                 onChange={(e) => setFormData({ ...formData, tempPassword: e.target.value })}
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-2 text-emerald-400 font-mono font-bold tracking-wider text-xs focus:outline-none focus:border-indigo-500"
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-emerald-400 font-mono font-bold tracking-wider text-xs focus:outline-none focus:border-indigo-400"
               />
 
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="p-2 bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-800 transition cursor-pointer"
-                title={showPassword ? "Ocultar" : "Mostrar"}
+                className="p-2.5 bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-700 transition cursor-pointer"
+                title={showPassword ? "Ocultar senha" : "Ver senha"}
               >
-                {showPassword ? <EyeOff className="w-3.5 h-3.5 text-amber-400" /> : <Eye className="w-3.5 h-3.5" />}
+                {showPassword ? <EyeOff className="w-4 h-4 text-amber-400" /> : <Eye className="w-4 h-4" />}
               </button>
 
               <button
                 type="button"
                 onClick={() => setFormData({ ...formData, tempPassword: generateRandomPassword() })}
-                className="px-2.5 py-2 bg-slate-950 hover:bg-slate-800 text-indigo-400 hover:text-indigo-300 rounded-lg border border-slate-800 transition cursor-pointer flex items-center gap-1 font-bold text-xs"
+                className="px-3 py-2.5 bg-slate-950 hover:bg-slate-800 text-indigo-400 hover:text-indigo-300 rounded-lg border border-slate-700 transition cursor-pointer flex items-center gap-1.5 font-bold text-xs"
                 title="Gerar nova senha aleatória"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
@@ -270,16 +285,60 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
                   setCopiedPassword(true);
                   setTimeout(() => setCopiedPassword(false), 2000);
                 }}
-                className="px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition cursor-pointer flex items-center gap-1 font-bold text-xs"
+                className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition cursor-pointer flex items-center gap-1.5 font-bold text-xs"
                 title="Copiar senha"
               >
                 {copiedPassword ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedPassword ? 'Copiada' : 'Copiar'}</span>
               </button>
             </div>
-            <p className="text-[10px] text-slate-500">
-              Esta senha é salva na nuvem Firestore e permite ao responsável entrar no painel de administração da sua unidade.
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Você pode alterar livremente esta senha. Ao salvar, a nova senha é sincronizada com o banco Firestore e permite ao dono entrar na sua área de gestão em <strong>Login Empresa</strong>.
             </p>
+
+            {formData.contactEmail && (
+              <div className="pt-2 border-t border-slate-800/80 flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  disabled={isSendingResetEmail}
+                  onClick={async () => {
+                    if (!formData.contactEmail) return;
+                    setIsSendingResetEmail(true);
+                    setResetEmailFeedback(null);
+                    try {
+                      const res = await sendUserPasswordResetEmail(formData.contactEmail);
+                      setResetEmailFeedback({ success: res.success, msg: res.message });
+                    } catch (err: any) {
+                      setResetEmailFeedback({ success: false, msg: err.message || 'Erro ao enviar e-mail.' });
+                    } finally {
+                      setIsSendingResetEmail(false);
+                    }
+                  }}
+                  className="w-full py-2 px-3 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-500/30 text-indigo-300 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                  title="Enviar link oficial de redefinição pelo Firebase"
+                >
+                  {isSendingResetEmail ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Enviando link via Firebase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Enviar Link de Redefinição para {formData.contactEmail}</span>
+                    </>
+                  )}
+                </button>
+                {resetEmailFeedback && (
+                  <div className={`p-2 rounded text-xs flex items-center gap-1.5 ${
+                    resetEmailFeedback.success ? 'bg-emerald-950/60 border border-emerald-500/30 text-emerald-300' : 'bg-rose-950/60 border border-rose-500/30 text-rose-300'
+                  }`}>
+                    {resetEmailFeedback.success ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+                    <span>{resetEmailFeedback.msg}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Logotipo Individual da Empresa */}

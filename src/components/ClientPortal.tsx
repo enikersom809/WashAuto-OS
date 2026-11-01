@@ -42,7 +42,8 @@ import {
   saveFidelityRedemptionToFirestore,
   subscribeToTenantRedemptions,
   subscribeToFidelityPoints,
-  subscribeToTenantWashItems
+  subscribeToTenantWashItems,
+  sendUserPasswordResetEmail
 } from '../lib/firebaseService';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -278,6 +279,29 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     showToast('Dados pessoais atualizados com sucesso!');
   };
 
+  // Redefinição de Senha do Cliente via Firebase Auth
+  const [isSendingResetEmail, setIsSendingResetEmail] = useState(false);
+  const [resetEmailStatus, setResetEmailStatus] = useState<string | null>(null);
+
+  const handleClientRequestResetEmail = async () => {
+    const emailToUse = (clientProfile.email || clientInfo?.email || editEmail || '').trim();
+    if (!emailToUse || !emailToUse.includes('@')) {
+      showToast('⚠️ Informe um e-mail válido no seu cadastro para receber o link.');
+      return;
+    }
+    setIsSendingResetEmail(true);
+    setResetEmailStatus(null);
+    try {
+      const res = await sendUserPasswordResetEmail(emailToUse);
+      setResetEmailStatus(res.message);
+      showToast(res.success ? '✉️ Link enviado para seu e-mail!' : res.message);
+    } catch (err: any) {
+      setResetEmailStatus(err.message || 'Erro ao enviar e-mail de redefinição.');
+    } finally {
+      setIsSendingResetEmail(false);
+    }
+  };
+
   // ================= 2. LISTA DE VEÍCULOS =================
   // Inicia vazia para novos cadastros (sem veículo pré-cadastrado forçado)
   const [vehicles, setVehicles] = useState<Vehicle[]>(() => {
@@ -321,6 +345,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
   const [selectedService, setSelectedService] = useState('Lavagem Detalhada + Cera');
   const [selectedPrice, setSelectedPrice] = useState(120);
+  const [clientKmInput, setClientKmInput] = useState('');
+  const [clientOilInterval, setClientOilInterval] = useState<8000 | 10000>(10000);
 
   // Data Selecionada (Formato YYYY-MM-DD)
   const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
@@ -402,6 +428,9 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   }, [selectedDate, lockedSlotsSet, selectedTimeSlot]);
 
   const servicesList = [
+    { name: 'Somente Troca de Óleo', price: 150 },
+    { name: 'Combo: Troca de Óleo + Ducha Completa', price: 190 },
+    { name: 'Combo: Troca de Óleo + Lavagem Detalhada', price: 250 },
     { name: 'Lavagem Simples', price: 60 },
     { name: 'Lavagem Detalhada + Cera', price: 120 },
     { name: 'Higienização de Bancos & Ar', price: 250 },
@@ -652,6 +681,12 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       ? `${address}, ${neighborhood || ''} - ${city || ''}/${stateUf || ''}`.replace(/^,\s*|,\s*$/g, '')
       : 'Atendimento no estabelecimento';
 
+    const cleanKmNum = parseInt(clientKmInput.replace(/\D/g, ''), 10);
+    const hasKm = !isNaN(cleanKmNum) && cleanKmNum > 0;
+    const finalServiceName = hasKm
+      ? `${selectedService} [KM Atual: ${cleanKmNum.toLocaleString('pt-BR')} | Próxima: ${(cleanKmNum + clientOilInterval).toLocaleString('pt-BR')} km]`
+      : selectedService;
+
     const newAppPayload = {
       id: `app-${Date.now()}`,
       clientName: clientProfile.name,
@@ -659,7 +694,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       clientEmail: clientProfile.email,
       vehicle: `${veh.brand} ${veh.model}`,
       plate: veh.plate,
-      service: selectedService,
+      service: finalServiceName,
       price: selectedPrice,
       dateTime: `${selectedDate} ${selectedTimeSlot}`,
       addressSummary,
@@ -1513,6 +1548,46 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                 </form>
               )}
 
+              {/* 1.1 Redefinição de Senha do Cliente (Firebase Auth) */}
+              <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-3.5 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <Lock className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold text-slate-200 text-xs block">Segurança da Senha</span>
+                      <span className="text-[11px] text-slate-400">
+                        Receba o link oficial do Firebase para redefinir ou alterar sua senha em <strong>{clientProfile.email || clientInfo?.email || 'seu e-mail'}</strong>.
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isSendingResetEmail}
+                    onClick={handleClientRequestResetEmail}
+                    className="bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 px-3 py-1.5 rounded-lg font-bold flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50 shrink-0 text-xs"
+                    title="Enviar e-mail oficial de redefinição de senha"
+                  >
+                    {isSendingResetEmail ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Enviando link...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Mail className="w-3.5 h-3.5" />
+                        <span>Redefinir Senha por E-mail</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                {resetEmailStatus && (
+                  <div className="p-2.5 rounded-lg bg-blue-950/40 border border-blue-500/30 text-blue-300 text-xs flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>{resetEmailStatus}</span>
+                  </div>
+                )}
+              </div>
+
               {/* 2. Dados Principais do Endereço (Preenchimento do Cliente) */}
               <div className="pt-2">
                 <div className="flex items-center justify-between mb-3">
@@ -1807,6 +1882,77 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                     ))}
                   </select>
                 </div>
+
+                {/* Bloco Interativo: Quilometragem Atual para Troca de Óleo */}
+                {selectedService.includes('Troca de Óleo') && (
+                  <div className="p-3.5 bg-gradient-to-br from-amber-950/40 via-slate-900 to-slate-950 border border-amber-500/40 rounded-xl space-y-2.5 animate-fade-in">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-amber-400 flex items-center gap-1.5 text-xs">
+                        <span>🛢️</span> Informações para Troca de Óleo
+                      </span>
+                      <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded font-mono font-bold">
+                        Cálculo Automático
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1 text-[11px]">
+                          KM Atual do seu Carro (Opcional)
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            placeholder="Ex: 85.000"
+                            value={clientKmInput}
+                            onChange={(e) => setClientKmInput(e.target.value)}
+                            className="w-full bg-[#020617] border border-amber-500/40 rounded-lg px-3 py-1.5 text-white font-mono font-bold focus:outline-none focus:border-amber-400 text-xs"
+                          />
+                          <span className="absolute right-2.5 top-1.5 text-slate-500 font-bold text-[11px]">KM</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1 text-[11px]">
+                          Intervalo Desejado
+                        </label>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setClientOilInterval(8000)}
+                            className={`py-1.5 px-2 rounded-lg font-bold text-[11px] border cursor-pointer transition ${
+                              clientOilInterval === 8000
+                                ? 'bg-amber-500 text-slate-950 border-amber-400'
+                                : 'bg-[#020617] text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            8.000 km
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setClientOilInterval(10000)}
+                            className={`py-1.5 px-2 rounded-lg font-bold text-[11px] border cursor-pointer transition ${
+                              clientOilInterval === 10000
+                                ? 'bg-amber-500 text-slate-950 border-amber-400'
+                                : 'bg-[#020617] text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            10.000 km
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {clientKmInput.trim() && !isNaN(parseInt(clientKmInput.replace(/\D/g, ''), 10)) && (
+                      <div className="bg-[#020617] p-2 rounded-lg border border-amber-500/20 flex items-center justify-between text-[11px]">
+                        <span className="text-slate-400">Próxima troca estimada:</span>
+                        <span className="font-mono font-black text-amber-300">
+                          {(parseInt(clientKmInput.replace(/\D/g, ''), 10) + clientOilInterval).toLocaleString('pt-BR')} KM
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* ================= CALENDÁRIO VISUAL INTERATIVO ================= */}
                 <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-4 space-y-3">

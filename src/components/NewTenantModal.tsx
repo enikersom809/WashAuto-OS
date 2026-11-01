@@ -525,7 +525,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    const text = `🚗 *Acesso ao Sistema do Lava-Jato - ${createdSuccessTenant.name}*\n\nOlá! Seu sistema de gestão já está configurado e liberado para uso.\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${createdSuccessTenant.contactEmail}\n🔑 *Senha de Acesso:* ${createdSuccessTenant.tempPassword}\n\nGuarde esta senha para acessar sua área de administração.`;
+                    const text = `🚗 *Acesso ao Sistema do Lava-Jato - ${createdSuccessTenant.name}*\n\nOlá! Seu sistema de gestão já está configurado e liberado para uso.\n\n🌐 *Link de Acesso:* https://washautoos.netlify.app/\n📧 *E-mail:* ${createdSuccessTenant.contactEmail}\n🔑 *Senha de Acesso:* ${createdSuccessTenant.tempPassword}\n\nGuarde esta senha para acessar sua área de administração.`;
                     navigator.clipboard.writeText(text);
                     setCopiedCredentials(true);
                     setTimeout(() => setCopiedCredentials(false), 2500);
@@ -542,7 +542,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
 
                 <a
                   href={`https://wa.me/${cleanDigits(createdSuccessTenant.contactPhone || '')}?text=${encodeURIComponent(
-                    `🚗 *Acesso ao Sistema do Lava-Jato - ${createdSuccessTenant.name}*\n\nOlá! Seu sistema de gestão já está configurado e liberado para uso.\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${createdSuccessTenant.contactEmail}\n🔑 *Senha de Acesso:* ${createdSuccessTenant.tempPassword}\n\nGuarde esta senha para acessar sua área de administração.`
+                    `🚗 *Acesso ao Sistema do Lava-Jato - ${createdSuccessTenant.name}*\n\nOlá! Seu sistema de gestão já está configurado e liberado para uso.\n\n🌐 *Link de Acesso:* https://washautoos.netlify.app/\n📧 *E-mail:* ${createdSuccessTenant.contactEmail}\n🔑 *Senha de Acesso:* ${createdSuccessTenant.tempPassword}\n\nGuarde esta senha para acessar sua área de administração.`
                   )}`}
                   target="_blank"
                   rel="noopener noreferrer"

@@ -43,13 +43,27 @@ import {
   FileText,
   Menu,
   QrCode,
-  Loader2
+  Loader2,
+  Fuel,
+  Smartphone,
+  Bell,
+  Radio,
+  Wallet,
+  ChevronLeft,
+  ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Tablet,
+  Copy
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { Tenant } from '../types';
-import { ClientPortal } from './ClientPortal';
 import { TenantConfigSettings } from './TenantConfigSettings';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ClientesWorkspace } from './ClientesWorkspace';
+import { TrocaOleoWorkspace } from './TrocaOleoWorkspace';
+import { FluxoCaixaWorkspace } from './FluxoCaixaWorkspace';
+import { VendasBalcaoWorkspace } from './VendasBalcaoWorkspace';
 
 import { 
   saveTenantToFirestore,
@@ -69,7 +83,11 @@ import {
   updateFidelityRedemptionInFirestore,
   subscribeToTenantRedemptions,
   saveFidelityPointsToFirestore,
-  subscribeToTenantClients
+  subscribeToTenantClients,
+  sendBroadcastNotificationFirestore,
+  subscribeToTenantBroadcastNotification,
+  dismissBroadcastNotificationFirestore,
+  BroadcastNotification
 } from '../lib/firebaseService';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -153,13 +171,15 @@ interface TenantWorkspaceProps {
   onExitImpersonation?: () => void;
   onUpdateTenant?: (updatedTenant: Tenant) => void;
   onReplaySplash?: () => void;
+  onOpenTotemMode?: () => void;
 }
 
 export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   tenant: initialTenant,
   onExitImpersonation,
   onUpdateTenant,
-  onReplaySplash
+  onReplaySplash,
+  onOpenTotemMode
 }) => {
   // Carrega informações da empresa diretamente dos dados da nuvem (eliminando isolamento por localStorage)
   const [currentTenant, setCurrentTenant] = useState<Tenant>(initialTenant);
@@ -179,11 +199,96 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, [initialTenant?.id]);
 
 
-  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'clientes' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'portal-cliente' | 'comprar-vitalicio'>('fila');
+  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'caixa' | 'vendas' | 'clientes' | 'troca-oleo' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'comprar-vitalicio' | 'totem'>('fila');
+
+  // Estado do Totem de Autoatendimento
+  const [copiedTotemUrl, setCopiedTotemUrl] = useState(false);
+  const [totemClientsList, setTotemClientsList] = useState<any[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = localStorage.getItem(`saas_totem_clients_${initialTenant.id}`);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Atualiza lista de clientes do totem em tempo de execução
+  useEffect(() => {
+    const handleStorage = () => {
+      try {
+        const raw = localStorage.getItem(`saas_totem_clients_${initialTenant.id}`);
+        if (raw) setTotemClientsList(JSON.parse(raw));
+      } catch {}
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [initialTenant.id]);
+
+  // Selo de Sincronização Celular ⇄ Computador: Oculto por padrão per solicitação ("pode ocultar celular e computador sincronizados")
+  const [showSyncBadge, setShowSyncBadge] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(`saas_show_sync_badge_${initialTenant?.id}`) === 'true';
+  });
+
+  // Notificação transmitida em tempo real via SaaS Root
+  const [activeBroadcast, setActiveBroadcast] = useState<BroadcastNotification | null>(null);
+
+  // Escuta Notificações Transmitidas pelo SaaS Root em Tempo Real (ex: para Box 1000)
+  useEffect(() => {
+    if (!initialTenant?.id) return;
+    const unsub = subscribeToTenantBroadcastNotification(initialTenant.id, (notif) => {
+      setActiveBroadcast(notif);
+    });
+    return () => unsub();
+  }, [initialTenant?.id]);
 
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
+  // Controle de Menu Lateral Recolhível (Desktop Collapsible Sidebar) com persistência local
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('tenant_sidebar_collapsed') === 'true';
+  });
+
+  const toggleSidebar = () => {
+    setIsSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem('tenant_sidebar_collapsed', String(next));
+      return next;
+    });
+  };
+
   const tenant = currentTenant;
+
+  // URL e slug limpo para o link do Totem de Autoatendimento
+  const totemCleanSlug = useMemo(() => {
+    const raw = (tenant.slug && !tenant.slug.toLowerCase().startsWith('t-'))
+      ? tenant.slug
+      : (tenant.nomeFantasia || tenant.name || 'lavajato');
+    
+    return raw
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '')
+      .trim() || 'empresa';
+  }, [tenant.slug, tenant.nomeFantasia, tenant.name]);
+
+  // 🌐 Domínio oficial de produção na Netlify (nunca aponta para ais-dev)
+  const OFFICIAL_NETLIFY_URL = 'https://washautoos.netlify.app';
+  const totemTargetUrl = `${OFFICIAL_NETLIFY_URL}/?empresa=${encodeURIComponent(totemCleanSlug)}&totem=true`;
+
+  const handleCopyTotemUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(totemTargetUrl);
+      setCopiedTotemUrl(true);
+      setTimeout(() => setCopiedTotemUrl(false), 2500);
+      showToast('Link do Totem copiado com sucesso!');
+    } catch {
+      showToast('Erro ao copiar link do Totem.');
+    }
+  };
 
   const defaultStaff: StaffMember[] = [
     { id: 'st-1', name: 'Carlos Silva', initials: 'CS', role: 'Lavador Master', defaultCommission: 15, completedWashes: 0, accumulatedCommission: 0 },
@@ -509,8 +614,55 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const [newProdStock, setNewProdStock] = useState(10);
   const [newProdPrice, setNewProdPrice] = useState(20);
 
-  // Support Message Form
+  // Support Message Form / Transmissão Root
   const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastTargetMode, setBroadcastTargetMode] = useState<'box1000' | 'current'>('box1000');
+  const [broadcastUrgency, setBroadcastUrgency] = useState<'info' | 'alerta' | 'urgente'>('info');
+  const [isSendingBroadcast, setIsSendingBroadcast] = useState(false);
+  const [sentBroadcasts, setSentBroadcasts] = useState<BroadcastNotification[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = localStorage.getItem('saas_sent_broadcasts');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Localiza ou prepara os dados do Box 1000 para alvo prioritário da notificação
+  const box1000Tenant = useMemo(() => {
+    try {
+      const raw = localStorage.getItem('saas_master_tenants');
+      if (raw) {
+        const list: Tenant[] = JSON.parse(raw);
+        const match = list.find(t => 
+          (t.name && t.name.toLowerCase().includes('box 1000')) || 
+          (t.id && t.id.toLowerCase().includes('box1000')) || 
+          (t.domain && t.domain.toLowerCase().includes('box1000'))
+        );
+        if (match) return match;
+      }
+    } catch (_) {}
+    if (tenant.name.toLowerCase().includes('box 1000') || tenant.id.toLowerCase().includes('box1000')) {
+      return tenant;
+    }
+    return {
+      id: 't-box1000',
+      name: 'Box 1000 Lava Jato e Lubrificação',
+      code: 'B1',
+      domain: 'box1000lavajatoelubrificacao.saas.com',
+      plan: 'Pro' as const,
+      status: 'Ativo' as const,
+      endUsersCount: 1,
+      maxUsers: 500,
+      mrrAmount: 299,
+      createdAt: new Date().toLocaleDateString('pt-BR'),
+      contactEmail: 'box1000@lavajato.com',
+      contactPhone: '(11) 99999-1000',
+      ownerName: 'Gerência Box 1000',
+      lastActive: 'Agora mesmo'
+    };
+  }, [tenant]);
 
   // Estados para Compra do Aplicativo (Plano Vitalício)
   const [isUpgradingLifetime, setIsUpgradingLifetime] = useState(false);
@@ -1068,14 +1220,39 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         : 'bg-slate-800 text-slate-400'
     },
     {
+      id: 'caixa' as const,
+      label: 'Controle de Caixa',
+      icon: Wallet,
+      badge: 'Fluxo',
+      badgeColor: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+    },
+    {
+      id: 'vendas' as const,
+      label: 'Vendas & Balcão (PDV)',
+      icon: ShoppingBag,
+      badge: 'Loja',
+      badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+    },
+    {
       id: 'clientes' as const,
       label: 'Clientes & Balcão',
       icon: Users,
       badgeColor: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
     },
     {
+      id: 'totem' as const,
+      label: 'Totem de Autoatendimento',
+      icon: Tablet,
+      badge: 'Tablet',
+      badgeColor: 'bg-purple-500/20 text-purple-300 border border-purple-500/30 font-bold'
+    },
+    {
+      id: 'troca-oleo' as const,
+      label: 'Troca de Óleo',
+      icon: Fuel,
+    },
+    {
       id: 'historico-lavagem' as const,
-
       label: 'Histórico de Lavagem',
       icon: History,
       badge: washHistory.length > 0 ? `${washHistory.length}` : undefined,
@@ -1083,10 +1260,10 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     },
     {
       id: 'produtos' as const,
-      label: 'Produtos & Estoque',
+      label: 'Insumos & Estoque Interno',
       icon: Package,
-      badge: products.filter(p => p.stock <= p.minStock).length > 0 
-        ? `${products.filter(p => p.stock <= p.minStock).length} repor`
+      badge: products.filter(p => p.category === 'insumo' && p.stock <= p.minStock).length > 0 
+        ? `${products.filter(p => p.category === 'insumo' && p.stock <= p.minStock).length} repor`
         : undefined,
       badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
     },
@@ -1101,18 +1278,6 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       id: 'configuracoes-empresa' as const,
       label: 'Configurações da Empresa',
       icon: Building2
-    },
-    {
-      id: 'saas-config' as const,
-      label: 'Módulos SaaS Root',
-      icon: Sliders
-    },
-    {
-      id: 'portal-cliente' as const,
-      label: 'Portal do Cliente',
-      icon: Sparkles,
-      badge: 'Público',
-      badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
     },
     {
       id: 'comprar-vitalicio' as const,
@@ -1202,15 +1367,17 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             </nav>
 
             <div className="pt-4 border-t border-[#1e293b] space-y-2 mt-4">
-              <button
-                onClick={() => {
-                  setShowNewWashModal(true);
-                  setIsMobileMenuOpen(false);
-                }}
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
-              >
-                <Plus className="w-4 h-4" /> Novo Veículo no Pátio
-              </button>
+              {(activeTab === 'fila' || activeTab === 'agendamentos') && (
+                <button
+                  onClick={() => {
+                    setShowNewWashModal(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" /> Novo Veículo no Pátio
+                </button>
+              )}
               {onExitImpersonation && (
                 <button
                   onClick={onExitImpersonation}
@@ -1224,64 +1391,108 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         </div>
       )}
 
-      {/* ================= 2. MENU LATERAL DESKTOP (STICKY LEFT SIDEBAR) ================= */}
-      <aside className="hidden md:flex flex-col w-64 lg:w-72 bg-[#020617] border-r border-[#1e293b] h-screen sticky top-0 shrink-0 z-30">
+      {/* ================= 2. MENU LATERAL DESKTOP (STICKY LEFT SIDEBAR RECOLHÍVEL) ================= */}
+      <aside 
+        className={`hidden md:flex flex-col bg-[#020617] border-r border-[#1e293b] h-screen sticky top-0 shrink-0 z-30 transition-all duration-300 ease-in-out ${
+          isSidebarCollapsed ? 'w-20' : 'w-64 lg:w-72'
+        }`}
+      >
         
-        {/* Topo do Menu Lateral: Logo & Identidade do Lava-Jato */}
-        <div className="p-5 border-b border-[#1e293b]">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-xl text-white shadow-md shadow-blue-600/30 overflow-hidden shrink-0 border border-blue-500/30">
-              {tenant.logoUrl ? (
-                <img src={tenant.logoUrl} alt={tenant.name} className="w-full h-full object-cover" />
-              ) : (
-                <Car className="w-6 h-6" />
+        {/* Topo do Menu Lateral: Logo & Identidade do Lava-Jato com Botão de Recolher/Expandir */}
+        <div className={`border-b border-[#1e293b] transition-all duration-300 ${isSidebarCollapsed ? 'p-3 flex flex-col items-center gap-2' : 'p-4 sm:p-5'}`}>
+          <div className={`flex items-center w-full ${isSidebarCollapsed ? 'flex-col gap-2 justify-center' : 'justify-between gap-2.5'}`}>
+            <div className="flex items-center gap-3 overflow-hidden min-w-0">
+              <div 
+                onClick={isSidebarCollapsed ? toggleSidebar : undefined}
+                className={`w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-white shadow-md shadow-blue-600/30 overflow-hidden shrink-0 border border-blue-500/30 ${
+                  isSidebarCollapsed ? 'cursor-pointer hover:scale-105 transition' : ''
+                }`}
+                title={tenant.nomeFantasia || tenant.name}
+              >
+                {tenant.logoUrl ? (
+                  <img src={tenant.logoUrl} alt={tenant.name} className="w-full h-full object-cover" />
+                ) : (
+                  <Car className="w-5 h-5" />
+                )}
+              </div>
+
+              {!isSidebarCollapsed && (
+                <div className="overflow-hidden flex-1 animate-fade-in min-w-0">
+                  <h1 className="text-sm font-bold text-[#f8fafc] truncate leading-tight" title={tenant.nomeFantasia || tenant.name}>
+                    {tenant.nomeFantasia || tenant.name}
+                  </h1>
+                  <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                      tenant.plan === 'Vitalicio'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-black'
+                        : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    }`}>
+                      {tenant.plan === 'Vitalicio' ? '👑 Vitalício' : tenant.plan}
+                    </span>
+                    <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.2 rounded font-mono truncate max-w-[100px]" title={tenant.domain}>
+                      {tenant.domain}
+                    </span>
+                  </div>
+                </div>
               )}
             </div>
-            <div className="overflow-hidden flex-1">
-              <h1 className="text-sm font-bold text-[#f8fafc] truncate leading-tight" title={tenant.nomeFantasia || tenant.name}>
-                {tenant.nomeFantasia || tenant.name}
-              </h1>
-              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
-                  tenant.plan === 'Vitalicio'
-                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-black'
-                    : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                }`}>
-                  {tenant.plan === 'Vitalicio' ? '👑 Licença Vitalícia' : tenant.plan}
-                </span>
-                <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.2 rounded font-mono truncate max-w-[110px]" title={tenant.domain}>
-                  {tenant.domain}
-                </span>
-              </div>
-            </div>
+
+            {/* Botão de Recolher/Expandir no Topo do Menu Lateral */}
+            <button
+              onClick={toggleSidebar}
+              className={`p-1.5 rounded-lg bg-[#0f172a] hover:bg-slate-800 text-slate-400 hover:text-white border border-[#1e293b] transition cursor-pointer shrink-0 ${
+                isSidebarCollapsed ? 'w-8 h-8 flex items-center justify-center mt-1' : ''
+              }`}
+              title={isSidebarCollapsed ? "Expandir Menu Lateral (Mais espaço de visualização)" : "Recolher Menu Lateral (Mais espaço de tela)"}
+            >
+              {isSidebarCollapsed ? (
+                <ChevronRight className="w-4 h-4 text-blue-400" />
+              ) : (
+                <ChevronLeft className="w-4 h-4" />
+              )}
+            </button>
           </div>
         </div>
 
         {/* Banner de Aquisição do App / Licença Vitalícia */}
         {tenant.plan !== 'Vitalicio' && (
-          <div className="mx-3 mt-3 mb-1 p-3 bg-gradient-to-br from-amber-950/30 via-slate-900 to-amber-950/20 border border-amber-500/40 rounded-xl relative overflow-hidden group">
-            <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs mb-1">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-              <span>Comprar o Aplicativo</span>
+          isSidebarCollapsed ? (
+            <div className="px-2 pt-2 flex justify-center">
+              <button
+                onClick={() => setActiveTab('comprar-vitalicio')}
+                className="w-10 h-10 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 flex items-center justify-center shadow-md hover:scale-105 transition cursor-pointer"
+                title="Comprar o Aplicativo Definitivo (Plano Vitalício R$ 4.000)"
+              >
+                <Sparkles className="w-4 h-4 text-slate-950 animate-pulse" />
+              </button>
             </div>
-            <p className="text-[10px] text-slate-300 leading-tight mb-2.5">
-              Livre-se de mensalidades por <strong>R$ 4.000,00</strong> em pagamento único definitivo.
-            </p>
-            <button
-              onClick={() => setActiveTab('comprar-vitalicio')}
-              className="w-full bg-gradient-to-r from-amber-500 to-yellow-400 hover:brightness-105 text-slate-950 font-black text-[11px] py-2 px-2 rounded-lg shadow-md transition flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-slate-950" />
-              Comprar por R$ 4.000
-            </button>
-          </div>
+          ) : (
+            <div className="mx-3 mt-3 mb-1 p-3 bg-gradient-to-br from-amber-950/30 via-slate-900 to-amber-950/20 border border-amber-500/40 rounded-xl relative overflow-hidden group">
+              <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs mb-1">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                <span>Comprar o Aplicativo</span>
+              </div>
+              <p className="text-[10px] text-slate-300 leading-tight mb-2.5">
+                Livre-se de mensalidades por <strong>R$ 4.000,00</strong> em pagamento único definitivo.
+              </p>
+              <button
+                onClick={() => setActiveTab('comprar-vitalicio')}
+                className="w-full bg-gradient-to-r from-amber-500 to-yellow-400 hover:brightness-105 text-slate-950 font-black text-[11px] py-2 px-2 rounded-lg shadow-md transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-slate-950" />
+                Comprar por R$ 4.000
+              </button>
+            </div>
+          )
         )}
 
         {/* Links de Navegação do Menu Lateral */}
-        <div className="p-3 flex-1 overflow-y-auto space-y-1">
-          <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-            Menu Operacional
-          </div>
+        <div className={`flex-1 overflow-y-auto space-y-1 ${isSidebarCollapsed ? 'p-2' : 'p-3'}`}>
+          {!isSidebarCollapsed && (
+            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              Menu Operacional
+            </div>
+          )}
 
           {menuItems.map((item) => {
             const Icon = item.icon;
@@ -1290,20 +1501,29 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
-                className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl font-medium text-xs transition text-left group cursor-pointer ${
+                title={isSidebarCollapsed ? item.label : undefined}
+                className={`w-full flex items-center rounded-xl font-medium text-xs transition group cursor-pointer relative ${
+                  isSidebarCollapsed 
+                    ? 'justify-center p-3' 
+                    : 'justify-between gap-3 px-3 py-2.5 text-left'
+                } ${
                   isActive
                     ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/20'
                     : 'text-slate-400 hover:bg-[#0f172a] hover:text-slate-200'
                 }`}
               >
-                <div className="flex items-center gap-2.5 truncate">
+                <div className={`flex items-center gap-2.5 ${isSidebarCollapsed ? 'justify-center' : 'truncate'}`}>
                   <Icon className={`w-4 h-4 shrink-0 transition-transform group-hover:scale-110 ${isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'}`} />
-                  <span className="truncate">{item.label}</span>
+                  {!isSidebarCollapsed && <span className="truncate">{item.label}</span>}
                 </div>
                 {item.badge !== undefined && (
-                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0 ${isActive ? 'bg-white/20 text-white' : item.badgeColor}`}>
-                    {item.badge}
-                  </span>
+                  isSidebarCollapsed ? (
+                    <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[#020617]" title={`${item.badge} pendente(s)`} />
+                  ) : (
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0 ${isActive ? 'bg-white/20 text-white' : item.badgeColor}`}>
+                      {item.badge}
+                    </span>
+                  )
                 )}
               </button>
             );
@@ -1311,22 +1531,34 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         </div>
 
         {/* Botão de Ação Rápida no Menu Lateral */}
-        <div className="p-4 border-t border-[#1e293b] space-y-2.5 bg-[#020617]/50">
-          <button
-            onClick={() => setShowNewWashModal(true)}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-md shadow-blue-600/20 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" /> Novo Veículo no Pátio
-          </button>
+        <div className={`border-t border-[#1e293b] bg-[#020617]/50 ${isSidebarCollapsed ? 'p-2 space-y-2' : 'p-4 space-y-2.5'}`}>
+          {(activeTab === 'fila' || activeTab === 'agendamentos') && (
+            <button
+              onClick={() => setShowNewWashModal(true)}
+              title="Novo Veículo no Pátio"
+              className={`w-full bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center justify-center transition shadow-md shadow-blue-600/20 cursor-pointer ${
+                isSidebarCollapsed ? 'p-2.5' : 'py-2.5 px-3 gap-2'
+              }`}
+            >
+              <Plus className="w-4 h-4 shrink-0" />
+              {!isSidebarCollapsed && <span>Novo Veículo no Pátio</span>}
+            </button>
+          )}
 
-          <PWAInstallButton compact variant="outline" className="w-full justify-center" />
+          {!isSidebarCollapsed && (
+            <PWAInstallButton compact variant="outline" className="w-full justify-center" />
+          )}
 
           {onExitImpersonation && (
             <button
               onClick={onExitImpersonation}
-              className="w-full bg-[#0f172a] hover:bg-rose-500/10 border border-rose-500/30 text-rose-300 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
+              title="Sair / Trocar Perfil"
+              className={`w-full bg-[#0f172a] hover:bg-rose-500/10 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold flex items-center justify-center transition cursor-pointer ${
+                isSidebarCollapsed ? 'p-2.5' : 'py-2 px-3 gap-2'
+              }`}
             >
-              <LogOut className="w-4 h-4 text-rose-400" /> Sair / Trocar Perfil
+              <LogOut className="w-4 h-4 text-rose-400 shrink-0" />
+              {!isSidebarCollapsed && <span>Sair / Trocar Perfil</span>}
             </button>
           )}
         </div>
@@ -1339,8 +1571,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         <header className="bg-[#0f172a] border-b border-[#1e293b] px-4 sm:px-6 py-3.5 sticky top-0 z-20">
           <div className="flex items-center justify-between gap-4">
             
-            {/* Lado Esquerdo: Botão Mobile Hamburguer + Título da Aba Ativa */}
-            <div className="flex items-center gap-3">
+            {/* Lado Esquerdo: Botão Mobile Hamburguer + Botão Desktop Recolher/Expandir + Título da Aba Ativa */}
+            <div className="flex items-center gap-2 sm:gap-3">
               <button
                 onClick={() => setIsMobileMenuOpen(true)}
                 className="md:hidden text-slate-400 hover:text-white p-2 rounded-lg bg-[#020617] border border-[#1e293b] cursor-pointer"
@@ -1349,14 +1581,29 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 <Menu className="w-5 h-5" />
               </button>
 
+              <button
+                onClick={toggleSidebar}
+                className="hidden md:flex text-slate-400 hover:text-white p-2 rounded-lg bg-[#020617] border border-[#1e293b] hover:border-slate-700 transition cursor-pointer"
+                title={isSidebarCollapsed ? "Expandir Menu Lateral (Mais espaço)" : "Recolher Menu Lateral"}
+                aria-label={isSidebarCollapsed ? "Expandir Menu Lateral" : "Recolher Menu Lateral"}
+              >
+                {isSidebarCollapsed ? (
+                  <PanelLeftOpen className="w-4 h-4 text-blue-400" />
+                ) : (
+                  <PanelLeftClose className="w-4 h-4 text-slate-400 hover:text-white" />
+                )}
+              </button>
+
               <div>
                 <h2 className="text-base sm:text-lg font-bold text-[#f8fafc] flex items-center gap-2">
                   {activeTab === 'fila' && <><Kanban className="w-5 h-5 text-blue-400" /> Fila de Lavagem & Operação de Pátio</>}
                   {activeTab === 'agendamentos' && <><CalendarCheck className="w-5 h-5 text-blue-400" /> Gestão de Agendamentos</>}
+                  {activeTab === 'caixa' && <><Wallet className="w-5 h-5 text-emerald-400" /> Controle de Caixa & Fluxo Financeiro</>}
+                  {activeTab === 'vendas' && <><ShoppingBag className="w-5 h-5 text-amber-400" /> Loja do Balcão & Vendas (PDV)</>}
                   {activeTab === 'clientes' && <><Users className="w-5 h-5 text-cyan-400" /> Clientes & Balcão</>}
+                  {activeTab === 'totem' && <><Tablet className="w-5 h-5 text-purple-400" /> Totem de Autoatendimento (Tablet)</>}
                   {activeTab === 'historico-lavagem' && <><History className="w-5 h-5 text-blue-400" /> Histórico de Lavagem</>}
-
-                  {activeTab === 'produtos' && <><Package className="w-5 h-5 text-blue-400" /> Produtos & Estoque</>}
+                  {activeTab === 'produtos' && <><Package className="w-5 h-5 text-blue-400" /> Insumos & Estoque de Uso Interno</>}
                   {activeTab === 'comissoes' && <><Percent className="w-5 h-5 text-blue-400" /> % Comissões da Equipe</>}
                   {activeTab === 'configuracoes-empresa' && <><Building2 className="w-5 h-5 text-blue-400" /> Configurações da Empresa</>}
                   {activeTab === 'saas-config' && <><Sliders className="w-5 h-5 text-blue-400" /> Módulos SaaS Root</>}
@@ -1365,11 +1612,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </h2>
                 <p className="text-[11px] text-slate-400 hidden sm:flex items-center gap-2">
                   <span>{tenant.nomeFantasia || tenant.name}</span>
-                  <span className="text-slate-600">·</span>
-                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-semibold text-[10px]">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    Celular ⇄ Computador Sincronizados (Nuvem)
-                  </span>
+                  {showSyncBadge && (
+                    <>
+                      <span className="text-slate-600">·</span>
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-semibold text-[10px]">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        Celular ⇄ Computador Sincronizados (Nuvem)
+                      </span>
+                    </>
+                  )}
                 </p>
               </div>
             </div>
@@ -1396,13 +1647,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </div>
               </div>
 
-              <button
-                onClick={() => setShowNewWashModal(true)}
-                className="bg-blue-600 hover:bg-blue-500 text-white px-3 sm:px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow-sm shadow-blue-600/30 cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span className="hidden sm:inline">Novo Veículo</span>
-              </button>
+              {(activeTab === 'fila' || activeTab === 'agendamentos') && (
+                <button
+                  onClick={() => setShowNewWashModal(true)}
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-3 sm:px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow-sm shadow-blue-600/30 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span className="hidden sm:inline">Novo Veículo</span>
+                </button>
+              )}
             </div>
           </div>
         </header>
@@ -2371,26 +2624,35 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           </div>
         )}
 
-        {/* ================= ABA 3: PRODUTOS & ESTOQUE ================= */}
+        {/* ================= ABA 3: INSUMOS & ESTOQUE INTERNO ================= */}
         {activeTab === 'produtos' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0f172a] border border-[#1e293b] p-5 rounded-xl">
               <div>
                 <h3 className="font-bold text-[#f8fafc] text-base flex items-center gap-2">
                   <Package className="w-5 h-5 text-blue-400" />
-                  Controle de Produtos, Insumos de Lavagem & Venda Direta
+                  Insumos & Estoque de Uso Interno (Lavagem & Pátio)
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Gerencie insumos internos de estética automotiva e produtos expostos para venda ao cliente no balcão.
+                  Gerencie produtos consumidos internamente na lavagem e estética automotiva. Para produtos vendidos ao cliente, use a dashboard de Vendas.
                 </p>
               </div>
-
-              <button
-                onClick={() => setShowNewProductModal(true)}
-                className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition"
-              >
-                <Plus className="w-4 h-4" /> Cadastrar Produto
-              </button>
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('vendas')}
+                  className="bg-amber-500 hover:bg-amber-400 text-slate-950 px-3.5 py-2 rounded-lg text-xs font-black flex items-center gap-1.5 transition shadow-md shadow-amber-500/20 cursor-pointer"
+                >
+                  <ShoppingBag className="w-4 h-4" /> Ir para Vendas & Balcão (PDV)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowNewProductModal(true)}
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" /> Cadastrar Insumo
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2416,7 +2678,6 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                         <p className="text-xs font-semibold text-slate-200">{prod.name}</p>
                         <p className="text-[11px] text-slate-500 mt-0.5">Estoque: {prod.stock} {prod.unit} restantes</p>
                       </div>
-
                       {prod.stock <= prod.minStock ? (
                         <span className="text-[10px] px-2.5 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/20 rounded-full font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3" /> Estoque Baixo
@@ -2431,38 +2692,44 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </div>
               </div>
 
-              {/* Painel Produtos de Venda Direta */}
-              <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl p-5 space-y-4">
-                <div className="flex justify-between items-center border-b border-[#1e293b] pb-3">
-                  <div>
-                    <h3 className="font-bold text-slate-100 flex items-center gap-2 text-sm">
-                      <ShoppingBag className="w-4 h-4 text-emerald-400" /> Produtos para Venda no Balcão
-                    </h3>
-                    <p className="text-[11px] text-slate-400">Acessórios e cosméticos vendidos diretamente ao cliente.</p>
+              {/* Painel de Transição: Loja & Vendas de Balcão */}
+              <div className="bg-gradient-to-br from-amber-950/20 via-[#0f172a] to-[#0f172a] border border-amber-500/40 rounded-xl p-5 space-y-4 flex flex-col justify-between">
+                <div>
+                  <div className="flex justify-between items-center border-b border-[#1e293b] pb-3">
+                    <div>
+                      <h3 className="font-bold text-amber-300 flex items-center gap-2 text-sm">
+                        <ShoppingBag className="w-4 h-4 text-amber-400" /> Loja & Vendas de Balcão (PDV)
+                      </h3>
+                      <p className="text-[11px] text-slate-400">Produtos comerciais vendidos diretamente aos clientes.</p>
+                    </div>
+                    <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 font-bold">
+                      Dashboard Exclusiva
+                    </span>
                   </div>
-                  <span className="text-xs text-slate-400 font-bold">
-                    {products.filter(p => p.category === 'venda').length} Itens
-                  </span>
+                  
+                  <div className="space-y-3 pt-3">
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Conforme solicitado, os produtos para venda no balcão agora contam com uma <strong>dashboard exclusiva de vendas</strong> com:
+                    </p>
+                    <ul className="text-xs text-slate-400 space-y-1.5 list-disc list-inside">
+                      <li>Catálogo dedicado para produtos de venda (preço de custo, margem de lucro e preço final).</li>
+                      <li>Frente de Caixa (PDV) com carrinho de compras rápido e cálculo de troco.</li>
+                      <li>Baixa automática no estoque ao finalizar a venda.</li>
+                      <li>Lançamento automático da receita no <strong>Controle de Caixa</strong>.</li>
+                      <li>Emissão de comprovante e recibo para WhatsApp.</li>
+                    </ul>
+                  </div>
                 </div>
 
-                <div className="space-y-3">
-                  {products.filter(p => p.category === 'venda').map(prod => (
-                    <div key={prod.id} className="flex items-center justify-between p-3.5 bg-[#020617] rounded-lg border border-[#1e293b]">
-                      <div>
-                        <p className="text-xs font-semibold text-slate-200">{prod.name}</p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          Preço: <strong className="text-emerald-400">R$ {prod.unitPrice?.toFixed(2)}</strong> | Estoque: {prod.stock} {prod.unit}
-                        </p>
-                      </div>
-
-                      <button
-                        onClick={() => handleSellProduct(prod)}
-                        className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-1.5 rounded transition shadow-sm shadow-blue-600/30 flex items-center gap-1"
-                      >
-                        <ShoppingBag className="w-3.5 h-3.5" /> Vender
-                      </button>
-                    </div>
-                  ))}
+                <div className="pt-4 border-t border-[#1e293b]">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('vendas')}
+                    className="w-full py-3 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 text-slate-950 font-black rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-amber-500/20"
+                  >
+                    <ShoppingBag className="w-4 h-4" />
+                    <span>Acessar Dashboard de Vendas & Balcão (PDV)</span>
+                  </button>
                 </div>
               </div>
 
@@ -2554,6 +2821,23 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           />
         )}
 
+        {/* ================= ABA: CONTROLE DE CAIXA & FLUXO FINANCEIRO ================= */}
+        {activeTab === 'caixa' && (
+          <FluxoCaixaWorkspace
+            tenant={tenant}
+            washHistory={washHistory}
+            onToast={showToast}
+          />
+        )}
+
+        {/* ================= ABA: LOJA DO BALCÃO & VENDAS (PDV) ================= */}
+        {activeTab === 'vendas' && (
+          <VendasBalcaoWorkspace
+            tenant={tenant}
+            onToast={showToast}
+          />
+        )}
+
         {/* ================= ABA: GESTÃO DE CLIENTES & BALCÃO ================= */}
         {activeTab === 'clientes' && (
           <ClientesWorkspace 
@@ -2562,12 +2846,284 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           />
         )}
 
+        {/* ================= ABA: TOTEM DE AUTOATENDIMENTO (TABLET) ================= */}
+        {activeTab === 'totem' && (
+          <div className="space-y-6">
+            
+            {/* Header Hero Banner */}
+            <div className="bg-gradient-to-r from-purple-950/40 via-slate-900 to-indigo-950/30 border border-purple-500/30 rounded-2xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div className="flex items-start gap-4">
+                  <div className="w-14 h-14 rounded-2xl bg-purple-600/20 text-purple-400 border border-purple-500/30 flex items-center justify-center shrink-0 shadow-lg shadow-purple-600/20">
+                    <Tablet className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-xl sm:text-2xl font-black text-white">
+                        Totem de Autoatendimento (Tablet)
+                      </h2>
+                      <span className="bg-purple-500/20 text-purple-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-purple-500/30">
+                        NOVO RECURSO
+                      </span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
+                      Transforme qualquer tablet em um terminal de cadastro para seus clientes na recepção do seu lava-jato. O próprio cliente cadastra seu nome, WhatsApp, veículo e cria sua senha, recebendo na hora o QR Code para baixar o app no celular!
+                    </p>
+                  </div>
+                </div>
+
+                <div className="shrink-0 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  {onOpenTotemMode && (
+                    <button
+                      onClick={onOpenTotemMode}
+                      className="px-5 py-3.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition shadow-lg shadow-purple-600/30 cursor-pointer active:scale-[0.98]"
+                    >
+                      <Tablet className="w-4 h-4" />
+                      <span>Iniciar Totem neste Aparelho</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Cards de Acesso Rápido ao Totem */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              
+              {/* Card 1: Abrir no Tablet via Link */}
+              <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-5 space-y-4 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-bold text-slate-100 mb-1">
+                    <Smartphone className="w-4 h-4 text-purple-400" />
+                    <span>Link Direto para o Tablet</span>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Abra este link no navegador (Chrome/Safari) do seu tablet e fixe na tela inicial para usar como Totem.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="p-3 bg-[#020617] border border-slate-800 rounded-xl font-mono text-[11px] text-purple-300 truncate select-all">
+                    {totemTargetUrl}
+                  </div>
+                  <button
+                    onClick={handleCopyTotemUrl}
+                    className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer ${
+                      copiedTotemUrl
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                    }`}
+                  >
+                    {copiedTotemUrl ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Link Copiado com Sucesso!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4" />
+                        <span>Copiar Link do Totem</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Card 2: QR Code para Configurar o Tablet */}
+              <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-5 space-y-3 flex flex-col items-center justify-between text-center">
+                <div>
+                  <div className="flex items-center justify-center gap-2 text-sm font-bold text-slate-100 mb-1">
+                    <QrCode className="w-4 h-4 text-cyan-400" />
+                    <span>Escanear com o Tablet</span>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Aponte a câmera do tablet para este QR Code para abrir o Totem instantaneamente.
+                  </p>
+                </div>
+
+                <div className="bg-white p-3 rounded-xl shadow-lg border-2 border-slate-800">
+                  <QRCodeSVG
+                    value={totemTargetUrl}
+                    size={130}
+                    level="H"
+                    marginSize={1}
+                  />
+                </div>
+
+                <span className="text-[11px] text-slate-500 font-mono">
+                  {tenant.slug || tenant.id}
+                </span>
+              </div>
+
+              {/* Card 3: Configuração & Segurança (PIN de Saída) */}
+              <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-5 space-y-4 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-bold text-slate-100 mb-1">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span>PIN de Saída do Totem</span>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Código de segurança necessário para fechar a tela de autoatendimento e voltar ao painel administrativo.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-[#020617] border border-slate-800 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-400">PIN Ativo de Fábrica:</span>
+                    <span className="font-mono font-black text-emerald-400 text-lg bg-emerald-500/10 px-3 py-0.5 rounded-lg border border-emerald-500/20">
+                      {tenant.tempPassword || '1234'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    Você pode digitar este código a qualquer momento no botão de cadeado superior do Totem.
+                  </p>
+                </div>
+
+                <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  <span>Proteção ativa contra toques indevidos de clientes</span>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Como Funciona o Totem (Passo a Passo Ilustrado) */}
+            <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 space-y-4">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                Como Funciona na Prática no seu Lava-Jato
+              </h3>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="p-4 bg-[#020617] border border-slate-800/80 rounded-xl space-y-2">
+                  <div className="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 font-bold flex items-center justify-center text-sm">
+                    1
+                  </div>
+                  <h4 className="font-bold text-xs text-slate-200">Cliente Chega no Lava-Jato</h4>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Na recepção ou pátio, o cliente toca na tela do tablet com a logo do seu lava-jato.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-[#020617] border border-slate-800/80 rounded-xl space-y-2">
+                  <div className="w-8 h-8 rounded-lg bg-cyan-600/20 text-cyan-400 font-bold flex items-center justify-center text-sm">
+                    2
+                  </div>
+                  <h4 className="font-bold text-xs text-slate-200">Cadastro de Veículo & Dados</h4>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    O próprio cliente digita nome, WhatsApp, modelo do carro e placa em botões grandes e acessíveis.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-[#020617] border border-slate-800/80 rounded-xl space-y-2">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-600/20 text-indigo-400 font-bold flex items-center justify-center text-sm">
+                    3
+                  </div>
+                  <h4 className="font-bold text-xs text-slate-200">Criação da Senha de Acesso</h4>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Ele cria a senha dele ali mesmo no tablet, garantindo acesso privativo ao portal e histórico de lavagens.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-[#020617] border border-slate-800/80 rounded-xl space-y-2">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-600/20 text-emerald-400 font-bold flex items-center justify-center text-sm">
+                    4
+                  </div>
+                  <h4 className="font-bold text-xs text-slate-200">Escaneia o QR Code & Baixa o App</h4>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    O totem exibe o QR Code dinâmico. O cliente aponta a câmera, instala o app no celular e entra com a senha que acabou de criar!
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Lista de Cadastros Recentes Realizados pelo Totem */}
+            <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-purple-400" />
+                  <h3 className="text-base font-bold text-white">Cadastros Realizados no Totem</h3>
+                </div>
+                <span className="text-xs bg-purple-500/10 text-purple-300 border border-purple-500/20 px-2.5 py-1 rounded-full font-bold">
+                  {totemClientsList.length} clientes cadastrados
+                </span>
+              </div>
+
+              {totemClientsList.length === 0 ? (
+                <div className="py-12 text-center space-y-3">
+                  <Tablet className="w-10 h-10 text-slate-600 mx-auto" />
+                  <p className="text-xs text-slate-400">
+                    Nenhum cadastro realizado via Totem ainda. Inicie o modo Totem no seu tablet para começar a receber cadastros automáticos!
+                  </p>
+                  {onOpenTotemMode && (
+                    <button
+                      onClick={onOpenTotemMode}
+                      className="px-4 py-2 bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 border border-purple-500/40 rounded-xl text-xs font-bold transition cursor-pointer"
+                    >
+                      Testar Modo Totem Agora
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-[#020617] text-slate-400 uppercase font-bold text-[10px] border-b border-slate-800">
+                      <tr>
+                        <th className="py-3 px-4">Cliente</th>
+                        <th className="py-3 px-4">WhatsApp</th>
+                        <th className="py-3 px-4">Veículo & Placa</th>
+                        <th className="py-3 px-4">Data do Cadastro</th>
+                        <th className="py-3 px-4 text-right">Origem</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {totemClientsList.map((c: any) => (
+                        <tr key={c.id || c.email} className="hover:bg-slate-800/20 transition">
+                          <td className="py-3 px-4 font-bold text-slate-200">
+                            <div>{c.name || 'Cliente'}</div>
+                            <div className="text-[10px] text-slate-400 font-mono font-normal">{c.email}</div>
+                          </td>
+                          <td className="py-3 px-4 text-emerald-400 font-mono">
+                            {c.phone || '-'}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="font-semibold text-slate-300">{c.vehicle?.modelo || 'Veículo'}</span>
+                            <span className="ml-2 px-1.5 py-0.5 bg-slate-900 text-slate-300 font-mono font-bold text-[10px] rounded border border-slate-700">
+                              {c.vehicle?.placa || '-'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-400 font-mono">
+                            {c.createdAt ? new Date(c.createdAt).toLocaleDateString('pt-BR') : 'Hoje'}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <span className="px-2 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-300 text-[10px] font-bold">
+                              Totem Tablet
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+          </div>
+        )}
+
+        {/* ================= ABA: TROCA DE ÓLEO & LUBRIFICAÇÃO ================= */}
+        {activeTab === 'troca-oleo' && (
+          <TrocaOleoWorkspace
+            tenant={tenant}
+            onToast={showToast}
+          />
+        )}
+
 
         {/* ================= ABA 6: MÓDULOS SAAS ROOT ================= */}
         {activeTab === 'saas-config' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
-            {/* Override Toggles */}
+            {/* Override Toggles & Visibilidade de Selos */}
             <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl p-5 space-y-4">
               <div className="border-b border-[#1e293b] pb-3">
                 <h3 className="text-base font-bold text-[#f8fafc] flex items-center gap-2">
@@ -2579,7 +3135,44 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </p>
               </div>
 
-              <div className="space-y-3">
+              {/* Visibilidade do Selo "Celular ⇄ Computador Sincronizados" */}
+              <div className="p-3.5 bg-[#020617] border border-cyan-500/30 rounded-xl space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2 text-xs font-bold text-slate-100">
+                      <Smartphone className="w-4 h-4 text-cyan-400" />
+                      <span>Selo "Celular ⇄ Computador Sincronizados"</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      {showSyncBadge 
+                        ? 'Atualmente visível no cabeçalho do painel operacional.' 
+                        : 'Atualmente oculto (interface limpa sem indicador de dispositivos).'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !showSyncBadge;
+                      setShowSyncBadge(next);
+                      localStorage.setItem(`saas_show_sync_badge_${tenant.id}`, next ? 'true' : 'false');
+                      showToast(next ? 'Selo de sincronização ativado no topo!' : 'Selo de sincronização ocultado do cabeçalho!');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer shrink-0 ${
+                      showSyncBadge 
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-600/30' 
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+                    }`}
+                  >
+                    {showSyncBadge ? 'Visível (Exibindo)' : 'Oculto (Padrão)'}
+                  </button>
+                </div>
+                <div className="text-[10px] text-slate-500 flex items-center gap-1.5 pt-1 border-t border-slate-900">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  <span>Configuração solicitada: o selo pode permanecer oculto para não sobrecarregar o visual do operador.</span>
+                </div>
+              </div>
+
+              <div className="space-y-2.5">
                 {modules.map(mod => (
                   <div key={mod.id} className="p-3 bg-[#020617] border border-[#1e293b] rounded-lg flex items-center justify-between">
                     <div className="flex items-center gap-2 text-xs">
@@ -2588,8 +3181,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     </div>
                     <button
                       onClick={() => setModules(prev => prev.map(m => m.id === mod.id ? { ...m, enabled: !m.enabled } : m))}
-                      className={`px-3 py-1 rounded text-xs font-bold transition ${
-                        mod.enabled ? 'bg-indigo-600 text-white' : 'bg-[#1e293b] text-slate-400'
+                      className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer ${
+                        mod.enabled ? 'bg-indigo-600 text-white shadow-sm' : 'bg-[#1e293b] text-slate-400'
                       }`}
                     >
                       {mod.enabled ? 'Ativo' : 'Desativado'}
@@ -2599,69 +3192,209 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Support Message */}
+            {/* Transmissão de Notificações em Tempo Real (Box 1000 & Tenants) */}
             <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl p-5 space-y-4 flex flex-col justify-between">
               <div>
                 <div className="border-b border-[#1e293b] pb-3 mb-4">
                   <h3 className="text-base font-bold text-[#f8fafc] flex items-center gap-2">
-                    <Send className="w-4 h-4 text-indigo-400" />
-                    Transmitir Notificação para Usuários de {tenant.name}
+                    <Radio className="w-4 h-4 text-indigo-400 animate-pulse" />
+                    Transmitir Notificação em Tempo Real (SaaS Root)
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Exiba um comunicado prioritário no topo do painel operacional deste cliente.
+                    Exiba comunicados operacionais ou avisos prioritários diretamente no topo do painel dos operadores.
                   </p>
                 </div>
 
-                <form onSubmit={(e) => {
+                {/* Seleção de Destinatário */}
+                <div className="space-y-2 mb-3">
+                  <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                    Destino da Notificação
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBroadcastTargetMode('box1000')}
+                      className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                        broadcastTargetMode === 'box1000'
+                          ? 'bg-indigo-600/25 border-indigo-500 text-indigo-200 shadow-md shadow-indigo-600/20'
+                          : 'bg-[#020617] border-[#1e293b] text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>🎯 Box 1000</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/40 text-indigo-200 font-mono font-black">
+                        Alvo Principal
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setBroadcastTargetMode('current')}
+                      className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                        broadcastTargetMode === 'current'
+                          ? 'bg-indigo-600/25 border-indigo-500 text-indigo-200 shadow-md shadow-indigo-600/20'
+                          : 'bg-[#020617] border-[#1e293b] text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Building2 className="w-3.5 h-3.5" />
+                      <span className="truncate">{tenant.name || 'Esta Empresa'}</span>
+                    </button>
+                  </div>
+
+                  <div className="text-[11px] text-slate-300 bg-[#020617] p-2.5 rounded-lg border border-[#1e293b] flex items-center justify-between">
+                    <span className="text-slate-400">Destinatário:</span>
+                    <strong className="text-indigo-400 font-semibold truncate ml-2">
+                      {broadcastTargetMode === 'box1000'
+                        ? (box1000Tenant.nomeFantasia || box1000Tenant.name)
+                        : (tenant.nomeFantasia || tenant.name)}
+                    </strong>
+                  </div>
+                </div>
+
+                {/* Nível de Urgência */}
+                <div className="space-y-1.5 mb-3">
+                  <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                    Nível de Urgência
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'info' as const, label: 'Informativo', color: 'border-indigo-500 text-indigo-300 bg-indigo-500/20' },
+                      { id: 'alerta' as const, label: 'Alerta Operacional', color: 'border-amber-500 text-amber-300 bg-amber-500/20' },
+                      { id: 'urgente' as const, label: 'Crítico / Urgente', color: 'border-rose-500 text-rose-300 bg-rose-500/20' }
+                    ].map(u => (
+                      <button
+                        key={u.id}
+                        type="button"
+                        onClick={() => setBroadcastUrgency(u.id)}
+                        className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition text-center cursor-pointer ${
+                          broadcastUrgency === u.id ? u.color : 'border-[#1e293b] bg-[#020617] text-slate-500 hover:text-slate-300'
+                        }`}
+                      >
+                        {u.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Modelos Rápidos de Mensagem */}
+                <div className="space-y-1.5 mb-3">
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                    Modelos Rápidos para Box 1000
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      'Aviso aos operadores do Box 1000: Manutenção programada às 22h.',
+                      'Novo módulo de Troca de Óleo e Lubrificação ativado no Box 1000.',
+                      'Comunicado Root: Sincronização em nuvem Firestore 100% ativa.',
+                      'Lembrete: realizar fechamento das comissões do dia.'
+                    ].map((preset, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setBroadcastMessage(preset)}
+                        className="text-[10px] bg-[#020617] hover:bg-slate-900 border border-[#1e293b] text-slate-400 hover:text-indigo-300 px-2 py-1 rounded-md transition cursor-pointer"
+                      >
+                        + {preset.slice(0, 32)}...
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <form onSubmit={async (e) => {
                   e.preventDefault();
-                  if (!broadcastMessage) return;
-                  showToast(`Notificação enviada para os usuários de ${tenant.name}!`);
-                  setBroadcastMessage('');
+                  if (!broadcastMessage.trim()) return;
+                  setIsSendingBroadcast(true);
+
+                  const targetObj = broadcastTargetMode === 'box1000' ? box1000Tenant : tenant;
+                  try {
+                    const sent = await sendBroadcastNotificationFirestore({
+                      tenantId: targetObj.id,
+                      tenantName: targetObj.nomeFantasia || targetObj.name,
+                      message: broadcastMessage,
+                      urgency: broadcastUrgency,
+                      sender: 'Administrador SaaS Root'
+                    });
+
+                    setSentBroadcasts(prev => {
+                      const updated = [sent, ...prev.filter(b => b.id !== sent.id)];
+                      localStorage.setItem('saas_sent_broadcasts', JSON.stringify(updated.slice(0, 10)));
+                      return updated;
+                    });
+
+                    // Se enviou para o tenant atual, atualiza de imediato na tela
+                    if (targetObj.id === tenant.id) {
+                      setActiveBroadcast(sent);
+                    }
+
+                    showToast(`Notificação transmitida com sucesso para os usuários de ${targetObj.nomeFantasia || targetObj.name}!`);
+                    setBroadcastMessage('');
+                  } catch (err: any) {
+                    showToast('Erro ao transmitir: ' + (err.message || 'Falha de envio'));
+                  } finally {
+                    setIsSendingBroadcast(false);
+                  }
                 }} className="space-y-3">
                   <textarea
-                    rows={4}
+                    rows={3}
                     value={broadcastMessage}
                     onChange={(e) => setBroadcastMessage(e.target.value)}
-                    placeholder="Ex: Atualização programada do sistema de lava-rápido às 22h."
-                    className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 resize-none"
+                    placeholder="Digite o comunicado oficial para os operadores e gerência do lava-jato..."
+                    className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 resize-none placeholder:text-slate-600"
                   />
 
                   <button
                     type="submit"
-                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm shadow-indigo-600/30"
+                    disabled={isSendingBroadcast || !broadcastMessage.trim()}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm shadow-indigo-600/30 cursor-pointer"
                   >
-                    <Send className="w-3.5 h-3.5" /> Enviar Aviso de Suporte
+                    <Send className="w-3.5 h-3.5" />
+                    <span>
+                      {isSendingBroadcast
+                        ? 'Transmitindo via Firestore...'
+                        : `Transmitir Notificação para ${broadcastTargetMode === 'box1000' ? 'Box 1000' : tenant.name}`}
+                    </span>
                   </button>
                 </form>
+
+                {/* Lista de Notificações Transmitidas */}
+                {sentBroadcasts.length > 0 && (
+                  <div className="mt-4 pt-3 border-t border-[#1e293b] space-y-2">
+                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      <span>Últimas Transmissões Ativas</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSentBroadcasts([]);
+                          localStorage.removeItem('saas_sent_broadcasts');
+                        }}
+                        className="text-slate-500 hover:text-slate-300 transition cursor-pointer"
+                      >
+                        Limpar Histórico
+                      </button>
+                    </div>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                      {sentBroadcasts.slice(0, 3).map((b) => (
+                        <div key={b.id} className="p-2 bg-[#020617] border border-[#1e293b] rounded-lg text-xs flex items-center justify-between gap-2">
+                          <div className="truncate">
+                            <span className="font-bold text-indigo-300 mr-1.5">[{b.tenantName}]:</span>
+                            <span className="text-slate-300">{b.message}</span>
+                          </div>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-bold border border-emerald-500/20 shrink-0">
+                            Entregue
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              <div className="pt-4 border-t border-[#1e293b] text-[11px] text-slate-500">
-                Ações gravadas na auditoria de segurança ROOT.
+              <div className="pt-4 border-t border-[#1e293b] text-[11px] text-slate-500 flex items-center justify-between">
+                <span>Auditoria Root SaaS ativa</span>
+                <span className="text-emerald-400 font-mono">Firestore RealTime Sync</span>
               </div>
             </div>
 
           </div>
-        )}
-
-        {/* ================= ABA 6: PORTAL DO CLIENTE (VISÃO PÚBLICA) ================= */}
-        {activeTab === 'portal-cliente' && (
-          <ClientPortal
-            tenant={tenant}
-            onNewAppointmentCreated={(newApp) => {
-              const createdAppointment: CustomerAppointment = {
-                id: `app-${Date.now()}`,
-                dateTime: newApp.dateTime,
-                clientName: newApp.clientName,
-                vehicle: newApp.vehicle,
-                plate: newApp.plate,
-                service: newApp.service,
-                price: newApp.price,
-                status: 'Pendente'
-              };
-              setAppointments(prev => [createdAppointment, ...prev]);
-              showToast(`Agendamento de ${newApp.clientName} recebido no Portal! Aparece na aba Agendamentos.`);
-            }}
-          />
         )}
 
         {/* ================= ABA 7: COMPRA DO APLICATIVO (PLANO VITALÍCIO R$ 4.000) ================= */}

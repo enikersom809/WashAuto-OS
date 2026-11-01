@@ -802,10 +802,10 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                 <div>
                   <span className="text-[10px] text-slate-500 uppercase font-bold block mb-0.5">Endereço de Acesso (URL)</span>
                   <div className="flex items-center justify-between text-slate-200 font-mono text-xs">
-                    <span className="truncate">{window.location.origin}</span>
+                    <span className="truncate">https://washautoos.netlify.app</span>
                     <button
                       type="button"
-                      onClick={() => navigator.clipboard.writeText(window.location.origin)}
+                      onClick={() => navigator.clipboard.writeText('https://washautoos.netlify.app')}
                       className="text-slate-400 hover:text-white ml-2 cursor-pointer p-1"
                       title="Copiar link"
                     >
@@ -867,7 +867,7 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    const text = `🚗 *Acesso ao Sistema do Lava-Jato - ${credentialTenant.name}*\n\nOlá! Seguem os dados para acessar seu painel de gestão:\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${credentialTenant.contactEmail}\n🔑 *Senha de Acesso:* ${credentialTenant.tempPassword || 'Utilize a senha definida no cadastro'}\n\nFaça login clicando em "Login Empresa".`;
+                    const text = `🚗 *Acesso ao Sistema do Lava-Jato - ${credentialTenant.name}*\n\nOlá! Seguem os dados para acessar seu painel de gestão:\n\n🌐 *Link de Acesso:* https://washautoos.netlify.app\n📧 *E-mail:* ${credentialTenant.contactEmail}\n🔑 *Senha de Acesso:* ${credentialTenant.tempPassword || 'Utilize a senha definida no cadastro'}\n\nFaça login clicando em "Login Empresa".`;
                     navigator.clipboard.writeText(text);
                     setCopiedCredentialFull(true);
                     setTimeout(() => setCopiedCredentialFull(false), 2500);
@@ -884,7 +884,7 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
 
                 <a
                   href={`https://wa.me/${cleanDigits(credentialTenant.contactPhone || '')}?text=${encodeURIComponent(
-                    `🚗 *Acesso ao Sistema do Lava-Jato - ${credentialTenant.name}*\n\nOlá! Seguem os dados para acessar seu painel de gestão:\n\n🌐 *Link de Acesso:* ${window.location.origin}\n📧 *E-mail:* ${credentialTenant.contactEmail}\n🔑 *Senha de Acesso:* ${credentialTenant.tempPassword || 'Utilize a senha definida no cadastro'}\n\nFaça login clicando em "Login Empresa".`
+                    `🚗 *Acesso ao Sistema do Lava-Jato - ${credentialTenant.name}*\n\nOlá! Seguem os dados para acessar seu painel de gestão:\n\n🌐 *Link de Acesso:* https://washautoos.netlify.app\n📧 *E-mail:* ${credentialTenant.contactEmail}\n🔑 *Senha de Acesso:* ${credentialTenant.tempPassword || 'Utilize a senha definida no cadastro'}\n\nFaça login clicando em "Login Empresa".`
                   )}`}
                   target="_blank"
                   rel="noopener noreferrer"

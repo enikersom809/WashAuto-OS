@@ -2,6 +2,7 @@ import {
   collection, 
   doc, 
   setDoc, 
+  addDoc,
   getDoc, 
   getDocs, 
   updateDoc, 
@@ -12,16 +13,22 @@ import {
   where,
   limit
 } from 'firebase/firestore';
+import { initializeApp, getApps } from 'firebase/app';
 import { 
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
   signInAnonymously,
+  sendPasswordResetEmail,
   updateProfile, 
   signOut,
+  setPersistence,
+  browserSessionPersistence,
+  getAuth,
   type User
 } from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { db, auth, OperationType, handleFirestoreError } from './firebase';
-import { Tenant } from '../types';
+import { Tenant, OilProductItem, OilChangeRecord, CashTransaction, CashRegisterSession, SaleProductItem, CounterSaleRecord } from '../types';
 
 /**
  * =================================================================
@@ -489,6 +496,11 @@ export async function registerClientInFirebaseAuth(params: {
     : `Cliente#${normalizedEmail.split('@')[0]}123`;
 
   try {
+    if (typeof window !== 'undefined') {
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (_) {}
+    }
     let userRecord: User;
 
     try {
@@ -610,6 +622,197 @@ export async function registerClientInFirebaseAuth(params: {
   }
 }
 
+export interface TotemRegistrationParams {
+  name: string;
+  email: string;
+  phone: string;
+  password?: string;
+  tenantId: string;
+  vehicle: {
+    tipo?: 'Carro' | 'Moto' | 'SUV' | 'Picape';
+    marca?: string;
+    modelo: string;
+    cor?: string;
+    placa: string;
+    ano?: string;
+  };
+}
+
+export interface TotemRegistrationResult {
+  success: boolean;
+  clientUid: string;
+  errorMessage?: string;
+  isExistingUser?: boolean;
+}
+
+/**
+ * 📱 Cadastro de Cliente no Totem (Autoatendimento Tablet)
+ * Registra o usuário no Firebase Auth sem deslogar ou alterar a sessão ativa do tablet/totem,
+ * salva os dados cadastrais em /usuarios, /clientes e na subcoleção do lava-jato.
+ */
+export async function registerClientFromTotem(params: TotemRegistrationParams): Promise<TotemRegistrationResult> {
+  const normalizedEmail = params.email.trim().toLowerCase();
+  const effectivePassword = params.password && params.password.trim().length >= 6
+    ? params.password.trim()
+    : `Cliente#${normalizedEmail.split('@')[0]}123`;
+  
+  let clientUid = `c_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  let isExisting = false;
+
+  // 1. Cria credenciais de acesso no Firebase Auth usando uma instância secundária isolada
+  // (Isso impede que o totem seja deslogado ou que a sessão do tablet mude para o cliente!)
+  try {
+    const secondaryAppName = 'WashAutoTotemAuthApp';
+    let secondaryApp = getApps().find(a => a.name === secondaryAppName);
+    if (!secondaryApp) {
+      secondaryApp = initializeApp({
+        apiKey: firebaseConfig.apiKey || 'AIzaSyBkoQseuHZuIZDKFTRtpgqOlI7BCVP95yY',
+        authDomain: firebaseConfig.authDomain || 'meulavajatogestaoparalavajato.firebaseapp.com',
+        projectId: firebaseConfig.projectId || 'meulavajatogestaoparalavajato',
+        storageBucket: firebaseConfig.storageBucket || 'meulavajatogestaoparalavajato.firebasestorage.app',
+        messagingSenderId: firebaseConfig.messagingSenderId || '372328060896',
+        appId: firebaseConfig.appId || '1:372328060896:web:596b7467604aba2a78bd85'
+      }, secondaryAppName);
+    }
+    const secondaryAuth = getAuth(secondaryApp);
+
+    try {
+      const cred = await withTimeout(
+        createUserWithEmailAndPassword(secondaryAuth, normalizedEmail, effectivePassword),
+        6000
+      );
+      if (cred && cred.user) {
+        clientUid = cred.user.uid;
+        updateProfile(cred.user, { displayName: params.name }).catch(() => {});
+        await signOut(secondaryAuth);
+      }
+    } catch (authErr: any) {
+      if (authErr.code === 'auth/email-already-in-use') {
+        isExisting = true;
+        try {
+          const loginCred = await withTimeout(
+            signInWithEmailAndPassword(secondaryAuth, normalizedEmail, effectivePassword),
+            6000
+          );
+          if (loginCred && loginCred.user) {
+            clientUid = loginCred.user.uid;
+            await signOut(secondaryAuth);
+          }
+        } catch (_) {
+          // Mantém clientUid gerado
+        }
+      } else {
+        console.warn('[Totem] Aviso ao registrar no Auth secundário:', authErr);
+      }
+    }
+  } catch (secErr) {
+    console.warn('[Totem] Erro no app secundário Auth:', secErr);
+  }
+
+  // 2. Grava na coleção 'usuarios' para permitir login no app mobile
+  try {
+    const userPayload = removeUndefinedFields({
+      uid: clientUid,
+      nome: params.name,
+      email: normalizedEmail,
+      telefone: params.phone || '',
+      role: 'cliente',
+      tenantId: params.tenantId,
+      empresaId: params.tenantId,
+      origem: 'totem',
+      veiculos: [{
+        tipo: params.vehicle.tipo || 'Carro',
+        marca: params.vehicle.marca || '',
+        modelo: params.vehicle.modelo || '',
+        cor: params.vehicle.cor || '',
+        placa: (params.vehicle.placa || '').toUpperCase().trim(),
+        ano: params.vehicle.ano || new Date().getFullYear().toString()
+      }],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    await withTimeout(setDoc(doc(db, 'usuarios', clientUid), userPayload, { merge: true }), 5000);
+  } catch (uErr) {
+    console.warn('[Totem] Erro ao gravar em /usuarios:', uErr);
+  }
+
+  // 3. Grava na coleção 'clientes' (utilizada pela visualização de clientes do lava-jato)
+  try {
+    await withTimeout(
+      addDoc(collection(db, 'clientes'), {
+        nomeCompleto: params.name,
+        telefone: params.phone || '',
+        email: normalizedEmail,
+        empresa: params.tenantId,
+        origem: 'Totem de Autoatendimento',
+        veiculos: [{
+          tipo: params.vehicle.tipo || 'Carro',
+          marca: params.vehicle.marca || '',
+          modelo: params.vehicle.modelo || '',
+          cor: params.vehicle.cor || '',
+          placa: (params.vehicle.placa || '').toUpperCase().trim(),
+          ano: params.vehicle.ano || new Date().getFullYear().toString()
+        }],
+        cep: '',
+        endereco: '',
+        bairro: '',
+        cidade: '',
+        estado: '',
+        dataCadastro: serverTimestamp()
+      }),
+      5000
+    );
+  } catch (cErr) {
+    console.warn('[Totem] Erro ao adicionar em /clientes:', cErr);
+  }
+
+  // 4. Grava na subcoleção do tenant /tenants/{tenantId}/clients/{clientUid}
+  try {
+    await withTimeout(
+      setDoc(doc(db, 'tenants', params.tenantId, 'clients', clientUid), removeUndefinedFields({
+        uid: clientUid,
+        name: params.name,
+        email: normalizedEmail,
+        phone: params.phone,
+        vehicle: params.vehicle,
+        tenantId: params.tenantId,
+        origem: 'totem',
+        createdAt: new Date().toISOString()
+      }), { merge: true }),
+      5000
+    );
+  } catch (tErr) {
+    console.warn('[Totem] Erro ao gravar subcoleção /tenants/clients:', tErr);
+  }
+
+  // 5. Salva mapeamento de e-mail para auto-login e vínculo rápido
+  saveClientEmailMapping(normalizedEmail, params.tenantId, params.tenantId, params.name);
+
+  // 6. Armazena no cache local do tenant para sincronização imediata
+  try {
+    const key = `saas_totem_clients_${params.tenantId}`;
+    const raw = localStorage.getItem(key);
+    const list = raw ? JSON.parse(raw) : [];
+    const newRecord = {
+      id: clientUid,
+      name: params.name,
+      email: normalizedEmail,
+      phone: params.phone,
+      vehicle: params.vehicle,
+      createdAt: new Date().toISOString()
+    };
+    localStorage.setItem(key, JSON.stringify([newRecord, ...list.filter((x: any) => x.email !== normalizedEmail)]));
+    window.dispatchEvent(new Event('storage'));
+  } catch {}
+
+  return {
+    success: true,
+    clientUid,
+    isExistingUser: isExisting
+  };
+}
+
 /**
  * =================================================================
  * 3. GESTÃO DE USUÁRIOS NO FIRESTORE (/usuarios)
@@ -669,6 +872,11 @@ export async function registerEmpresaInFirebaseAuth(params: {
     : 'Admin@' + (tenant.code || 'LJ') + '123456';
 
   try {
+    if (typeof window !== 'undefined') {
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (_) {}
+    }
     let userRecord: User;
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
@@ -717,13 +925,120 @@ export async function registerEmpresaInFirebaseAuth(params: {
 /**
  * Autentica Empresa (Lava-Jato) no Firebase Auth e sincroniza com /usuarios
  */
-export async function loginEmpresaInFirebaseAuth(email: string, password: string): Promise<{ success: boolean; user?: User; errorMessage?: string }> {
+export async function loginEmpresaInFirebaseAuth(
+  email: string,
+  password: string
+): Promise<{
+  success: boolean;
+  user?: User;
+  tenant?: Tenant;
+  errorMessage?: string;
+  isTempPasswordMatch?: boolean;
+}> {
   const normalizedEmail = email.trim().toLowerCase();
+  const trimmedPassword = password.trim();
+
+  // 1. Tenta autenticação direta no Firebase Auth com persistência por guia
   try {
-    const cred = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+    if (typeof window !== 'undefined') {
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (_) {}
+    }
+    const cred = await signInWithEmailAndPassword(auth, normalizedEmail, trimmedPassword);
+    
+    // Garante que o documento /usuarios/{uid} está preenchido
+    try {
+      const uDocRef = doc(db, 'usuarios', cred.user.uid);
+      const uSnap = await getDoc(uDocRef);
+      if (!uSnap.exists()) {
+        const tenant = await findTenantByCompanyEmailFirestore(normalizedEmail);
+        if (tenant) {
+          await setDoc(uDocRef, {
+            uid: cred.user.uid,
+            nome: tenant.ownerName || tenant.name,
+            email: normalizedEmail,
+            role: 'empresa',
+            tenantId: tenant.id,
+            empresaId: tenant.id,
+            empresaNome: tenant.name,
+            empresa: tenant,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+      }
+    } catch (_) {}
+
     return { success: true, user: cred.user };
   } catch (error: any) {
-    return { success: false, errorMessage: error.message || 'Senha ou e-mail de empresa incorreto.' };
+    console.log('[Auth Empresa] Falha inicial Firebase Auth:', error.code);
+
+    // 2. Busca a empresa correspondente no Firestore /tenants
+    let matchedTenant: Tenant | null = null;
+    try {
+      matchedTenant = await findTenantByCompanyEmailFirestore(normalizedEmail);
+    } catch (e) {
+      console.warn('[Auth Empresa] Erro ao buscar empresa no Firestore:', e);
+    }
+
+    // Se não encontrou no Firestore, busca no cache local
+    if (!matchedTenant && typeof localStorage !== 'undefined') {
+      try {
+        const raw = localStorage.getItem('saas_master_tenants');
+        if (raw) {
+          const list: Tenant[] = JSON.parse(raw);
+          matchedTenant = list.find(t => 
+            (t.contactEmail && t.contactEmail.trim().toLowerCase() === normalizedEmail) ||
+            (t.domain && normalizedEmail.includes(t.domain.replace('.saas.com', '')))
+          ) || null;
+        }
+      } catch (_) {}
+    }
+
+    if (matchedTenant) {
+      const storedCustomPwd = typeof localStorage !== 'undefined'
+        ? localStorage.getItem(`saas_tenant_custom_password_${matchedTenant.id}`)
+        : null;
+      
+      const expectedPwd = matchedTenant.tempPassword || storedCustomPwd || `Auto#${(matchedTenant.code || 'LJ').toUpperCase()}123`;
+
+      // Verifica se a senha digitada confere com a senha da empresa cadastrada no Firestore ou local
+      if (trimmedPassword === expectedPwd || trimmedPassword === matchedTenant.tempPassword || trimmedPassword === storedCustomPwd) {
+        console.log(`✅ [Auth Empresa] Senha confirmada com a ficha da empresa: ${matchedTenant.name}`);
+
+        // Tenta sincronizar criando a conta no Firebase Auth com esta senha para os próximos logins
+        try {
+          const newCred = await createUserWithEmailAndPassword(auth, normalizedEmail, trimmedPassword);
+          await setDoc(doc(db, 'usuarios', newCred.user.uid), {
+            uid: newCred.user.uid,
+            nome: matchedTenant.ownerName || matchedTenant.name,
+            email: normalizedEmail,
+            role: 'empresa',
+            tenantId: matchedTenant.id,
+            empresaId: matchedTenant.id,
+            empresaNome: matchedTenant.name,
+            empresa: matchedTenant,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+          return { success: true, user: newCred.user, tenant: matchedTenant, isTempPasswordMatch: true };
+        } catch (createErr: any) {
+          console.log('[Auth Empresa] Conta já existe no Auth ou sincronização paralela:', createErr.code);
+          return { success: true, tenant: matchedTenant, isTempPasswordMatch: true };
+        }
+      }
+    }
+
+    // Se a senha não conferiu:
+    let msg = 'E-mail corporativo ou senha incorretos.';
+    if (error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found') {
+      msg = 'E-mail corporativo ou senha incorretos. Verifique os dados digitados ou use a recuperação de senha.';
+    } else if (error.code === 'auth/invalid-email') {
+      msg = 'Formato de e-mail inválido.';
+    } else if (error.code === 'auth/too-many-requests') {
+      msg = 'Muitas tentativas sem sucesso. Aguarde alguns instantes por segurança.';
+    }
+
+    return { success: false, errorMessage: msg };
   }
 }
 
@@ -733,6 +1048,11 @@ export async function loginEmpresaInFirebaseAuth(email: string, password: string
 export async function loginSuperAdminInFirebaseAuth(email: string, password: string): Promise<{ success: boolean; user?: User; errorMessage?: string }> {
   const normalizedEmail = email.trim().toLowerCase();
   try {
+    if (typeof window !== 'undefined') {
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (_) {}
+    }
     let userCredential;
     try {
       userCredential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
@@ -759,9 +1079,16 @@ export async function loginSuperAdminInFirebaseAuth(email: string, password: str
 }
 
 
+export interface ClientSaveResult {
+  success: boolean;
+  docId?: string;
+  error?: string;
+}
+
 /**
  * Salva a Ficha Completa de Cadastro do Cliente (com Endereço e Veículos Dinâmicos)
- * nas coleções do Firestore (/clients e /tenants/{tenantId}/clients).
+ * nas coleções do Firestore (/clients, /clientes e /tenants/{tenantId}/clients).
+ * Executa as escritas em paralelo e aguarda a confirmação da nuvem com timeout resiliente.
  */
 export async function saveClientFullRegistration(
   tenantId: string, 
@@ -776,28 +1103,82 @@ export async function saveClientFullRegistration(
     stateUf?: string;
     vehicles?: any[];
   }
-): Promise<boolean> {
+): Promise<ClientSaveResult> {
   try {
-    await ensureFirebaseAuthSession();
-    const cleanId = data.phone 
-      ? data.phone.replace(/\D/g, '') 
-      : (data.email ? data.email.replace(/[^a-zA-Z0-9]/g, '_') : `c-${Date.now()}`);
+    const cleanPhoneDigits = (data.phone || '').replace(/\D/g, '');
+    const cleanId = cleanPhoneDigits && cleanPhoneDigits.length >= 8
+      ? cleanPhoneDigits
+      : (data.email ? data.email.toLowerCase().replace(/[^a-z0-9]/g, '_') : `c-${Date.now()}`);
     
     const payload = removeUndefinedFields({
       ...data,
+      id: cleanId,
       tenantId: tenantId || 'default',
       updatedAt: new Date().toISOString()
     });
 
-    await withTimeout(setDoc(doc(db, 'clients', cleanId), payload, { merge: true }), 4000);
+    // Formato compatível com a tela de Clientes da Empresa (/clientes)
+    const clienteWorkspacePayload = removeUndefinedFields({
+      id: cleanId,
+      empresa: tenantId || 'default',
+      nomeCompleto: data.name,
+      telefone: data.phone || '',
+      cep: data.cep || '',
+      endereco: data.address || '',
+      bairro: data.neighborhood || '',
+      cidade: data.city || '',
+      estado: data.stateUf || '',
+      veiculos: Array.isArray(data.vehicles) && data.vehicles.length > 0 ? data.vehicles.map(v => ({
+        tipo: v.type ? (String(v.type).toLowerCase() === 'moto' ? 'Moto' : 'Carro') : 'Carro',
+        marca: v.brand || '',
+        modelo: v.model || '',
+        cor: v.color || '',
+        ano: v.year || '',
+        placa: (v.plate || '').toUpperCase()
+      })) : [],
+      dataCadastro: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    // Agrupa todas as escritas no Firestore em paralelo
+    const writes: Promise<any>[] = [
+      setDoc(doc(db, 'clients', cleanId), payload, { merge: true }),
+      setDoc(doc(db, 'clientes', cleanId), clienteWorkspacePayload, { merge: true })
+    ];
+
     if (tenantId) {
-      await withTimeout(setDoc(doc(db, 'tenants', tenantId, 'clients', cleanId), payload, { merge: true }), 4000);
+      writes.push(setDoc(doc(db, 'tenants', tenantId, 'clients', cleanId), payload, { merge: true }));
     }
-    console.log(`✅ [Firestore] Ficha de cadastro do cliente e veículos gravada com sucesso: ${cleanId}`);
-    return true;
-  } catch (err) {
+
+    // Se houver usuário autenticado no Firebase Auth, garante a ficha em /usuarios
+    if (auth.currentUser?.uid) {
+      writes.push(
+        setDoc(doc(db, 'usuarios', auth.currentUser.uid), removeUndefinedFields({
+          uid: auth.currentUser.uid,
+          nome: data.name,
+          email: (data.email || auth.currentUser.email || '').toLowerCase().trim(),
+          telefone: data.phone || '',
+          role: 'cliente',
+          tenantId: tenantId || 'default',
+          empresaId: tenantId || 'default',
+          clientInfo: payload,
+          updatedAt: new Date().toISOString()
+        }), { merge: true })
+      );
+    }
+
+    // Aguarda confirmação de escrita de todas as coleções com timeout resiliente
+    await withTimeout(Promise.all(writes), 6500);
+    console.log(`✅ [Firestore] Ficha de cadastro do cliente e veículos confirmada nas coleções: ${cleanId}`);
+    return { success: true, docId: cleanId };
+
+  } catch (err: any) {
     handleFirestoreError(err, OperationType.WRITE, `clients/${tenantId}`);
-    return false;
+    console.warn('Aviso de timeout ou conectividade na escrita do Firestore:', err);
+    return { 
+      success: false, 
+      error: err?.message || 'A conexão com o banco de dados expirou ao confirmar o cadastro.' 
+    };
   }
 }
 
@@ -808,6 +1189,11 @@ export async function loginClientInFirebaseAuth(email: string, password?: string
     : `Cliente#${normalizedEmail.split('@')[0]}123`;
 
   try {
+    if (typeof window !== 'undefined') {
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (_) {}
+    }
     const userCredential = await signInWithEmailAndPassword(auth, normalizedEmail, effectivePassword);
     console.log(`🔓 [Firebase Auth] Usuário autenticado com sucesso: ${userCredential.user.uid}`);
 
@@ -853,6 +1239,266 @@ export async function logoutFirebaseAuth(): Promise<void> {
   } catch (err) {
     console.warn('SignOut error:', err);
   }
+}
+
+/**
+ * =================================================================
+ * 4.1 SISTEMA DE RECUPERAÇÃO DE SENHA (EMPRESAS & CLIENTES)
+ * Envia e-mail oficial de redefinição pelo Firebase Authentication e
+ * gera senha temporária de emergência para donos de lava-jato.
+ * =================================================================
+ */
+
+export interface PasswordRecoveryResult {
+  success: boolean;
+  emailSent: boolean;
+  message: string;
+  userType: 'cliente' | 'empresa' | 'admin';
+  tenant?: Tenant | null;
+  tenantName?: string;
+  tempPassword?: string;
+  tempPasswordGenerated?: string;
+}
+
+export async function sendUserPasswordResetEmail(email: string): Promise<{ success: boolean; message: string }> {
+  const normalizedEmail = (email || '').trim().toLowerCase();
+  if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    return { success: false, message: 'Por favor, informe um endereço de e-mail válido.' };
+  }
+  try {
+    await withTimeout(sendPasswordResetEmail(auth, normalizedEmail), 7000);
+    return {
+      success: true,
+      message: `Link oficial de redefinição de senha enviado para ${normalizedEmail}. Verifique sua caixa de entrada e pasta de spam.`
+    };
+  } catch (err: any) {
+    if (err.code === 'auth/user-not-found') {
+      return { success: false, message: 'Nenhuma conta cadastrada encontrada com este e-mail no Firebase Auth.' };
+    }
+    if (err.code === 'auth/invalid-email') {
+      return { success: false, message: 'Formato de e-mail inválido.' };
+    }
+    if (err.code === 'auth/too-many-requests') {
+      return { success: false, message: 'Muitas solicitações recentes. Aguarde alguns instantes antes de tentar novamente.' };
+    }
+    return { success: false, message: err.message || 'Falha ao enviar e-mail de redefinição.' };
+  }
+}
+
+export async function requestPasswordRecovery(
+  email: string,
+  userType: 'cliente' | 'empresa' | 'admin'
+): Promise<PasswordRecoveryResult> {
+  const normalizedEmail = (email || '').trim().toLowerCase();
+  if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    return {
+      success: false,
+      emailSent: false,
+      message: 'Por favor, informe um endereço de e-mail válido.',
+      userType
+    };
+  }
+
+  let emailSent = false;
+  let authErrorMessage: string | null = null;
+
+  // 1. Dispara o e-mail oficial de redefinição via Firebase Authentication
+  try {
+    await withTimeout(sendPasswordResetEmail(auth, normalizedEmail), 7000);
+    emailSent = true;
+    console.log(`✉️ [Firebase Auth] E-mail de recuperação enviado para: ${normalizedEmail}`);
+  } catch (authErr: any) {
+    console.warn('[Firebase Auth] Aviso ao enviar e-mail de redefinição inicial:', authErr);
+    if (authErr.code === 'auth/user-not-found') {
+      authErrorMessage = 'Conta não localizada diretamente no Firebase Auth.';
+    } else if (authErr.code === 'auth/invalid-email') {
+      return {
+        success: false,
+        emailSent: false,
+        message: 'O formato do e-mail é inválido. Por favor, verifique a digitação.',
+        userType
+      };
+    } else if (authErr.code === 'auth/too-many-requests') {
+      return {
+        success: false,
+        emailSent: false,
+        message: 'Muitas solicitações recentes. Por segurança, aguarde alguns instantes antes de tentar novamente.',
+        userType
+      };
+    } else {
+      authErrorMessage = authErr.message || 'Falha ao despachar solicitação para o servidor de e-mail.';
+    }
+  }
+
+  // 2. Fluxo para DONO DA EMPRESA (LAVA-JATO)
+  if (userType === 'empresa') {
+    let matchedTenant: Tenant | null = null;
+
+    // Busca nas empresas locais em memória / localStorage
+    try {
+      const rawTenants = typeof localStorage !== 'undefined' ? localStorage.getItem('saas_master_tenants') : null;
+      if (rawTenants) {
+        const list: Tenant[] = JSON.parse(rawTenants);
+        matchedTenant = list.find(t => 
+          (t.contactEmail && t.contactEmail.trim().toLowerCase() === normalizedEmail) ||
+          (t.domain && normalizedEmail.endsWith(`@${t.domain.replace('.saas.com', '')}.com`))
+        ) || null;
+      }
+    } catch (_) {}
+
+    // Busca no Firestore se ainda não localizou
+    if (!matchedTenant) {
+      try {
+        const snap = await findTenantByCompanyEmailFirestore(normalizedEmail);
+        if (snap) matchedTenant = snap;
+      } catch (_) {}
+    }
+
+    if (matchedTenant) {
+      // Gera nova senha temporária de emergência para acesso imediato sem travar o gestor
+      const randomDigits = Math.floor(100000 + Math.random() * 900000);
+      const newTempPassword = `Auto#${(matchedTenant.code || 'LJ').toUpperCase()}${randomDigits}`;
+      
+      const updatedTenant: Tenant = {
+        ...matchedTenant,
+        tempPassword: newTempPassword
+      };
+
+      try {
+        await saveTenantToFirestore(updatedTenant);
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`saas_tenant_custom_password_${matchedTenant.id}`, newTempPassword);
+          const rawTenants = localStorage.getItem('saas_master_tenants');
+          if (rawTenants) {
+            const list: Tenant[] = JSON.parse(rawTenants);
+            const updatedList = list.map(t => t.id === matchedTenant!.id ? updatedTenant : t);
+            localStorage.setItem('saas_master_tenants', JSON.stringify(updatedList));
+          }
+        }
+      } catch (saveErr) {
+        console.warn('Erro ao atualizar senha temporária no Firestore:', saveErr);
+      }
+
+      // Se o e-mail ainda não foi enviado porque a conta não existia no Firebase Auth,
+      // sincroniza no Auth e dispara sendPasswordResetEmail
+      if (!emailSent) {
+        try {
+          await createUserWithEmailAndPassword(auth, normalizedEmail, newTempPassword);
+          await sendPasswordResetEmail(auth, normalizedEmail);
+          emailSent = true;
+          console.log(`✉️ [Firebase Auth] Conta provisionada e link de redefinição enviado para: ${normalizedEmail}`);
+        } catch (subErr) {
+          console.log('Sincronização de usuário no Firebase Auth notice:', subErr);
+        }
+      }
+
+      const tenantDisplayName = matchedTenant.nomeFantasia || matchedTenant.name || 'Lava-Jato';
+
+      return {
+        success: true,
+        emailSent,
+        message: emailSent
+          ? `Link oficial de redefinição enviado para ${normalizedEmail}! Abra seu e-mail para cadastrar sua nova senha. Você também pode usar a senha temporária abaixo para entrar agora.`
+          : `Empresa "${tenantDisplayName}" localizada! Geramos uma nova senha temporária para seu login imediato.`,
+        userType: 'empresa',
+        tenant: updatedTenant,
+        tenantName: tenantDisplayName,
+        tempPassword: newTempPassword,
+        tempPasswordGenerated: newTempPassword
+      };
+    }
+
+    if (emailSent) {
+      return {
+        success: true,
+        emailSent: true,
+        message: `Enviamos o link oficial de redefinição de senha para ${normalizedEmail}. Acesse seu e-mail para criar uma nova senha.`,
+        userType: 'empresa'
+      };
+    }
+
+    return {
+      success: false,
+      emailSent: false,
+      message: 'Nenhum Lava-Jato / Empresa cadastrado com este e-mail corporativo. Verifique a digitação ou cadastre sua empresa.',
+      userType: 'empresa'
+    };
+  }
+
+  // 3. Fluxo para CLIENTE
+  if (userType === 'cliente') {
+    if (emailSent) {
+      return {
+        success: true,
+        emailSent: true,
+        message: `Enviamos o link de redefinição de senha para ${normalizedEmail}. Abra sua caixa de entrada (ou pasta de spam) e clique no link para definir sua nova senha.`,
+        userType: 'cliente'
+      };
+    }
+
+    // Se falhou no Auth inicial, verifica se o cliente possui ficha cadastral no Firestore
+    let clientFound = false;
+    try {
+      const q = query(collection(db, 'clients'), where('email', '==', normalizedEmail), limit(1));
+      const snaps = await getDocs(q);
+      if (!snaps.empty) {
+        clientFound = true;
+      } else {
+        const qClientes = query(collection(db, 'clientes'), where('email', '==', normalizedEmail), limit(1));
+        const snapsClientes = await getDocs(qClientes);
+        if (!snapsClientes.empty) clientFound = true;
+      }
+    } catch (_) {}
+
+    if (clientFound) {
+      try {
+        const fallbackPwd = `Cli#${Math.random().toString(36).substring(2, 8)}789!`;
+        await createUserWithEmailAndPassword(auth, normalizedEmail, fallbackPwd);
+        await sendPasswordResetEmail(auth, normalizedEmail);
+        emailSent = true;
+        return {
+          success: true,
+          emailSent: true,
+          message: `Cadastro de cliente localizado! Enviamos o link oficial de redefinição de senha para ${normalizedEmail}. Abra sua caixa de entrada (ou pasta de spam) para definir sua nova senha.`,
+          userType: 'cliente'
+        };
+      } catch (authCreateErr: any) {
+        console.warn('Erro ao criar usuário cliente no Firebase Auth:', authCreateErr);
+      }
+    }
+
+    return {
+      success: false,
+      emailSent: false,
+      message: authErrorMessage || 'Nenhuma conta de cliente foi encontrada com este e-mail. Verifique o endereço digitado ou realize um novo cadastro no lava-jato.',
+      userType: 'cliente'
+    };
+  }
+
+  // 4. Fluxo para SUPER ADMIN
+  if (userType === 'admin') {
+    if (emailSent) {
+      return {
+        success: true,
+        emailSent: true,
+        message: `Instruções de recuperação enviadas para o e-mail Master (${normalizedEmail}). Verifique sua caixa de entrada.`,
+        userType: 'admin'
+      };
+    }
+    return {
+      success: false,
+      emailSent: false,
+      message: authErrorMessage || 'Não foi possível enviar a recuperação para o Super Admin.',
+      userType: 'admin'
+    };
+  }
+
+  return {
+    success: emailSent,
+    emailSent,
+    message: emailSent ? `Link de recuperação enviado para ${normalizedEmail}.` : (authErrorMessage || 'Falha ao processar solicitação.'),
+    userType
+  };
 }
 
 /**
@@ -969,6 +1615,8 @@ export async function findTenantByCompanyEmailFirestore(email: string): Promise<
   try {
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail) return null;
+
+    // 1. Busca direta por contactEmail
     const q = query(
       collection(db, 'tenants'),
       where('contactEmail', '==', cleanEmail),
@@ -976,24 +1624,71 @@ export async function findTenantByCompanyEmailFirestore(email: string): Promise<
     );
     const snap = await getDocs(q);
     if (!snap.empty) {
-      const docData = snap.docs[0].data();
+      const docSnap = snap.docs[0];
+      const docData = docSnap.data();
+      const compName = docData.name || docData.nomeFantasia || docData.razaoSocial || 'Lava-Jato';
+      const cleanSlug = computeTenantSlug(compName, docSnap.id);
       return {
-        id: docData.id || snap.docs[0].id,
-        name: docData.name || 'Lava-Jato',
+        id: docData.id || docSnap.id,
+        name: compName,
         code: docData.code || 'LJ',
-        domain: docData.domain || `${snap.docs[0].id}.saas.com`,
+        domain: (docData.domain && !docData.domain.toLowerCase().startsWith('t-')) ? docData.domain : `${cleanSlug}.saas.com`,
         plan: docData.plan || 'Pro',
         status: docData.status || 'Ativo',
-        endUsersCount: docData.endUsersCount || 1,
-        maxUsers: docData.maxUsers || 500,
-        mrrAmount: docData.mrrAmount || 0,
+        endUsersCount: docData.endUsersCount ?? 1,
+        maxUsers: docData.maxUsers ?? 500,
+        mrrAmount: docData.mrrAmount ?? 0,
         createdAt: docData.createdAt || '',
         contactEmail: docData.contactEmail || cleanEmail,
         contactPhone: docData.contactPhone || '',
         ownerName: docData.ownerName || '',
-        lastActive: 'Agora mesmo'
+        lastActive: 'Agora mesmo',
+        logoUrl: docData.logoUrl || undefined,
+        address: docData.address || undefined,
+        tempPassword: docData.tempPassword || undefined,
+        nomeFantasia: docData.nomeFantasia || undefined,
+        razaoSocial: docData.razaoSocial || undefined,
+        cnpj: docData.cnpj || undefined,
+        inscricaoEstadual: docData.inscricaoEstadual || undefined
       };
     }
+
+    // 2. Fallback: Varre tenants caso o e-mail esteja salvo em outro campo ou com casing diferente
+    try {
+      const allTenantsSnap = await getDocs(collection(db, 'tenants'));
+      for (const dSnap of allTenantsSnap.docs) {
+        const d = dSnap.data();
+        const candEmail = (d.contactEmail || d.email || d.ownerEmail || '').trim().toLowerCase();
+        if (candEmail && candEmail === cleanEmail) {
+          const compName = d.name || d.nomeFantasia || d.razaoSocial || 'Lava-Jato';
+          const cleanSlug = computeTenantSlug(compName, dSnap.id);
+          return {
+            id: d.id || dSnap.id,
+            name: compName,
+            code: d.code || 'LJ',
+            domain: (d.domain && !d.domain.toLowerCase().startsWith('t-')) ? d.domain : `${cleanSlug}.saas.com`,
+            plan: d.plan || 'Pro',
+            status: d.status || 'Ativo',
+            endUsersCount: d.endUsersCount ?? 1,
+            maxUsers: d.maxUsers ?? 500,
+            mrrAmount: d.mrrAmount ?? 0,
+            createdAt: d.createdAt || '',
+            contactEmail: d.contactEmail || cleanEmail,
+            contactPhone: d.contactPhone || '',
+            ownerName: d.ownerName || '',
+            lastActive: 'Agora mesmo',
+            logoUrl: d.logoUrl || undefined,
+            address: d.address || undefined,
+            tempPassword: d.tempPassword || undefined,
+            nomeFantasia: d.nomeFantasia || undefined,
+            razaoSocial: d.razaoSocial || undefined,
+            cnpj: d.cnpj || undefined,
+            inscricaoEstadual: d.inscricaoEstadual || undefined
+          };
+        }
+      }
+    } catch (_) {}
+
     return null;
   } catch (e) {
     console.warn('findTenantByCompanyEmailFirestore error:', e);
@@ -1063,6 +1758,31 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
     if (cleanId === 't-autoclean' || cleanId.startsWith('t-10') || deletedList.includes(cleanId) || deletedList.includes(cleanSlug)) {
       return null;
     }
+
+    // 0. Tenta busca imediata no cache local de empresas (ultra-rápido, sem delay de rede)
+    if (typeof window !== 'undefined') {
+      try {
+        const rawLocal = localStorage.getItem('saas_master_tenants');
+        if (rawLocal) {
+          const localList: Tenant[] = JSON.parse(rawLocal);
+          const foundLocal = localList.find(t => {
+            if (t.id === 't-autoclean' || t.id.startsWith('t-10') || deletedList.includes(t.id)) return false;
+            const tCleanId = t.id.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const tSlug = (t.slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const tNormName = (t.nomeFantasia || t.name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+            return (
+              tCleanId === cleanId ||
+              tCleanId === cleanSlug ||
+              (cleanSlug && (tSlug === cleanSlug || tNormName === cleanSlug || tNormName.includes(cleanSlug) || cleanSlug.includes(tNormName)))
+            );
+          });
+          if (foundLocal) {
+            return foundLocal;
+          }
+        }
+      } catch (_) {}
+    }
+
     // 1. Tenta buscar direto pelo ID do tenant em /tenants/{cleanId}
     try {
       const directDoc = await getDoc(doc(db, 'tenants', cleanId));
@@ -1086,7 +1806,8 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
           ownerName: data.ownerName || '',
           lastActive: data.lastActive || 'Agora mesmo',
           logoUrl: data.logoUrl || undefined,
-          address: data.address || undefined
+          address: data.address || undefined,
+          tempPassword: data.tempPassword || undefined
         };
       }
     } catch (_) {}
@@ -1121,7 +1842,8 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
             ownerName: fullData.ownerName || '',
             lastActive: fullData.lastActive || 'Agora mesmo',
             logoUrl: fullData.logoUrl || data.logoUrl || undefined,
-            address: fullData.address || undefined
+            address: fullData.address || undefined,
+            tempPassword: fullData.tempPassword || data.tempPassword || undefined
           };
         }
       } catch (_) {}
@@ -1149,7 +1871,8 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
             ownerName: data.ownerName || '',
             lastActive: data.lastActive || 'Agora mesmo',
             logoUrl: data.logoUrl || undefined,
-            address: data.address || undefined
+            address: data.address || undefined,
+            tempPassword: data.tempPassword || undefined
           };
         }
       } catch (_) {}
@@ -1590,5 +2313,558 @@ export function subscribeToTenantClients(
     return () => {};
   }
 }
+
+// ================= 7. TROCA DE ÓLEO & ESTOQUE DE LUBRIFICANTES =================
+export async function saveOilProductToFirestore(tenantId: string, product: OilProductItem): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanPId = cleanDocId(product.id);
+    const docRef = doc(db, 'tenants', cleanTId, 'oil_products', cleanPId);
+    await setDoc(docRef, removeUndefinedFields({
+      ...product,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    }), { merge: true });
+    return true;
+  } catch (err) {
+    console.error('saveOilProductToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteOilProductFromFirestore(tenantId: string, productId: string): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanPId = cleanDocId(productId);
+    await deleteDoc(doc(db, 'tenants', cleanTId, 'oil_products', cleanPId));
+    return true;
+  } catch (err) {
+    console.error('deleteOilProductFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantOilProducts(
+  tenantId: string, 
+  callback: (products: OilProductItem[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'oil_products');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: OilProductItem[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as OilProductItem);
+      });
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantOilProducts error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantOilProducts init error:', err);
+    return () => {};
+  }
+}
+
+export async function saveOilChangeToFirestore(tenantId: string, oilChange: OilChangeRecord): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanCId = cleanDocId(oilChange.id);
+    const docRef = doc(db, 'tenants', cleanTId, 'oil_changes', cleanCId);
+    await setDoc(docRef, removeUndefinedFields({
+      ...oilChange,
+      tenantId: cleanTId,
+      createdAt: oilChange.createdAt || new Date().toISOString()
+    }), { merge: true });
+    return true;
+  } catch (err) {
+    console.error('saveOilChangeToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteOilChangeFromFirestore(tenantId: string, oilChangeId: string): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanCId = cleanDocId(oilChangeId);
+    await deleteDoc(doc(db, 'tenants', cleanTId, 'oil_changes', cleanCId));
+    return true;
+  } catch (err) {
+    console.error('deleteOilChangeFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantOilChanges(
+  tenantId: string, 
+  callback: (records: OilChangeRecord[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'oil_changes');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: OilChangeRecord[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as OilChangeRecord);
+      });
+      items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantOilChanges error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantOilChanges init error:', err);
+    return () => {};
+  }
+}
+
+/**
+ * =================================================================
+ * 8. TRANSMISSÃO DE NOTIFICAÇÃO SAAS ROOT (BOX 1000 & TENANTS)
+ * Permite que a administração envie alertas operacionais, manutenções
+ * ou comunicados prioritários em tempo real para os usuários de Box 1000.
+ * =================================================================
+ */
+export interface BroadcastNotification {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  message: string;
+  urgency: 'info' | 'alerta' | 'urgente';
+  sender: string;
+  createdAt: string;
+  active: boolean;
+}
+
+export async function sendBroadcastNotificationFirestore(params: {
+  tenantId: string;
+  tenantName: string;
+  message: string;
+  urgency?: 'info' | 'alerta' | 'urgente';
+  sender?: string;
+}): Promise<BroadcastNotification> {
+  const notifId = `notif-${Date.now()}`;
+  const cleanTId = cleanDocId(params.tenantId);
+  const payload: BroadcastNotification = {
+    id: notifId,
+    tenantId: params.tenantId,
+    tenantName: params.tenantName,
+    message: params.message.trim(),
+    urgency: params.urgency || 'info',
+    sender: params.sender || 'SaaS Root Admin',
+    createdAt: new Date().toISOString(),
+    active: true
+  };
+
+  try {
+    await ensureFirebaseAuthSession();
+    // 1. Grava no documento ativo de config do tenant para snapshot em tempo real
+    await setDoc(doc(db, 'tenants', cleanTId, 'config', 'broadcastNotification'), payload);
+    // 2. Grava no histórico de notificações do tenant
+    await setDoc(doc(db, 'tenants', cleanTId, 'broadcastNotifications', notifId), payload);
+    console.log(`📢 [Broadcast] Notificação transmitida para ${params.tenantName} (${cleanTId})`);
+  } catch (err) {
+    console.warn('sendBroadcastNotificationFirestore notice:', err);
+  }
+
+  // Redundância local imediata
+  try {
+    localStorage.setItem(`saas_broadcast_${cleanTId}`, JSON.stringify(payload));
+    window.dispatchEvent(new CustomEvent('saas_broadcast_notification', { detail: payload }));
+  } catch (_) {}
+
+  return payload;
+}
+
+export function subscribeToTenantBroadcastNotification(
+  tenantId: string,
+  callback: (notification: BroadcastNotification | null) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const docRef = doc(db, 'tenants', cleanTId, 'config', 'broadcastNotification');
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as BroadcastNotification;
+        if (data && data.active) {
+          callback(data);
+          return;
+        }
+      }
+      callback(null);
+    }, (err) => {
+      console.warn('subscribeToTenantBroadcastNotification notice:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantBroadcastNotification init error:', err);
+    return () => {};
+  }
+}
+
+export async function dismissBroadcastNotificationFirestore(
+  tenantId: string,
+  notificationId: string
+): Promise<void> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    await setDoc(doc(db, 'tenants', cleanTId, 'config', 'broadcastNotification'), {
+      active: false,
+      dismissedAt: new Date().toISOString(),
+      dismissedNotificationId: notificationId
+    }, { merge: true });
+    try {
+      localStorage.removeItem(`saas_broadcast_${cleanTId}`);
+      window.dispatchEvent(new CustomEvent('saas_broadcast_notification', { detail: null }));
+    } catch (_) {}
+  } catch (err) {
+    console.warn('dismissBroadcastNotificationFirestore error:', err);
+  }
+}
+
+/**
+ * =================================================================
+ * 9. CONTROLE DE CAIXA & FLUXO DE CAIXA (ENTRADA & SAÍDA) NO FIRESTORE
+ * Sincronização em tempo real de vendas, entradas avulsas, sangrias,
+ * despesas operacionais e fechamento de caixa do lava-jato.
+ * =================================================================
+ */
+
+export async function saveCashTransactionToFirestore(
+  tenantId: string, 
+  transaction: CashTransaction
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanId = cleanDocId(transaction.id || `cash-${Date.now()}`);
+    const dataToSave = removeUndefinedFields({
+      ...transaction,
+      id: cleanId,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+
+    await setDoc(doc(db, 'tenants', cleanTId, 'cash_transactions', cleanId), dataToSave, { merge: true });
+
+    // Salva fallback local
+    try {
+      const storageKey = `saas_tenant_cash_transactions_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((t: any) => t.id !== cleanId);
+      localStorage.setItem(storageKey, JSON.stringify([dataToSave, ...filtered]));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('saveCashTransactionToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteCashTransactionFromFirestore(
+  tenantId: string, 
+  transactionId: string
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanId = cleanDocId(transactionId);
+    await deleteDoc(doc(db, 'tenants', cleanTId, 'cash_transactions', cleanId));
+
+    try {
+      const storageKey = `saas_tenant_cash_transactions_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((t: any) => t.id !== cleanId);
+      localStorage.setItem(storageKey, JSON.stringify(filtered));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('deleteCashTransactionFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantCashTransactions(
+  tenantId: string,
+  callback: (transactions: CashTransaction[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'cash_transactions');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: CashTransaction[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as CashTransaction);
+      });
+      items.sort((a, b) => new Date(b.createdAt || `${b.date}T${b.time || '00:00'}`).getTime() - new Date(a.createdAt || `${a.date}T${a.time || '00:00'}`).getTime());
+      
+      // Atualiza fallback local
+      try {
+        localStorage.setItem(`saas_tenant_cash_transactions_${cleanTId}`, JSON.stringify(items));
+      } catch (_) {}
+
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantCashTransactions error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantCashTransactions init error:', err);
+    return () => {};
+  }
+}
+
+export async function saveCashRegisterSessionToFirestore(
+  tenantId: string,
+  session: CashRegisterSession
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const dataToSave = removeUndefinedFields({
+      ...session,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+
+    await setDoc(doc(db, 'tenants', cleanTId, 'config', 'cash_register'), dataToSave, { merge: true });
+
+    try {
+      localStorage.setItem(`saas_tenant_cash_register_${cleanTId}`, JSON.stringify(dataToSave));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('saveCashRegisterSessionToFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantCashRegisterSession(
+  tenantId: string,
+  callback: (session: CashRegisterSession | null) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const docRef = doc(db, 'tenants', cleanTId, 'config', 'cash_register');
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as CashRegisterSession;
+        callback(data);
+        try {
+          localStorage.setItem(`saas_tenant_cash_register_${cleanTId}`, JSON.stringify(data));
+        } catch (_) {}
+      } else {
+        callback(null);
+      }
+    }, (err) => {
+      console.warn('subscribeToTenantCashRegisterSession error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantCashRegisterSession init error:', err);
+    return () => {};
+  }
+}
+
+/**
+ * =================================================================
+ * 10. PRODUTOS DE VENDA & PDV BALCÃO NO FIRESTORE
+ * Separação dos produtos de venda direta aos clientes dos insumos internos,
+ * com baixa de estoque automática e integração ao caixa.
+ * =================================================================
+ */
+
+export async function saveSaleProductToFirestore(
+  tenantId: string,
+  product: SaleProductItem
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanPId = cleanDocId(product.id || `sprod-${Date.now()}`);
+    const dataToSave = removeUndefinedFields({
+      ...product,
+      id: cleanPId,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+
+    await setDoc(doc(db, 'tenants', cleanTId, 'sale_products', cleanPId), dataToSave, { merge: true });
+
+    try {
+      const storageKey = `saas_tenant_sale_products_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((p: any) => p.id !== cleanPId);
+      localStorage.setItem(storageKey, JSON.stringify([dataToSave, ...filtered]));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('saveSaleProductToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteSaleProductFromFirestore(
+  tenantId: string,
+  productId: string
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanPId = cleanDocId(productId);
+    await deleteDoc(doc(db, 'tenants', cleanTId, 'sale_products', cleanPId));
+
+    try {
+      const storageKey = `saas_tenant_sale_products_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((p: any) => p.id !== cleanPId);
+      localStorage.setItem(storageKey, JSON.stringify(filtered));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('deleteSaleProductFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantSaleProducts(
+  tenantId: string,
+  callback: (products: SaleProductItem[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'sale_products');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: SaleProductItem[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as SaleProductItem);
+      });
+      items.sort((a, b) => a.name.localeCompare(b.name));
+
+      try {
+        localStorage.setItem(`saas_tenant_sale_products_${cleanTId}`, JSON.stringify(items));
+      } catch (_) {}
+
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantSaleProducts error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantSaleProducts init error:', err);
+    return () => {};
+  }
+}
+
+export async function saveCounterSaleToFirestore(
+  tenantId: string,
+  sale: CounterSaleRecord
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanSId = cleanDocId(sale.id || `sale-${Date.now()}`);
+    const dataToSave = removeUndefinedFields({
+      ...sale,
+      id: cleanSId,
+      tenantId: cleanTId,
+      createdAt: sale.createdAt || new Date().toISOString()
+    });
+
+    await setDoc(doc(db, 'tenants', cleanTId, 'counter_sales', cleanSId), dataToSave, { merge: true });
+
+    // Registra a transação financeira no fluxo operacional APENAS se explicitamente solicitado
+    // (Por padrão, as vendas de balcão possuem seu próprio controle financeiro separado)
+    if (sale.integrateWithOperationalCash) {
+      const cashEntry: CashTransaction = {
+        id: `cash-sale-${cleanSId}`,
+        tenantId: cleanTId,
+        type: 'entrada',
+        category: 'venda_balcao',
+        categoryLabel: 'Venda de Balcão (Loja)',
+        description: `Venda #${sale.saleNumber || cleanSId.slice(-4)}: ${sale.items.map(i => `${i.quantity}x ${i.name}`).join(', ')}`,
+        amount: sale.totalAmount,
+        paymentMethod: sale.paymentMethod,
+        date: sale.date,
+        time: sale.time,
+        operator: sale.operator,
+        referenceId: cleanSId,
+        recipientOrClient: sale.clientName || 'Cliente Balcão',
+        notes: sale.notes,
+        createdAt: sale.createdAt || new Date().toISOString()
+      };
+      await saveCashTransactionToFirestore(cleanTId, cashEntry);
+    }
+
+    // Salva fallback local
+    try {
+      const storageKey = `saas_tenant_counter_sales_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((s: any) => s.id !== cleanSId);
+      localStorage.setItem(storageKey, JSON.stringify([dataToSave, ...filtered]));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('saveCounterSaleToFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantCounterSales(
+  tenantId: string,
+  callback: (sales: CounterSaleRecord[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'counter_sales');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: CounterSaleRecord[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as CounterSaleRecord);
+      });
+      items.sort((a, b) => new Date(b.createdAt || `${b.date}T${b.time}`).getTime() - new Date(a.createdAt || `${a.date}T${a.time}`).getTime());
+
+      try {
+        localStorage.setItem(`saas_tenant_counter_sales_${cleanTId}`, JSON.stringify(items));
+      } catch (_) {}
+
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantCounterSales error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantCounterSales init error:', err);
+    return () => {};
+  }
+}
+
 
 

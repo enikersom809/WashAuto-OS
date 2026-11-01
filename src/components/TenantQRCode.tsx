@@ -37,10 +37,9 @@ export const TenantQRCode: React.FC<TenantQRCodeProps> = ({ empresa, className =
       .trim() || 'empresa';
   }, [empresa.slug, empresa.nome]);
 
-  // URL dinâmica do PWA apontando diretamente para o lava-jato com slug amigável (100% funcional no Netlify/produção)
-  const targetUrl = typeof window !== 'undefined' 
-    ? `${window.location.origin}/?empresa=${encodeURIComponent(cleanSlug)}&cadastro=cliente`
-    : `https://app.saas.com/?empresa=${encodeURIComponent(cleanSlug)}&cadastro=cliente`;
+  // URL oficial do PWA na Netlify apontando diretamente para o lava-jato (nunca aponta para ais-dev)
+  const OFFICIAL_NETLIFY_URL = 'https://washautoos.netlify.app';
+  const targetUrl = `${OFFICIAL_NETLIFY_URL}/?empresa=${encodeURIComponent(cleanSlug)}&cadastro=cliente`;
 
   // Copiar link para o clipboard
   const handleCopyLink = async () => {

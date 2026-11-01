@@ -87,12 +87,54 @@
         "date": { "type": "string" }
       },
       "required": ["tenantId", "clientName", "requested"]
+    },
+    "cashTransactions": {
+      "title": "Cash Transactions",
+      "description": "Cash flow transactions (income, expense, sales, withdrawals)",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "type": { "type": "string", "enum": ["entrada", "saida"] },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "operator": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tenantId", "type", "description", "amount", "paymentMethod", "date"]
+    },
+    "oilChanges": {
+      "title": "Oil Changes",
+      "description": "Vehicle oil change history and next scheduled changes",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "vehiclePlate": { "type": "string" },
+        "vehicleModel": { "type": "string" },
+        "currentKm": { "type": "number" },
+        "intervalKm": { "type": "number" },
+        "nextChangeKm": { "type": "number" },
+        "totalPrice": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tenantId", "vehiclePlate", "currentKm", "nextChangeKm", "totalPrice"]
     }
   },
   "firestore": {
     "/tenants/{tenantId}": {
       "schema": "tenants",
       "description": "Tenant company profile and configuration"
+    },
+    "/tenants/{tenantId}/cash_transactions/{transactionId}": {
+      "schema": "cashTransactions",
+      "description": "Tenant cash flow transactions"
+    },
+    "/tenants/{tenantId}/oil_changes/{oilChangeId}": {
+      "schema": "oilChanges",
+      "description": "Tenant vehicle oil change records"
     },
     "/tenants/{tenantId}/appointments/{appointmentId}": {
       "schema": "appointments",
@@ -117,6 +159,10 @@
     "/clients/{clientId}": {
       "schema": "clientProfiles",
       "description": "Global client profile registry"
+    },
+    "/clientes/{clienteId}": {
+      "schema": "clientProfiles",
+      "description": "Real-time client records linked by empresa"
     },
     "/empresas/{empresaId}": {
       "schema": "tenants",

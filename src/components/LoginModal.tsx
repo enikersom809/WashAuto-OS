@@ -21,7 +21,11 @@ import {
   Plus,
   Trash2,
   MapPin,
-  Car
+  Car,
+  AlertCircle,
+  ArrowLeft,
+  Copy,
+  Check
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -32,6 +36,8 @@ import {
   registerEmpresaInFirebaseAuth,
   loginEmpresaInFirebaseAuth,
   loginSuperAdminInFirebaseAuth,
+  requestPasswordRecovery,
+  PasswordRecoveryResult,
   saveTenantToFirestore,
   saveCompanyEmailMapping,
   saveClientEmailMapping,
@@ -39,7 +45,8 @@ import {
   getCompanyEmailMapping,
   getClientEmailMapping,
   findTenantByCompanyEmailFirestore,
-  findTenantIdByClientEmailFirestore 
+  findTenantIdByClientEmailFirestore,
+  getTenantByIdOrSlugFirestore
 } from '../lib/firebaseService';
 import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
 
@@ -156,6 +163,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [rememberMe, setRememberMe] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Password Recovery States (Recuperação de Senha)
+  const [showForgotPassword, setShowForgotPassword] = useState<boolean>(false);
+  const [forgotEmail, setForgotEmail] = useState<string>('');
+  const [forgotUserType, setForgotUserType] = useState<LoginProfileType>('empresa');
+  const [isRecovering, setIsRecovering] = useState<boolean>(false);
+  const [recoveryResult, setRecoveryResult] = useState<PasswordRecoveryResult | null>(null);
+  const [showTempRecoveryPwd, setShowTempRecoveryPwd] = useState<boolean>(false);
+  const [copiedRecoveryPwd, setCopiedRecoveryPwd] = useState<boolean>(false);
+
   // QR Code Scanner State
   const [isQrScannerOpen, setIsQrScannerOpen] = useState(false);
   const [qrScanTarget, setQrScanTarget] = useState<'login' | 'reg'>('login');
@@ -249,11 +265,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   const handleTabChange = (type: LoginProfileType) => {
     setActiveTab(type);
+    setForgotUserType(type);
     if (type !== 'cliente') {
       setIsSignUp(false);
     }
     setErrorMessage(null);
     setAuthSuccessMsg(null);
+    setShowForgotPassword(false);
+    setRecoveryResult(null);
     // Limpa senhas para que a senha do Super Admin não persista na aba Empresa
     setPassword('');
     setEmpresaPassword('');
@@ -262,6 +281,45 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setSubdomain(getInitialSlugFromUrl());
     setAutoMatchedInfo(null);
     setIsSearchingEmail(false);
+  };
+
+  const handleRequestRecovery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setRecoveryResult(null);
+
+    const cleanEmail = forgotEmail.trim();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setErrorMessage('Por favor, informe um endereço de e-mail válido para a recuperação.');
+      return;
+    }
+
+    setIsRecovering(true);
+    try {
+      const result = await requestPasswordRecovery(cleanEmail, forgotUserType);
+      setRecoveryResult(result);
+      if (!result.success) {
+        setErrorMessage(result.message);
+      } else {
+        setAuthSuccessMsg(result.message);
+      }
+    } catch (err: any) {
+      console.error('Erro na recuperação:', err);
+      setErrorMessage(err.message || 'Erro ao processar a recuperação de senha.');
+    } finally {
+      setIsRecovering(false);
+    }
+  };
+
+  const handleUseTempPasswordToLogin = (tempPwd: string) => {
+    if (forgotUserType === 'empresa') {
+      setActiveTab('empresa');
+      setEmpresaEmail(forgotEmail);
+      setEmpresaPassword(tempPwd);
+      setPassword(tempPwd);
+      setShowForgotPassword(false);
+      setAuthSuccessMsg('Senha temporária aplicada! Clique em "Acessar Painel".');
+    }
   };
 
   const handleCompanyNameChange = (val: string) => {
@@ -555,6 +613,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         );
 
         // 2. Cria o cliente no Firebase Authentication de forma segura e resiliente
+        let authWarning: string | null = null;
         try {
           const authRes = await registerClientInFirebaseAuth({
             name: regName.trim(),
@@ -564,32 +623,47 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             tenantId: tenantToOpen.id
           });
 
-          if (!authRes.success && authRes.errorMessage) {
-            console.warn('Aviso no Firebase Auth (prosseguindo com sessão do cliente):', authRes.errorMessage);
+          if (!authRes.success) {
+            setErrorMessage(authRes.errorMessage || 'Falha ao registrar credenciais de acesso.');
+            setIsSubmitting(false);
+            if (typeof window !== 'undefined') {
+              sessionStorage.removeItem('saas_active_registration_in_progress');
+            }
+            return;
           }
-        } catch (authErr) {
+          if (authRes.errorMessage) {
+            authWarning = authRes.errorMessage;
+          }
+        } catch (authErr: any) {
           console.warn('Erro na autenticação remota (prosseguindo localmente):', authErr);
         }
 
-        // 3. Salva no Firestore
+        // 3. Salva no Firestore e aguarda confirmação explícita de escrita
+        let saveWarning: string | null = null;
         try {
-          await saveClientFullRegistration(tenantToOpen.id, clientData);
-        } catch (dbErr) {
-          console.warn('Erro ao salvar ficha completa no Firestore:', dbErr);
+          const saveRes = await saveClientFullRegistration(tenantToOpen.id, clientData);
+          if (!saveRes.success) {
+            console.warn('Aviso ao salvar ficha completa no Firestore:', saveRes.error);
+            saveWarning = saveRes.error || null;
+          }
+        } catch (dbErr: any) {
+          console.warn('Exceção ao salvar ficha completa no Firestore:', dbErr);
+          saveWarning = dbErr?.message || 'Falha temporária de comunicação com o banco de dados.';
         }
 
-        setAuthSuccessMsg('Cadastro realizado com sucesso!');
+        if (saveWarning) {
+          setAuthSuccessMsg('Cadastro salvo no dispositivo! Entrando no portal...');
+        } else {
+          setAuthSuccessMsg(authWarning ? `${authWarning} Entrando no portal...` : 'Cadastro e veículos confirmados com sucesso!');
+        }
 
-        // 4. Conclui o cadastro e transiciona diretamente para o portal do cliente
-        setTimeout(() => {
-          if (typeof window !== 'undefined') {
-            sessionStorage.removeItem('saas_active_registration_in_progress');
-          }
-          setIsSubmitting(false);
-          onLoginAsClient(tenantToOpen, clientData);
-          if (onClose) onClose();
-        }, 500);
-
+        // 4. Conclui o cadastro, encerra imediatamente o loading e transiciona para o portal
+        if (typeof window !== 'undefined') {
+          sessionStorage.removeItem('saas_active_registration_in_progress');
+        }
+        setIsSubmitting(false);
+        onLoginAsClient(tenantToOpen, clientData);
+        if (onClose) onClose();
         return;
 
       } else if (activeTab === 'empresa') {
@@ -667,15 +741,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       }
     } catch (err: any) {
       console.error('Registration error:', err);
-      setErrorMessage(err.message || 'Ocorreu um erro no cadastro.');
+      setErrorMessage(err.message || 'Ocorreu um erro no cadastro. Por favor, tente novamente.');
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem('saas_active_registration_in_progress');
       }
-      setIsSubmitting(false);
     } finally {
-      setTimeout(() => {
-        setIsSubmitting(false);
-      }, 1000);
+      setIsSubmitting(false);
     }
   };
 
@@ -770,17 +841,57 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
       setIsSubmitting(true);
       try {
-        // Autentica no Firebase Auth se forneceu senha
+        let tenantToOpen: Tenant | null = null;
+
+        // Autentica no Firebase Auth e valida ficha da empresa no Firestore
         if (typedEmpresaPassword) {
           const authRes = await loginEmpresaInFirebaseAuth(typedEmpresaEmail, typedEmpresaPassword);
-          if (!authRes.success && authRes.errorMessage) {
-            setErrorMessage(authRes.errorMessage);
-            setIsSubmitting(false);
-            return;
+          if (!authRes.success) {
+            // Tenta busca direta no Firestore para caso o estado local de tenants ainda não estivesse sincronizado
+            let fallbackTenant = await findTenantByCompanyEmailFirestore(typedEmpresaEmail);
+            if (!fallbackTenant && subdomain) {
+              fallbackTenant = await getTenantByIdOrSlugFirestore(subdomain);
+            }
+            const storedPwd = fallbackTenant ? (typeof window !== 'undefined' ? localStorage.getItem(`saas_tenant_custom_password_${fallbackTenant.id}`) : null) : null;
+            if (fallbackTenant && (fallbackTenant.tempPassword === typedEmpresaPassword || storedPwd === typedEmpresaPassword)) {
+              console.log('Login autenticado via fallback direto da empresa.');
+              tenantToOpen = fallbackTenant;
+            } else {
+              setErrorMessage(authRes.errorMessage || 'E-mail ou senha da empresa incorretos.');
+              setIsSubmitting(false);
+              return;
+            }
+          } else {
+            tenantToOpen = authRes.tenant || null;
           }
         }
 
-        const tenantToOpen = resolveTenantByDomain(subdomain || typedEmpresaEmail.split('@')[0]);
+        if (!tenantToOpen) {
+          tenantToOpen = tenants.find(t => 
+            (t.contactEmail && t.contactEmail.trim().toLowerCase() === typedEmpresaEmail) ||
+            (t.domain && (subdomain ? extractDomainSlug(t.domain) === subdomain : false))
+          ) || null;
+        }
+
+        if (!tenantToOpen) {
+          tenantToOpen = await findTenantByCompanyEmailFirestore(typedEmpresaEmail);
+        }
+
+        if (!tenantToOpen) {
+          tenantToOpen = resolveTenantByDomain(subdomain || typedEmpresaEmail.split('@')[0]);
+        }
+
+        // Salva sessão ativa no sessionStorage para que mesmo se onAuthStateChanged demorar, o app não deslogue
+        if (typeof window !== 'undefined' && tenantToOpen) {
+          sessionStorage.setItem('saas_active_auth_session', JSON.stringify({
+            role: 'empresa',
+            tenant: tenantToOpen,
+            userEmail: typedEmpresaEmail,
+            userName: tenantToOpen.ownerName || tenantToOpen.name,
+            uid: `emp-${tenantToOpen.id}`
+          }));
+        }
+
         onLoginAsEmpresa(tenantToOpen);
         if (onClose) onClose();
       } catch (err: any) {
@@ -843,7 +954,237 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         {/* Card Principal de Login */}
         <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
 
-          {/* ================= 1. SELETOR DE PERFIL (TABS CLIENTE & EMPRESA) ================= */}
+          {showForgotPassword ? (
+            /* ================= TELA DE RECUPERAÇÃO DE SENHA ================= */
+            <div className="space-y-5 animate-fade-in">
+              {/* Cabeçalho de Navegação */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowForgotPassword(false);
+                    setErrorMessage(null);
+                    setAuthSuccessMsg(null);
+                    setRecoveryResult(null);
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition cursor-pointer py-1 px-2 rounded-lg hover:bg-slate-800"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Voltar ao login</span>
+                </button>
+
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded-full border border-amber-500/20">
+                  <Key className="w-3 h-3 text-amber-400" />
+                  Recuperação
+                </span>
+              </div>
+
+              {/* Título & Descrição */}
+              <div>
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <span>Recuperar Senha</span>
+                </h2>
+                <p className="text-xs text-slate-400 mt-1">
+                  Selecione seu perfil e informe seu e-mail para receber o link de redefinição ou uma nova chave temporária.
+                </p>
+              </div>
+
+              {/* Seletor de Perfil na Recuperação (Empresa vs Cliente) */}
+              <div className="grid grid-cols-2 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800 text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForgotUserType('empresa');
+                    setErrorMessage(null);
+                    setRecoveryResult(null);
+                    if (!forgotEmail && empresaEmail) setForgotEmail(empresaEmail);
+                  }}
+                  className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg transition-all cursor-pointer ${
+                    forgotUserType === 'empresa'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Building2 className="w-4 h-4" />
+                  <span>Lava-Jato / Empresa</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForgotUserType('cliente');
+                    setErrorMessage(null);
+                    setRecoveryResult(null);
+                    if (!forgotEmail && clienteIdentifier && clienteIdentifier.includes('@')) {
+                      setForgotEmail(clienteIdentifier);
+                    }
+                  }}
+                  className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg transition-all cursor-pointer ${
+                    forgotUserType === 'cliente'
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <User className="w-4 h-4" />
+                  <span>Cliente</span>
+                </button>
+              </div>
+
+              {/* Mensagem de Erro */}
+              {errorMessage && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 text-xs flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{errorMessage}</span>
+                </div>
+              )}
+
+              {/* Mensagem de Sucesso (sem senha temporária visível) */}
+              {authSuccessMsg && !recoveryResult?.tempPassword && (
+                <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 text-xs flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{authSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* Bloco de Chave / Senha Temporária Imediata para Lava-Jato / Empresa */}
+              {recoveryResult?.tempPassword && (
+                <div className="p-4 bg-gradient-to-br from-amber-950/40 via-slate-900 to-emerald-950/30 border border-amber-500/40 rounded-xl space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-amber-400" />
+                      <span className="text-xs font-bold text-amber-300">
+                        Nova Senha Provisória Ativada!
+                      </span>
+                    </div>
+                    {recoveryResult.tenantName && (
+                      <span className="text-[10px] font-mono text-slate-400 truncate max-w-[130px]">
+                        {recoveryResult.tenantName}
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Para não interromper o atendimento do seu lava-jato, geramos uma senha provisória válida imediatamente no sistema:
+                  </p>
+
+                  {/* Campo com senha e botões de revelar/copiar */}
+                  <div className="flex items-center justify-between bg-slate-950/90 border border-amber-500/30 rounded-lg p-2.5 font-mono text-sm">
+                    <span className="text-amber-300 font-bold tracking-wider select-all">
+                      {showTempRecoveryPwd ? recoveryResult.tempPassword : '••••••••••••'}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowTempRecoveryPwd(!showTempRecoveryPwd)}
+                        className="p-1 text-slate-400 hover:text-white rounded transition cursor-pointer"
+                        title={showTempRecoveryPwd ? "Ocultar" : "Mostrar"}
+                      >
+                        {showTempRecoveryPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (recoveryResult?.tempPassword) {
+                            navigator.clipboard.writeText(recoveryResult.tempPassword);
+                            setCopiedRecoveryPwd(true);
+                            setTimeout(() => setCopiedRecoveryPwd(false), 2500);
+                          }
+                        }}
+                        className="p-1 text-slate-400 hover:text-amber-400 rounded transition cursor-pointer"
+                        title="Copiar senha"
+                      >
+                        {copiedRecoveryPwd ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Botão de Ação Rápida: Usar Senha e Fazer Login */}
+                  <button
+                    type="button"
+                    onClick={() => recoveryResult?.tempPassword && handleUseTempPasswordToLogin(recoveryResult.tempPassword)}
+                    className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    <Key className="w-3.5 h-3.5" />
+                    <span>Usar Esta Senha & Fazer Login Agora</span>
+                  </button>
+
+                  {recoveryResult.emailSent && (
+                    <p className="text-[10px] text-slate-400 text-center">
+                      ✉️ Também enviamos o link oficial de redefinição para o seu e-mail.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Formulário de Envio */}
+              <form onSubmit={handleRequestRecovery} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    {forgotUserType === 'empresa'
+                      ? 'E-mail do Lava-Jato / Empresa'
+                      : forgotUserType === 'admin'
+                      ? 'E-mail Master do Super Admin'
+                      : 'E-mail de Cadastro do Cliente'}
+                  </label>
+                  <div className="relative flex items-center">
+                    <Mail className="w-4 h-4 absolute left-3.5 text-slate-500 pointer-events-none" />
+                    <input
+                      type="email"
+                      value={forgotEmail}
+                      onChange={(e) => setForgotEmail(e.target.value)}
+                      placeholder={
+                        forgotUserType === 'empresa'
+                          ? 'exemplo@lavajato.com'
+                          : 'seu-email@cliente.com'
+                      }
+                      required
+                      className="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isRecovering || !forgotEmail.trim()}
+                  className={`w-full py-2.5 px-4 text-xs font-bold rounded-xl text-white flex items-center justify-center gap-2 shadow-lg transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                    forgotUserType === 'empresa'
+                      ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/20'
+                      : 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/20'
+                  }`}
+                >
+                  {isRecovering ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Processando Recuperação...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="w-4 h-4" />
+                      <span>
+                        {forgotUserType === 'empresa'
+                          ? 'Recuperar Acesso da Empresa'
+                          : 'Enviar Link de Redefinição'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </form>
+
+              {/* Dica Informativa */}
+              <div className="pt-2 border-t border-slate-800/80 text-[11px] text-slate-400 space-y-1.5">
+                <div className="flex items-start gap-1.5">
+                  <span className="text-blue-400">ℹ️</span>
+                  <span>
+                    {forgotUserType === 'empresa'
+                      ? 'Para empresas: O sistema envia as instruções e sincroniza uma nova chave provisória no Firestore para o seu lava-jato.'
+                      : 'Para clientes: Você receberá um e-mail do Firebase com um link seguro para criar sua nova senha.'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* ================= 1. SELETOR DE PERFIL (TABS CLIENTE & EMPRESA) ================= */}
           {activeTab !== 'admin' ? (
             <div className="grid grid-cols-2 gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800/80 text-xs font-bold">
               {/* Tab Cliente */}
@@ -1139,20 +1480,24 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       Protegida
                     </span>
                   </label>
-                  <a 
-                    href="#" 
-                    onClick={(e) => { 
-                      e.preventDefault(); 
-                      if (activeTab === 'admin') {
-                        setAuthSuccessMsg('Instruções de recuperação de acesso enviadas para o e-mail cadastrado do Super Admin.');
-                      } else {
-                        setAuthSuccessMsg('Instruções de recuperação de senha enviadas para o seu e-mail.'); 
-                      }
+                  <button 
+                    type="button" 
+                    onClick={() => { 
+                      setForgotUserType(activeTab);
+                      const currentEmail = activeTab === 'empresa'
+                        ? (empresaEmail || identifier)
+                        : activeTab === 'cliente'
+                        ? (clienteIdentifier || identifier)
+                        : (adminEmail || identifier);
+                      setForgotEmail(currentEmail || '');
+                      setShowForgotPassword(true);
+                      setRecoveryResult(null);
+                      setErrorMessage(null);
                     }} 
-                    className="text-[11px] text-blue-400 hover:underline"
+                    className="text-[11px] text-blue-400 hover:text-blue-300 hover:underline cursor-pointer font-medium"
                   >
                     Esqueceu a senha?
-                  </a>
+                  </button>
                 </div>
                 <div className="relative flex items-center">
                   <Lock className="w-4 h-4 absolute left-3.5 text-slate-500 pointer-events-none" />
@@ -1273,11 +1618,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 <>
                   <div className="border-b border-slate-800 pb-2 mb-3">
                     <h3 className="text-base font-bold text-white tracking-tight">Criar Conta de Cliente</h3>
-                    {regSubdomain && (
-                      <p className="text-[#00A3FF] font-bold text-xs mt-0.5">
-                        Bem-vindo ao {resolveTenantByDomain(regSubdomain).name}!
-                      </p>
-                    )}
+                    <p className="text-[#00A3FF] font-bold text-xs mt-0.5 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-[#00A3FF]" />
+                      <span>Bem-vindo ao {resolveTenantByDomain(regSubdomain || subdomain || '').name}!</span>
+                    </p>
                   </div>
 
                   {/* Dados Pessoais */}
@@ -1563,6 +1907,23 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Feedback visual de erro, aviso ou confirmação logo acima do botão */}
+                  {errorMessage && (
+                    <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-start gap-2.5 shadow-md">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <div className="flex-1 leading-snug">
+                        <span>{errorMessage}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {authSuccessMsg && (
+                    <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-2 shadow-md">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{authSuccessMsg}</span>
+                    </div>
+                  )}
+
                   {/* Botão Finalizar Cadastro */}
                   <button 
                     type="submit" 
@@ -1573,7 +1934,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     {isSubmitting ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
-                        <span>Finalizando Cadastro no Lava-Jato...</span>
+                        <span>Confirmando e Gravando Cadastro...</span>
                       </>
                     ) : (
                       <>
@@ -1696,6 +2057,23 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {/* Feedback visual de erro, aviso ou confirmação logo acima do botão */}
+                  {errorMessage && (
+                    <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-start gap-2.5 shadow-md mt-2">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <div className="flex-1 leading-snug">
+                        <span>{errorMessage}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {authSuccessMsg && (
+                    <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-2 shadow-md mt-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{authSuccessMsg}</span>
+                    </div>
+                  )}
 
                   <button 
                     type="submit" 
@@ -1827,6 +2205,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </span>
             )}
           </div>
+            </>
+          )}
 
         </div>
 

@@ -29,7 +29,9 @@ import {
   QrCode,
   Car,
   Printer,
-  Receipt
+  Receipt,
+  Copy,
+  Check
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { TenantQRCode } from './TenantQRCode';
@@ -87,6 +89,32 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
   const [contactEmail, setContactEmail] = useState(tenant.contactEmail || '');
   const [contactPhone, setContactPhone] = useState(tenant.contactPhone || '');
   const [ownerName, setOwnerName] = useState(tenant.ownerName || '');
+
+  // Senha Temporária / Senha de Acesso da Empresa (Editável na tela de dados da empresa)
+  const [tempPassword, setTempPassword] = useState(() => {
+    const stored = (typeof window !== 'undefined' && localStorage.getItem(`saas_tenant_custom_password_${tenant.id}`)) || '';
+    return tenant.tempPassword || stored || `Auto#${(tenant.code || 'LJ').toUpperCase()}123`;
+  });
+  const [showCompanyPassword, setShowCompanyPassword] = useState(false);
+  const [copiedCompanyPassword, setCopiedCompanyPassword] = useState(false);
+
+  useEffect(() => {
+    if (tenant) {
+      const stored = (typeof window !== 'undefined' && localStorage.getItem(`saas_tenant_custom_password_${tenant.id}`)) || '';
+      setTempPassword(tenant.tempPassword || stored || `Auto#${(tenant.code || 'LJ').toUpperCase()}123`);
+    }
+  }, [tenant]);
+
+  const generateRandomCompanyPassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
+    let pwd = '';
+    for (let i = 0; i < 8; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    const newPwd = `Auto#${pwd}`;
+    setTempPassword(newPwd);
+    showNotification('✨ Nova senha gerada! Não se esqueça de clicar em "Salvar Alterações".');
+  };
 
   // Address
   const [cep, setCep] = useState(tenant.address?.cep || '');
@@ -300,7 +328,7 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
   };
 
   // Save Full Company Data
-  const handleSaveCompanyData = (e: React.FormEvent) => {
+  const handleSaveCompanyData = async (e: React.FormEvent) => {
     e.preventDefault();
     const updated: Tenant = {
       ...tenant,
@@ -312,6 +340,7 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
       contactEmail: contactEmail.trim(),
       contactPhone: contactPhone.trim(),
       ownerName: ownerName.trim(),
+      tempPassword: tempPassword.trim() || tenant.tempPassword,
       address: {
         cep: cep.trim(),
         street: street.trim(),
@@ -324,8 +353,17 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
       logoUrl: logoUrl.trim() || undefined
     };
 
+    if (tempPassword.trim()) {
+      localStorage.setItem(`saas_tenant_custom_password_${tenant.id}`, tempPassword.trim());
+    }
+
     onUpdateTenantDetails(updated);
-    showNotification('✅ Dados cadastrais da empresa salvos com sucesso!');
+    try {
+      await saveTenantToFirestore(updated);
+    } catch (err) {
+      console.warn('Erro ao sincronizar dados da empresa no Firestore:', err);
+    }
+    showNotification('✅ Dados cadastrais e senha da empresa salvos com sucesso!');
   };
 
   // Save Logo
@@ -710,6 +748,79 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
                 className="w-full bg-[#020617]/50 border border-[#1e293b] rounded-xl p-3 text-slate-400 font-mono focus:outline-none cursor-not-allowed"
               />
             </div>
+          </div>
+
+          {/* Campo Editável: Senha Temporária / Senha de Acesso da Empresa */}
+          <div className="bg-[#020617] border-2 border-indigo-500/40 rounded-xl p-4 space-y-3 shadow-lg shadow-indigo-950/30">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <label className="text-sm font-bold text-indigo-200 flex items-center gap-2">
+                <Key className="w-4 h-4 text-amber-400" />
+                Senha Temporária de Acesso (Login da Empresa) *
+              </label>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20">
+                  Campo Editável
+                </span>
+                <button
+                  type="button"
+                  onClick={generateRandomCompanyPassword}
+                  className="text-[11px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-indigo-500/10 hover:bg-indigo-500/20 px-2.5 py-0.5 rounded-lg border border-indigo-500/30 transition cursor-pointer"
+                  title="Gerar uma nova senha forte aleatória"
+                >
+                  <RefreshCw className="w-3 h-3" /> Gerar Nova
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <input
+                  type={showCompanyPassword ? "text" : "password"}
+                  value={tempPassword}
+                  onChange={(e) => setTempPassword(e.target.value)}
+                  placeholder="Defina a senha temporária da empresa"
+                  className="w-full bg-[#0f172a] border border-[#1e293b] rounded-xl p-3 pr-10 text-slate-100 font-mono text-xs focus:outline-none focus:border-indigo-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCompanyPassword(!showCompanyPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  title={showCompanyPassword ? "Ocultar senha" : "Ver senha"}
+                >
+                  {showCompanyPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (navigator.clipboard && tempPassword) {
+                    navigator.clipboard.writeText(tempPassword);
+                    setCopiedCompanyPassword(true);
+                    showNotification('📋 Senha temporária copiada para a área de transferência!');
+                    setTimeout(() => setCopiedCompanyPassword(false), 2500);
+                  }
+                }}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-3 rounded-xl font-bold text-xs flex items-center gap-1.5 border border-slate-700 transition cursor-pointer shrink-0"
+                title="Copiar senha para enviar ao gestor da empresa"
+              >
+                {copiedCompanyPassword ? (
+                  <>
+                    <Check className="w-4 h-4 text-emerald-400" />
+                    <span className="text-emerald-400 hidden sm:inline">Copiado!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4 text-slate-300" />
+                    <span className="hidden sm:inline">Copiar</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Esta é a senha utilizada para autenticar no painel como <strong>Lava-Jato / Empresa</strong>. Você pode editá-la diretamente aqui ou gerar uma nova senha aleatória.
+            </p>
           </div>
 
           {/* Seção de Endereço Físico */}

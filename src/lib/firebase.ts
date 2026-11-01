@@ -1,6 +1,6 @@
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
-import { getAuth } from 'firebase/auth';
+import { getAuth, initializeAuth, setPersistence, browserSessionPersistence } from 'firebase/auth';
 import config from '../../firebase-applet-config.json';
 
 /**
@@ -61,7 +61,34 @@ export const db = (resolvedDbId && resolvedDbId !== '(default)')
   ? getFirestore(app, resolvedDbId)
   : getFirestore(app);
 
-export const auth = getAuth(app);
+// Inicializa o Firebase Auth estritamente com persistência isolada por GUIA (sessionStorage).
+// Isso garante isolamento total entre abas no mesmo navegador (ex: Super Admin em uma guia e Lava Jato em outra).
+let authInstance: any;
+try {
+  authInstance = initializeAuth(app, {
+    persistence: browserSessionPersistence
+  });
+} catch (_) {
+  authInstance = getAuth(app);
+}
+
+export const auth = authInstance;
+
+// Isola a autenticação por GUIA (Tab Session Isolation via sessionStorage)
+// Com browserSessionPersistence, as credenciais de autenticação ficam vinculadas apenas à aba atual.
+// Isso impede que abrir uma guia como Super Admin Master sobreponha ou feche outra guia aberta como Dono do Lava-Jato!
+if (typeof window !== 'undefined') {
+  setPersistence(auth, browserSessionPersistence).catch((err) => {
+    console.warn('[Firebase Auth] Persistência isolada por guia configurada:', err);
+  });
+
+  // Limpa resquícios antigos do banco IndexedDB compartilhado entre abas (firebaseLocalStorageDb)
+  if ('indexedDB' in window) {
+    try {
+      indexedDB.deleteDatabase('firebaseLocalStorageDb');
+    } catch (_) {}
+  }
+}
 
 export enum OperationType {
   CREATE = 'create',
