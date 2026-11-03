@@ -2235,6 +2235,19 @@ export async function saveWashHistoryToFirestore(tenantId: string, record: any):
   }
 }
 
+export async function deleteWashHistoryFromFirestore(tenantId: string, historyId: string): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanHId = cleanDocId(historyId);
+    await deleteDoc(doc(db, 'tenants', cleanTId, 'washHistory', cleanHId));
+    return true;
+  } catch (err) {
+    console.error('deleteWashHistoryFromFirestore error:', err);
+    return false;
+  }
+}
+
 export function subscribeToTenantWashHistory(
   tenantId: string, 
   callback: (records: any[]) => void

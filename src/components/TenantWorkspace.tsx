@@ -88,6 +88,7 @@ import {
   subscribeToTenantWashItems,
   syncAllLocalWashesToFirestore,
   saveWashHistoryToFirestore,
+  deleteWashHistoryFromFirestore,
   subscribeToTenantWashHistory,
   saveFidelityRedemptionToFirestore,
   updateFidelityRedemptionInFirestore,
@@ -174,6 +175,79 @@ interface StaffMember {
   defaultCommission: number; // %
   completedWashes: number;
   accumulatedCommission: number; // R$
+}
+
+/**
+ * Deduplica washItems garantindo que não haja registros duplicados por ID ou por placa+status
+ */
+function deduplicateWashItems(items: WashItem[]): WashItem[] {
+  if (!Array.isArray(items)) return [];
+  const seenIds = new Set<string>();
+  const seenPlateStatus = new Set<string>();
+  const result: WashItem[] = [];
+
+  for (const item of items) {
+    if (!item || !item.id) continue;
+    const cleanPlate = (item.plate || '').toUpperCase().trim();
+    const plateKey = cleanPlate ? `${cleanPlate}_${item.status}` : null;
+
+    if (seenIds.has(item.id)) continue;
+    if (plateKey && seenPlateStatus.has(plateKey)) continue;
+
+    seenIds.add(item.id);
+    if (plateKey) seenPlateStatus.add(plateKey);
+    result.push(item);
+  }
+  return result;
+}
+
+/**
+ * Deduplica histórico de lavagens evitando registros duplicados
+ */
+function deduplicateWashHistory(history: CompletedWashRecord[]): CompletedWashRecord[] {
+  if (!Array.isArray(history)) return [];
+  const seenIds = new Set<string>();
+  const seenSignatures = new Set<string>();
+  const result: CompletedWashRecord[] = [];
+
+  for (const item of history) {
+    if (!item || !item.id) continue;
+    const cleanPlate = (item.plate || '').toUpperCase().trim();
+    const signature = `${cleanPlate}_${item.date || ''}_${item.service || ''}_${item.price || 0}`;
+
+    if (seenIds.has(item.id)) continue;
+    if (cleanPlate && seenSignatures.has(signature)) continue;
+
+    seenIds.add(item.id);
+    if (cleanPlate) seenSignatures.add(signature);
+    result.push(item);
+  }
+  return result;
+}
+
+/**
+ * Deduplica agendamentos por ID ou combinação de placa e data
+ */
+function deduplicateAppointments(apps: CustomerAppointment[]): CustomerAppointment[] {
+  if (!Array.isArray(apps)) return [];
+  const seenIds = new Set<string>();
+  const seenSignatures = new Set<string>();
+  const result: CustomerAppointment[] = [];
+
+  for (const app of apps) {
+    if (!app || !app.id) continue;
+    const cleanPlate = (app.plate || '').toUpperCase().trim();
+    const cleanDate = (app.dateTime || '').trim();
+    const signature = `${cleanPlate}_${cleanDate}`;
+
+    if (seenIds.has(app.id)) continue;
+    if (cleanPlate && cleanDate && seenSignatures.has(signature)) continue;
+
+    seenIds.add(app.id);
+    if (cleanPlate && cleanDate) seenSignatures.add(signature);
+    result.push(app);
+  }
+  return result;
 }
 
 interface TenantWorkspaceProps {
@@ -534,7 +608,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       try { 
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          return parsed.filter(w => !w.id.startsWith('w-from-app-init-') && !w.id.startsWith('wh-'));
+          return deduplicateWashItems(parsed.filter(w => !w.id.startsWith('w-from-app-init-') && !w.id.startsWith('wh-')));
         }
       } catch (e) { console.error(e); }
     }
@@ -558,8 +632,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          // Remove qualquer resquício de agendamentos fictícios antigos (app-init-)
-          return parsed.filter(a => !a.id.startsWith('app-init-'));
+          // Remove qualquer resquício de agendamentos fictícios antigos e deduplica
+          return deduplicateAppointments(parsed.filter(a => !a.id.startsWith('app-init-')));
         }
       } catch (e) { console.error(e); }
     }
@@ -572,10 +646,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          if (!isDemoTenant) {
-            return parsed.filter(w => !w.id.startsWith('wh-'));
-          }
-          return parsed;
+          return deduplicateWashHistory(parsed);
         }
       } catch (e) { console.error(e); }
     }
@@ -627,31 +698,64 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     // 2. Escuta Agendamentos em Tempo Real do Firestore
     const unsubApps = subscribeToTenantAppointments(tenant.id, (remoteApps) => {
       if (remoteApps) {
+        const cleanApps = deduplicateAppointments(remoteApps);
         setAppointments(prev => {
           // Detecta se chegou um novo agendamento vindo do celular
-          const newFromPhone = remoteApps.find(ra => !prev.some(p => p.id === ra.id));
+          const newFromPhone = cleanApps.find(ra => !prev.some(p => p.id === ra.id));
           if (newFromPhone && !newFromPhone.id?.startsWith('app-manual-')) {
             showToast(`🔔 Novo agendamento recebido do celular! (${newFromPhone.clientName} - ${newFromPhone.service})`);
           }
-          return remoteApps;
+          return cleanApps;
         });
-        localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remoteApps));
+        localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(cleanApps));
+
+        // Purga duplicatas de agendamentos se existirem no Firestore
+        if (cleanApps.length < remoteApps.length) {
+          const cleanIds = new Set(cleanApps.map(a => a.id));
+          remoteApps.forEach(a => {
+            if (!cleanIds.has(a.id)) {
+              deleteAppointmentFromFirestore(tenant.id, a.id).catch(console.error);
+            }
+          });
+        }
       }
     });
 
     // 3. Escuta Fila do Pátio (Wash Items) em Tempo Real
     const unsubWashes = subscribeToTenantWashItems(tenant.id, (remoteWashes) => {
       if (remoteWashes) {
-        setWashItems(remoteWashes);
-        localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(remoteWashes));
+        const cleanWashes = deduplicateWashItems(remoteWashes);
+        setWashItems(cleanWashes);
+        localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(cleanWashes));
+
+        // Purga duplicatas de lavagens no pátio se existirem no Firestore
+        if (cleanWashes.length < remoteWashes.length) {
+          const cleanIds = new Set(cleanWashes.map(w => w.id));
+          remoteWashes.forEach(w => {
+            if (!cleanIds.has(w.id)) {
+              deleteWashItemFromFirestore(tenant.id, w.id).catch(console.error);
+            }
+          });
+        }
       }
     });
 
     // 4. Escuta Histórico de Lavagens em Tempo Real
     const unsubHistory = subscribeToTenantWashHistory(tenant.id, (remoteHistory) => {
       if (remoteHistory) {
-        setWashHistory(remoteHistory);
-        localStorage.setItem(`saas_tenant_wash_history_${tenant.id}`, JSON.stringify(remoteHistory));
+        const cleanHistory = deduplicateWashHistory(remoteHistory);
+        setWashHistory(cleanHistory);
+        localStorage.setItem(`saas_tenant_wash_history_${tenant.id}`, JSON.stringify(cleanHistory));
+
+        // Purga duplicatas de histórico no Firestore se existirem
+        if (cleanHistory.length < remoteHistory.length) {
+          const cleanIds = new Set(cleanHistory.map(h => h.id));
+          remoteHistory.forEach(h => {
+            if (!cleanIds.has(h.id)) {
+              deleteWashHistoryFromFirestore(tenant.id, h.id).catch(console.error);
+            }
+          });
+        }
       }
     });
 
@@ -1011,10 +1115,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         }));
       }
 
-      // 2. Add to Completed Wash History
+      // 2. Add to Completed Wash History with deterministic ID to prevent duplicates
       const now = new Date();
+      const safeId = item.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const historyId = `wh-${safeId}`;
       const historyEntry: CompletedWashRecord = {
-        id: `wh-${Date.now()}`,
+        id: historyId,
         plate: item.plate,
         vehicle: item.vehicle,
         service: item.service,
@@ -1030,7 +1136,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         paymentMethod: item.price === 0 ? 'Cortesia' : 'PIX',
         durationMinutes: 45
       };
-      setWashHistory(prev => [historyEntry, ...prev]);
+      setWashHistory(prev => deduplicateWashHistory([historyEntry, ...prev.filter(h => h.id !== historyId)]));
       saveWashHistoryToFirestore(tenant.id, historyEntry).catch(console.error);
 
       // 3. EXCLUSIVELY AUTOMATIC FIDELITY POINT ATTRIBUTION BY LAVA-JATO!
@@ -1055,7 +1161,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       }
     }
 
-    setWashItems(prev => prev.map(w => w.id === washId ? { ...w, status: nextStatus } : w));
+    setWashItems(prev => deduplicateWashItems(prev.map(w => w.id === washId ? { ...w, status: nextStatus } : w)));
     updateWashItemStatusInFirestore(tenant.id, washId, nextStatus).catch(console.error);
   };
 
@@ -1099,8 +1205,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     };
     const commAmt = (app.price * (assignedStaff.defaultCommission || 15)) / 100;
 
+    const washId = `w-from-${app.id}`;
     const washFromApp: WashItem = {
-      id: `w-from-${app.id}`,
+      id: washId,
       plate: app.plate,
       vehicle: app.vehicle,
       service: app.service,
@@ -1115,9 +1222,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       createdAt: `Agendado (${app.dateTime.split(' ')[1] || 'Horário'})`
     };
 
-    const newWashList = [washFromApp, ...washItems];
-    // Ao ser selecionado para a fila de lavagem, remove do agendamento para zerar e não deixar agendamento pendente marcado
-    const newAppList = appointments.filter(a => a.id !== app.id);
+    // Remove qualquer wash anterior com mesmo ID ou mesma placa ativa antes de adicionar
+    const cleanWashItems = washItems.filter(w => w.id !== washId && (!w.plate || w.plate.toUpperCase() !== app.plate.toUpperCase() || w.status === 'Concluído'));
+    const newWashList = deduplicateWashItems([washFromApp, ...cleanWashItems]);
+
+    // O status do agendamento passa para 'Em Lavagem' (saindo de 'Pendente' para zerar o contador de pendências)
+    const newAppList = appointments.map(a => a.id === app.id ? { ...a, status: 'Em Lavagem' as const } : a);
 
     setWashItems(newWashList);
     setAppointments(newAppList);
@@ -1142,11 +1252,11 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       defaultCommission: 15
     };
 
-    const newWashes: WashItem[] = pendingApps.map((app, idx) => {
+    const newWashes: WashItem[] = pendingApps.map((app) => {
       const assignedStaff = staffList.find(s => s.id === app.lavadorId) || defaultStaff;
       const commAmt = (app.price * (assignedStaff.defaultCommission || 15)) / 100;
       return {
-        id: `w-from-${app.id}-${idx}`,
+        id: `w-from-${app.id}`,
         plate: app.plate,
         vehicle: app.vehicle,
         service: app.service,
@@ -1162,12 +1272,17 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       };
     });
 
-    const newWashList = [...newWashes, ...washItems];
-    // Zera todos os agendamentos pendentes da lista
-    const remainingApps = appointments.filter(a => a.status !== 'Pendente');
+    const pendingIds = new Set(pendingApps.map(a => a.id));
+    const pendingPlates = new Set(pendingApps.map(a => (a.plate || '').toUpperCase()));
+
+    const cleanWashes = washItems.filter(w => !newWashes.some(nw => nw.id === w.id) && !pendingPlates.has((w.plate || '').toUpperCase()));
+    const newWashList = deduplicateWashItems([...newWashes, ...cleanWashes]);
+
+    // Atualiza todos os agendamentos pendentes para 'Em Lavagem'
+    const updatedApps = appointments.map(a => pendingIds.has(a.id) ? { ...a, status: 'Em Lavagem' as const } : a);
 
     setWashItems(newWashList);
-    setAppointments(remainingApps);
+    setAppointments(updatedApps);
     for (const w of newWashes) {
       saveWashItemToFirestore(tenant.id, w).catch(console.error);
     }
@@ -1175,7 +1290,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       updateAppointmentStatusInFirestore(tenant.id, a.id, 'Em Lavagem').catch(console.error);
     }
     localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
-    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(remainingApps));
+    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updatedApps));
     window.dispatchEvent(new Event('storage'));
     showToast(`🚀 ${pendingApps.length} agendamentos enviados para a Fila do Pátio e sincronizados!`);
   };
@@ -1281,8 +1396,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       notes: histNotes
     };
 
-    const updatedHistory = [newHistoryEntry, ...washHistory];
+    const updatedHistory = deduplicateWashHistory([newHistoryEntry, ...washHistory]);
     setWashHistory(updatedHistory);
+    saveWashHistoryToFirestore(tenant.id, newHistoryEntry).catch(console.error);
     localStorage.setItem(`saas_tenant_wash_history_${tenant.id}`, JSON.stringify(updatedHistory));
 
     setHistPlate('');
@@ -1295,8 +1411,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   };
 
   const handleDeleteHistoryItem = (id: string) => {
-    const updated = washHistory.filter(h => h.id !== id);
+    const updated = deduplicateWashHistory(washHistory.filter(h => h.id !== id));
     setWashHistory(updated);
+    deleteWashHistoryFromFirestore(tenant.id, id).catch(console.error);
     localStorage.setItem(`saas_tenant_wash_history_${tenant.id}`, JSON.stringify(updated));
     showToast('Registro removido do histórico.');
   };
@@ -1382,11 +1499,11 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   };
 
   // Metrics
-  const activePatioCount = washItems.filter(w => w.status !== 'Concluído').length;
-  const completedTodayCount = washItems.filter(w => w.status === 'Concluído').length;
-  const totalRevenueToday = washItems.reduce((acc, curr) => acc + curr.price, 0);
+  const activePatioCount = deduplicateWashItems(washItems.filter(w => w.status !== 'Concluído')).length;
+  const completedTodayCount = deduplicateWashItems(washItems.filter(w => w.status === 'Concluído')).length;
+  const totalRevenueToday = deduplicateWashItems(washItems).reduce((acc, curr) => acc + curr.price, 0);
   const totalCommissionsPending = staffList.reduce((acc, s) => acc + s.accumulatedCommission, 0);
-  const pendingAppointmentsCount = appointments.filter(a => a.status === 'Pendente').length;
+  const pendingAppointmentsCount = deduplicateAppointments(appointments).filter(a => a.status === 'Pendente').length;
 
   const menuItems = [
     {
@@ -1401,8 +1518,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       label: 'Agendamentos',
       icon: CalendarCheck,
       badge: pendingAppointmentsCount > 0 
-        ? `${pendingAppointmentsCount} pendente`
-        : appointments.length > 0 ? `${appointments.length}` : '0',
+        ? `${pendingAppointmentsCount}`
+        : '0',
       badgeColor: pendingAppointmentsCount > 0
         ? 'bg-amber-500 text-slate-950 font-black animate-pulse'
         : 'bg-slate-800 text-slate-400'
@@ -1450,7 +1567,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       id: 'historico-lavagem' as const,
       label: 'Histórico de Lavagem',
       icon: History,
-      badge: washHistory.length > 0 ? `${washHistory.length}` : undefined,
+      badge: deduplicateWashHistory(washHistory).length > 0 ? `${deduplicateWashHistory(washHistory).length}` : undefined,
       badgeColor: 'bg-slate-800 text-slate-300'
     },
     {
@@ -2170,16 +2287,16 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
               <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl p-4 flex flex-col gap-3">
                 <div className="flex justify-between items-center pb-2 border-b border-[#1e293b]">
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span> Concluídos Hoje ({washItems.filter(w => w.status === 'Concluído').length})
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span> Concluídos Hoje ({deduplicateWashItems(washItems.filter(w => w.status === 'Concluído')).length})
                   </span>
                 </div>
 
-                {washItems.filter(w => w.status === 'Concluído').length === 0 ? (
+                {deduplicateWashItems(washItems.filter(w => w.status === 'Concluído')).length === 0 ? (
                   <div className="p-8 text-center text-slate-500 text-xs border border-dashed border-[#1e293b] rounded-lg">
                     Nenhum serviço concluído hoje ainda.
                   </div>
                 ) : (
-                  washItems.filter(w => w.status === 'Concluído').map(item => (
+                  deduplicateWashItems(washItems.filter(w => w.status === 'Concluído')).map(item => (
                     <div key={item.id} className="bg-[#020617]/70 border border-[#1e293b] rounded-lg p-4 space-y-2 opacity-90">
                       <div className="flex justify-between items-start">
                         <div>
@@ -2679,7 +2796,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   <span className="text-[11px] text-slate-400 font-bold uppercase">Lavagens Concluídas</span>
                   <CheckCircle className="w-4 h-4 text-blue-400" />
                 </div>
-                <div className="text-xl font-black text-slate-100 mt-1">{washHistory.length}</div>
+                <div className="text-xl font-black text-slate-100 mt-1">{deduplicateWashHistory(washHistory).length}</div>
               </div>
 
               <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
@@ -2688,7 +2805,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   <DollarSign className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div className="text-xl font-black text-emerald-400 mt-1">
-                  R$ {washHistory.reduce((acc, c) => acc + c.price, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                  R$ {deduplicateWashHistory(washHistory).reduce((acc, c) => acc + c.price, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                 </div>
               </div>
 
@@ -2698,8 +2815,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   <Sparkles className="w-4 h-4 text-indigo-400" />
                 </div>
                 <div className="text-xl font-black text-slate-100 mt-1">
-                  R$ {washHistory.length > 0 
-                    ? (washHistory.reduce((acc, c) => acc + c.price, 0) / washHistory.length).toFixed(2) 
+                  R$ {deduplicateWashHistory(washHistory).length > 0 
+                    ? (deduplicateWashHistory(washHistory).reduce((acc, c) => acc + c.price, 0) / deduplicateWashHistory(washHistory).length).toFixed(2) 
                     : '0.00'}
                 </div>
               </div>
@@ -2710,7 +2827,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   <Percent className="w-4 h-4 text-amber-400" />
                 </div>
                 <div className="text-xl font-black text-amber-400 mt-1">
-                  R$ {washHistory.reduce((acc, c) => acc + c.commissionAmount, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                  R$ {deduplicateWashHistory(washHistory).reduce((acc, c) => acc + c.commissionAmount, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                 </div>
               </div>
             </div>
@@ -2786,7 +2903,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1e293b]">
-                    {washHistory
+                    {deduplicateWashHistory(washHistory)
                       .filter(item => {
                         const todayStr = new Date().toISOString().split('T')[0];
                         const now = new Date();
@@ -2886,7 +3003,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                         </tr>
                       ))}
 
-                    {washHistory.length === 0 && (
+                    {deduplicateWashHistory(washHistory).length === 0 && (
                       <tr>
                         <td colSpan={7} className="py-12 text-center text-slate-500 text-xs">
                           Nenhum registro no histórico de lavagens até o momento.
