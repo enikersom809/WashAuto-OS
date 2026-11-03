@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   Kanban, 
   CalendarCheck, 
@@ -47,6 +47,8 @@ import {
   Fuel,
   Smartphone,
   Bell,
+  BellRing,
+  Volume2,
   Radio,
   Wallet,
   ChevronLeft,
@@ -64,6 +66,14 @@ import { ClientesWorkspace } from './ClientesWorkspace';
 import { TrocaOleoWorkspace } from './TrocaOleoWorkspace';
 import { FluxoCaixaWorkspace } from './FluxoCaixaWorkspace';
 import { VendasBalcaoWorkspace } from './VendasBalcaoWorkspace';
+import { PromoBannersWorkspace } from './PromoBannersWorkspace';
+import {
+  isPushNotificationSupported,
+  getPushNotificationPermission,
+  requestPushPermissionAndSubscribe,
+  disablePushNotifications,
+  sendTestPushNotification
+} from '../lib/pushNotificationService';
 
 import { 
   saveTenantToFirestore,
@@ -199,7 +209,53 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, [initialTenant?.id]);
 
 
-  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'caixa' | 'vendas' | 'clientes' | 'troca-oleo' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'comprar-vitalicio' | 'totem'>('fila');
+  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'caixa' | 'vendas' | 'clientes' | 'troca-oleo' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'comprar-vitalicio' | 'totem' | 'banners-app'>('fila');
+
+  // Notificação Toast Visual para Novo Cadastro no Totem
+  const [totemToast, setTotemToast] = useState<{
+    id: string;
+    clientName: string;
+    phone?: string;
+    vehicle?: string;
+    plate?: string;
+    time: string;
+  } | null>(null);
+
+  // Som de notificação/chime suave com Web Audio API
+  const playTotemChime = useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.12); // A5
+
+      gain.gain.setValueAtTime(0.18, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start();
+      osc.stop(ctx.currentTime + 0.46);
+    } catch (_) {}
+  }, []);
+
+  const triggerTotemNotification = useCallback((detail: { name?: string; phone?: string; vehicle?: string; plate?: string }) => {
+    playTotemChime();
+    setTotemToast({
+      id: `totem-toast-${Date.now()}`,
+      clientName: detail.name || 'Novo Cliente',
+      phone: detail.phone,
+      vehicle: detail.vehicle,
+      plate: detail.plate,
+      time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    });
+  }, [playTotemChime]);
 
   // Estado do Totem de Autoatendimento
   const [copiedTotemUrl, setCopiedTotemUrl] = useState(false);
@@ -230,6 +286,96 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     if (typeof window === 'undefined') return false;
     return localStorage.getItem(`saas_show_sync_badge_${initialTenant?.id}`) === 'true';
   });
+
+  // 🔔 Gerenciador de Notificações Push no Navegador (Web Push / FCM em Segundo Plano)
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>(() => getPushNotificationPermission());
+  const [isPushSubscribed, setIsPushSubscribed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(`saas_push_enabled_${initialTenant?.id}`) === 'true' && Notification.permission === 'granted';
+  });
+  const [isRequestingPush, setIsRequestingPush] = useState(false);
+  const [isTestingPush, setIsTestingPush] = useState(false);
+
+  // Sincroniza inscrição de push se a permissão já estiver concedida
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setPushPermission(Notification.permission);
+      if (Notification.permission === 'granted' && initialTenant?.id) {
+        requestPushPermissionAndSubscribe(initialTenant.id, initialTenant.nomeFantasia || initialTenant.name).then(res => {
+          if (res.success) {
+            setIsPushSubscribed(true);
+          }
+        }).catch(() => {});
+      }
+    }
+  }, [initialTenant?.id, initialTenant?.nomeFantasia, initialTenant?.name]);
+
+  // Escuta cliques de notificações push via Service Worker para focar na aba de clientes
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+    const handleSWMessage = (event: MessageEvent) => {
+      if (event.data && (event.data.type === 'NAVIGATE_TO_TAB' || event.data.type === 'NAVIGATE_TAB')) {
+        if (event.data.tab === 'clientes') {
+          setActiveTab('clientes');
+          showToast('🔔 Redirecionado para Gestão de Clientes & Balcão via Notificação Push!');
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handleSWMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleSWMessage);
+    };
+  }, []);
+
+  // Suporte a abertura direta do navegador após clique na notificação push (ex: /?aba=clientes)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get('aba');
+    if (tabParam === 'clientes') {
+      setActiveTab('clientes');
+    } else if (tabParam === 'totem') {
+      setActiveTab('totem');
+    }
+  }, []);
+
+  const handleTogglePushNotifications = async () => {
+    if (isPushSubscribed) {
+      const disabled = await disablePushNotifications(initialTenant.id);
+      if (disabled) {
+        setIsPushSubscribed(false);
+        showToast('Alertas Push no navegador pausados com sucesso.');
+      }
+    } else {
+      setIsRequestingPush(true);
+      try {
+        const res = await requestPushPermissionAndSubscribe(initialTenant.id, initialTenant.nomeFantasia || initialTenant.name);
+        setPushPermission(res.permission);
+        if (res.success) {
+          setIsPushSubscribed(true);
+          showToast('✅ Alertas Push ativados! Você receberá notificações sonoras mesmo com a aba fechada.');
+        } else {
+          showToast(res.errorMessage || 'Não foi possível ativar as notificações push.');
+        }
+      } catch {
+        showToast('Erro ao configurar permissões no navegador.');
+      } finally {
+        setIsRequestingPush(false);
+      }
+    }
+  };
+
+  const handleTestPushNotification = async () => {
+    setIsTestingPush(true);
+    try {
+      const res = await sendTestPushNotification(initialTenant.id, initialTenant.nomeFantasia || initialTenant.name);
+      showToast(res.message);
+    } catch {
+      showToast('Falha ao enviar notificação push de teste.');
+    } finally {
+      setIsTestingPush(false);
+    }
+  };
 
   // Notificação transmitida em tempo real via SaaS Root
   const [activeBroadcast, setActiveBroadcast] = useState<BroadcastNotification | null>(null);
@@ -522,6 +668,46 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       }
     });
 
+    // 6. Escuta Novos Clientes Cadastrados no Totem em Tempo Real
+    const knownClientIds = new Set<string>();
+    let isInitialClientLoad = true;
+
+    const unsubTotemClients = subscribeToTenantClients(tenant.id, (remoteClients) => {
+      if (isInitialClientLoad) {
+        remoteClients.forEach(c => {
+          const id = c.id || c.uid;
+          if (id) knownClientIds.add(id);
+        });
+        isInitialClientLoad = false;
+        return;
+      }
+
+      for (const client of remoteClients) {
+        const cId = client.id || client.uid;
+        if (cId && !knownClientIds.has(cId)) {
+          knownClientIds.add(cId);
+          const isTotem = (client.origem || '').toLowerCase().includes('totem');
+          if (isTotem) {
+            triggerTotemNotification({
+              name: client.name || client.nomeCompleto || 'Novo Cliente',
+              phone: client.phone || client.telefone,
+              vehicle: client.vehicle ? `${client.vehicle.modelo || client.vehicle} (${client.vehicle.placa || ''})` : undefined,
+              plate: client.vehicle?.placa
+            });
+            break;
+          }
+        }
+      }
+    });
+
+    // Escuta evento customizado de novo cliente do totem no mesmo navegador
+    const handleTotemCustomEvent = (e: any) => {
+      if (e?.detail) {
+        triggerTotemNotification(e.detail);
+      }
+    };
+    window.addEventListener('saas_totem_new_client', handleTotemCustomEvent);
+
     // Fallback de sincronização para eventos de storage local
     const refreshData = () => {
       const savedApps = localStorage.getItem(`saas_tenant_appointments_${tenant.id}`);
@@ -543,10 +729,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       unsubWashes();
       unsubHistory();
       unsubReds();
+      unsubTotemClients();
+      window.removeEventListener('saas_totem_new_client', handleTotemCustomEvent);
       window.removeEventListener('storage', refreshData);
       window.removeEventListener('saas_data_sync', refreshData);
     };
-  }, [tenant.id]);
+  }, [tenant.id, triggerTotemNotification]);
 
   // SaaS Override modules
   const [modules, setModules] = useState([
@@ -1247,6 +1435,13 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       badgeColor: 'bg-purple-500/20 text-purple-300 border border-purple-500/30 font-bold'
     },
     {
+      id: 'banners-app' as const,
+      label: 'Banners & Ofertas do App',
+      icon: Sparkles,
+      badge: 'App',
+      badgeColor: 'bg-pink-500/20 text-pink-300 border border-pink-500/30 font-bold'
+    },
+    {
       id: 'troca-oleo' as const,
       label: 'Troca de Óleo',
       icon: Fuel,
@@ -1298,6 +1493,55 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         <div className="fixed top-4 right-4 z-50 bg-emerald-600 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 animate-bounce">
           <CheckCircle className="w-5 h-5 text-white" />
           <span className="text-xs font-bold">{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Toast Notificação Visual de Novo Cliente no Totem com Som e Atalho Direto */}
+      {totemToast && (
+        <div className="fixed top-4 right-4 z-50 max-w-sm w-full bg-gradient-to-r from-purple-950/95 via-[#0f172a]/95 to-indigo-950/95 border-2 border-purple-500/80 rounded-2xl p-4 shadow-2xl backdrop-blur-md animate-bounce flex items-start gap-3.5 shadow-purple-600/30">
+          <div className="w-10 h-10 rounded-xl bg-purple-600/30 text-purple-400 border border-purple-500/40 flex items-center justify-center shrink-0 shadow-lg shadow-purple-600/30">
+            <Tablet className="w-5 h-5 text-purple-300" />
+          </div>
+          
+          <div className="flex-1 overflow-hidden">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[10px] font-black uppercase tracking-wider text-purple-300 bg-purple-500/20 px-2 py-0.5 rounded-full border border-purple-500/30 flex items-center gap-1">
+                <Sparkles className="w-3 h-3 text-purple-300" />
+                Novo Cliente no Totem
+              </span>
+              <button 
+                onClick={() => setTotemToast(null)}
+                className="text-slate-400 hover:text-white p-0.5 rounded transition cursor-pointer"
+                title="Fechar notificação"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <h4 className="text-sm font-bold text-white mt-1.5 truncate">
+              {totemToast.clientName}
+            </h4>
+            
+            {(totemToast.vehicle || totemToast.phone) && (
+              <p className="text-xs text-slate-300 mt-0.5 truncate">
+                {totemToast.vehicle ? `🚗 ${totemToast.vehicle}` : ''} {totemToast.phone ? `• ${totemToast.phone}` : ''}
+              </p>
+            )}
+
+            <div className="mt-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('clientes');
+                  setTotemToast(null);
+                }}
+                className="w-full py-1.5 px-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md shadow-purple-600/30 cursor-pointer active:scale-98"
+              >
+                <span>Ver em Clientes & Balcão</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1646,6 +1890,38 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   <strong className="text-slate-100">R$ {totalRevenueToday.toLocaleString('pt-BR')}</strong>
                 </div>
               </div>
+
+              {/* Botão de Controle Rápido de Notificações Push (Mesmo com Aba Fechada) */}
+              <button
+                onClick={handleTogglePushNotifications}
+                disabled={isRequestingPush}
+                title={
+                  isPushSubscribed
+                    ? 'Alertas Push Ativos no Navegador (Clique para pausar)'
+                    : 'Ativar Alertas Push no Navegador (Mesmo com Painel Fechado)'
+                }
+                className={`px-2.5 sm:px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+                  isPushSubscribed
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'
+                    : 'bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white'
+                }`}
+              >
+                {isPushSubscribed ? (
+                  <>
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <BellRing className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="hidden md:inline">Push Ativo</span>
+                  </>
+                ) : (
+                  <>
+                    <Bell className="w-3.5 h-3.5 text-slate-400" />
+                    <span className="hidden md:inline">{isRequestingPush ? 'Ativando...' : 'Ativar Push'}</span>
+                  </>
+                )}
+              </button>
 
               {(activeTab === 'fila' || activeTab === 'agendamentos') && (
                 <button
@@ -2843,6 +3119,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           <ClientesWorkspace 
             tenantId={tenant.id}
             tenantNome={tenant.nomeFantasia || tenant.name}
+            tenantSlug={totemCleanSlug}
+            tenant={tenant}
+            appointments={appointments}
           />
         )}
 
@@ -2884,6 +3163,104 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Painel de Controle de Notificações Push (Mesmo com Painel Fechado) */}
+            <div className="bg-[#0f172a] border border-blue-500/30 rounded-2xl p-6 sm:p-7 shadow-xl relative overflow-hidden">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                <div className="space-y-3 max-w-2xl">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center shrink-0 border border-blue-500/30">
+                      <BellRing className="w-5 h-5" />
+                    </div>
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      Alertas Push no Navegador (Mesmo com Aba Fechada)
+                    </h3>
+                    {isPushSubscribed ? (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                        <span className="relative flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                        </span>
+                        Push Ativo & Monitorando em Segundo Plano
+                      </span>
+                    ) : pushPermission === 'denied' ? (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        Bloqueado no Navegador
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                        <Clock className="w-3.5 h-3.5" />
+                        Aguardando Ativação
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                    Com o sistema integrado ao <strong className="text-white">Firebase Cloud Messaging (FCM)</strong> e à <strong className="text-white">Web Push API</strong>, você recebe uma notificação sonora e visual na área de trabalho do computador ou no celular <span className="text-amber-300 font-semibold">sempre que um novo cliente se cadastrar no Totem</span>, mesmo se o navegador estiver minimizado ou com o painel fechado! Ao clicar no alerta, o sistema abre diretamente a aba <span className="text-cyan-300 font-semibold">"Gestão de Clientes & Balcão"</span>.
+                  </p>
+                </div>
+
+                <div className="shrink-0 flex flex-wrap sm:flex-nowrap items-center gap-3">
+                  <button
+                    onClick={handleTogglePushNotifications}
+                    disabled={isRequestingPush}
+                    className={`px-5 py-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-lg active:scale-[0.98] ${
+                      isPushSubscribed
+                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                        : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-blue-600/30'
+                    }`}
+                  >
+                    {isRequestingPush ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Configurando...</span>
+                      </>
+                    ) : isPushSubscribed ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-400" />
+                        <span>Pausar Alertas Push</span>
+                      </>
+                    ) : (
+                      <>
+                        <BellRing className="w-4 h-4" />
+                        <span>Ativar Alertas no Navegador</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={handleTestPushNotification}
+                    disabled={isTestingPush}
+                    className="px-4 py-3 bg-[#020617] hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition cursor-pointer active:scale-[0.98]"
+                    title="Dispara uma notificação de teste para verificar se seu navegador e áudio estão recebendo"
+                  >
+                    {isTestingPush ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                        <span>Disparando...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="w-4 h-4 text-blue-400" />
+                        <span>Testar Notificação</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {pushPermission === 'denied' && (
+                <div className="mt-4 p-3.5 bg-rose-950/30 border border-rose-500/30 rounded-xl flex items-start gap-3 text-xs text-rose-300">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold">Notificações estão bloqueadas pelo seu navegador:</span>
+                    <p className="text-[11px] text-rose-200/80 mt-0.5">
+                      Para receber alertas com a aba fechada, clique no ícone de cadeado ou controles de site ao lado do link no topo do navegador (ao lado de washautoos.netlify.app) e altere a opção "Notificações" para "Permitir".
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Cards de Acesso Rápido ao Totem */}
@@ -3108,6 +3485,14 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             </div>
 
           </div>
+        )}
+
+        {/* ================= ABA: BANNERS PROMOCIONAIS DO APLICATIVO ================= */}
+        {activeTab === 'banners-app' && (
+          <PromoBannersWorkspace 
+            tenant={tenant}
+            onToast={showToast}
+          />
         )}
 
         {/* ================= ABA: TROCA DE ÓLEO & LUBRIFICAÇÃO ================= */}

@@ -273,6 +273,17 @@ export const TotemMode: React.FC<TotemModeProps> = ({
       if (result.success) {
         setIsExistingUser(!!result.isExistingUser);
         setStep(4);
+        try {
+          const detail = {
+            name: name.trim(),
+            phone: phone.trim(),
+            vehicle: `${vehicleModel.trim()} (${vehiclePlate.toUpperCase().trim()})`,
+            plate: vehiclePlate.toUpperCase().trim(),
+            tenantId: tenant.id
+          };
+          window.dispatchEvent(new CustomEvent('saas_totem_new_client', { detail }));
+          localStorage.setItem('saas_last_totem_registration', JSON.stringify({ ...detail, timestamp: Date.now() }));
+        } catch (_) {}
       } else {
         setFormError(result.errorMessage || 'Erro ao registrar cadastro. Tente novamente.');
       }

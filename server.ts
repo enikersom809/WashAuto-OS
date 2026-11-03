@@ -2,6 +2,32 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+import webPush from 'web-push';
+
+// Configuração VAPID oficial para Web Push & Firebase Cloud Messaging
+const VAPID_PUBLIC_KEY = 'BKYRV7kGXesqIWRIeGL0wCZNdkYyg5qRpP3or6VgvA153TcAjQ0k3ikJA5dvFb2JPbirpoRQmNHUL6drnnPiONM';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'yHD67lMmz8o4d7McEjD0nM6Y5kJENCJ_EwDPBbFGfX0';
+
+try {
+  webPush.setVapidDetails(
+    'mailto:suporte@washautoos.com',
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+  console.log('[WebPush] VAPID configurado com sucesso no servidor.');
+} catch (vpErr) {
+  console.warn('[WebPush] Aviso na inicialização VAPID:', vpErr);
+}
+
+// Armazenamento em memória das assinaturas push por tenant para entrega instantânea
+interface PushSubRecord {
+  tenantId: string;
+  subscription: any;
+  fcmToken?: string;
+  tokenDocId?: string;
+  createdAt: string;
+}
+const tenantSubscriptions = new Map<string, PushSubRecord[]>();
 
 async function startServer() {
   const app = express();
@@ -12,6 +38,106 @@ async function startServer() {
   const PORT = cliPort || 3000;
 
   app.use(express.json());
+
+  // Rota estática dedicada para o Service Worker do Firebase Cloud Messaging e Web Push
+  app.get('/firebase-messaging-sw.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Service-Worker-Allowed', '/');
+    res.sendFile(path.join(process.cwd(), 'public', 'firebase-messaging-sw.js'));
+  });
+
+  // Registra / renova a assinatura push de um dispositivo para o tenant
+  app.post('/api/register-push-subscription', (req, res) => {
+    const { tenantId, subscription, fcmToken, tokenDocId } = req.body;
+    if (!tenantId || (!subscription && !fcmToken)) {
+      return res.status(400).json({ success: false, error: 'Dados de inscrição insuficientes' });
+    }
+    const cleanTId = String(tenantId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const existing = tenantSubscriptions.get(cleanTId) || [];
+    
+    // Evita duplicatas pelo endpoint
+    const filtered = existing.filter(s => {
+      if (subscription?.endpoint && s.subscription?.endpoint) {
+        return s.subscription.endpoint !== subscription.endpoint;
+      }
+      return true;
+    });
+
+    if (subscription) {
+      filtered.push({
+        tenantId: cleanTId,
+        subscription,
+        fcmToken,
+        tokenDocId,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    tenantSubscriptions.set(cleanTId, filtered);
+    console.log(`[Push Server] Inscrição registrada para ${cleanTId}. Total de dispositivos ativos: ${filtered.length}`);
+    res.json({ success: true, count: filtered.length });
+  });
+
+  // Dispara notificação Push em segundo plano para todos os dispositivos inscritos do tenant
+  app.post('/api/send-totem-push', async (req, res) => {
+    try {
+      const { tenantId, title, body, url, clientName, phone, vehicle, plate } = req.body;
+      if (!tenantId) {
+        return res.status(400).json({ success: false, error: 'tenantId obrigatório' });
+      }
+      const cleanTId = String(tenantId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const subs = tenantSubscriptions.get(cleanTId) || [];
+
+      const payload = JSON.stringify({
+        title: title || '🚨 Novo Cliente Cadastrado no Totem!',
+        body: body || 'Um novo cliente acaba de se registrar pelo Totem.',
+        url: url || `/?empresa=${encodeURIComponent(cleanTId)}&aba=clientes`,
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        tenantId: cleanTId,
+        clientName: clientName || 'Novo Cliente',
+        phone: phone || '',
+        vehicle: vehicle || '',
+        plate: plate || '',
+        timestamp: Date.now()
+      });
+
+      let sentCount = 0;
+      const expiredEndpoints = new Set<string>();
+
+      await Promise.allSettled(
+        subs.map(async (record) => {
+          if (record.subscription && record.subscription.endpoint) {
+            try {
+              await webPush.sendNotification(record.subscription, payload, {
+                TTL: 86400, // 24h
+                urgency: 'high'
+              });
+              sentCount++;
+            } catch (err: any) {
+              console.warn('[Push Server] Erro ao entregar push no endpoint:', err?.statusCode, err?.message);
+              // 410 Gone ou 404 Not Found indica inscrição revogada ou expirada pelo navegador
+              if (err?.statusCode === 410 || err?.statusCode === 404) {
+                expiredEndpoints.add(record.subscription.endpoint);
+              }
+            }
+          }
+        })
+      );
+
+      // Remove inscrições expiradas
+      if (expiredEndpoints.size > 0) {
+        const remaining = subs.filter(s => !s.subscription?.endpoint || !expiredEndpoints.has(s.subscription.endpoint));
+        tenantSubscriptions.set(cleanTId, remaining);
+      }
+
+      console.log(`[Push Server] Push despachado para tenant ${cleanTId}: ${sentCount} enviados com sucesso.`);
+      res.json({ success: true, sentCount, totalRegistered: subs.length });
+    } catch (err: any) {
+      console.error('[Push Server] Falha no endpoint /api/send-totem-push:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
 
   // API endpoint for Gemini AI Insights
   app.post('/api/ai-insights', async (req, res) => {

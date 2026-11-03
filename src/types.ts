@@ -274,3 +274,20 @@ export interface CounterSaleRecord {
   notes?: string;
   createdAt: string;
 }
+
+export interface PromoBanner {
+  id: string;
+  tenantId: string;
+  tag: string; // Ex: '🔥 Oferta da Semana', '⭐ Lançamento Premium', '⚡ Promoção Relâmpago'
+  title: string;
+  subtitle: string;
+  image: string;
+  serviceName?: string;
+  discountPrice?: number;
+  originalPrice?: number;
+  badge?: string; // Ex: '20% OFF', 'R$ 80', 'Grátis'
+  active: boolean;
+  order?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}

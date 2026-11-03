@@ -28,7 +28,8 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { db, auth, OperationType, handleFirestoreError } from './firebase';
-import { Tenant, OilProductItem, OilChangeRecord, CashTransaction, CashRegisterSession, SaleProductItem, CounterSaleRecord } from '../types';
+import { Tenant, OilProductItem, OilChangeRecord, CashTransaction, CashRegisterSession, SaleProductItem, CounterSaleRecord, PromoBanner } from '../types';
+import { sendTotemPushNotification } from './pushNotificationService';
 
 /**
  * =================================================================
@@ -739,28 +740,41 @@ export async function registerClientFromTotem(params: TotemRegistrationParams): 
 
   // 3. Grava na coleção 'clientes' (utilizada pela visualização de clientes do lava-jato)
   try {
+    const cleanTId = cleanDocId(params.tenantId);
+    const totemClientPayload = removeUndefinedFields({
+      id: clientUid,
+      nomeCompleto: params.name,
+      telefone: params.phone || '',
+      email: normalizedEmail,
+      empresa: params.tenantId,
+      tenantId: params.tenantId,
+      empresaId: params.tenantId,
+      origem: 'Totem de Autoatendimento',
+      veiculos: [{
+        tipo: params.vehicle.tipo || 'Carro',
+        marca: params.vehicle.marca || '',
+        modelo: params.vehicle.modelo || '',
+        cor: params.vehicle.cor || '',
+        placa: (params.vehicle.placa || '').toUpperCase().trim(),
+        ano: params.vehicle.ano || new Date().getFullYear().toString()
+      }],
+      cep: '',
+      endereco: '',
+      bairro: '',
+      cidade: '',
+      estado: '',
+      dataCadastro: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
     await withTimeout(
-      addDoc(collection(db, 'clientes'), {
-        nomeCompleto: params.name,
-        telefone: params.phone || '',
-        email: normalizedEmail,
-        empresa: params.tenantId,
-        origem: 'Totem de Autoatendimento',
-        veiculos: [{
-          tipo: params.vehicle.tipo || 'Carro',
-          marca: params.vehicle.marca || '',
-          modelo: params.vehicle.modelo || '',
-          cor: params.vehicle.cor || '',
-          placa: (params.vehicle.placa || '').toUpperCase().trim(),
-          ano: params.vehicle.ano || new Date().getFullYear().toString()
-        }],
-        cep: '',
-        endereco: '',
-        bairro: '',
-        cidade: '',
-        estado: '',
-        dataCadastro: serverTimestamp()
-      }),
+      setDoc(doc(db, 'clientes', clientUid), totemClientPayload, { merge: true }),
+      5000
+    );
+
+    // Salva também na subcoleção do tenant para consulta garantida
+    await withTimeout(
+      setDoc(doc(db, 'tenants', cleanTId, 'clients', clientUid), totemClientPayload, { merge: true }),
       5000
     );
   } catch (cErr) {
@@ -769,15 +783,30 @@ export async function registerClientFromTotem(params: TotemRegistrationParams): 
 
   // 4. Grava na subcoleção do tenant /tenants/{tenantId}/clients/{clientUid}
   try {
+    const cleanTId = cleanDocId(params.tenantId);
     await withTimeout(
-      setDoc(doc(db, 'tenants', params.tenantId, 'clients', clientUid), removeUndefinedFields({
+      setDoc(doc(db, 'tenants', cleanTId, 'clients', clientUid), removeUndefinedFields({
         uid: clientUid,
+        id: clientUid,
         name: params.name,
+        nomeCompleto: params.name,
         email: normalizedEmail,
         phone: params.phone,
+        telefone: params.phone,
         vehicle: params.vehicle,
+        veiculos: [{
+          tipo: params.vehicle.tipo || 'Carro',
+          marca: params.vehicle.marca || '',
+          modelo: params.vehicle.modelo || '',
+          cor: params.vehicle.cor || '',
+          placa: (params.vehicle.placa || '').toUpperCase().trim(),
+          ano: params.vehicle.ano || new Date().getFullYear().toString()
+        }],
         tenantId: params.tenantId,
-        origem: 'totem',
+        empresa: params.tenantId,
+        empresaId: params.tenantId,
+        origem: 'Totem de Autoatendimento',
+        dataCadastro: new Date().toISOString(),
         createdAt: new Date().toISOString()
       }), { merge: true }),
       5000
@@ -805,6 +834,19 @@ export async function registerClientFromTotem(params: TotemRegistrationParams): 
     localStorage.setItem(key, JSON.stringify([newRecord, ...list.filter((x: any) => x.email !== normalizedEmail)]));
     window.dispatchEvent(new Event('storage'));
   } catch {}
+
+  // 7. 🚀 Dispara Notificação Push em Segundo Plano (alerta no navegador mesmo com a aba fechada)
+  try {
+    sendTotemPushNotification({
+      tenantId: params.tenantId,
+      clientName: params.name,
+      phone: params.phone,
+      vehicle: `${params.vehicle.modelo || ''} (${(params.vehicle.placa || '').toUpperCase()})`,
+      plate: (params.vehicle.placa || '').toUpperCase()
+    }).catch(pushErr => console.warn('[Totem Push Trigger] Falha assíncrona ao despachar:', pushErr));
+  } catch (pushErr) {
+    console.warn('[Totem Push Trigger notice]:', pushErr);
+  }
 
   return {
     success: true,
@@ -1121,13 +1163,17 @@ export async function saveClientFullRegistration(
     const clienteWorkspacePayload = removeUndefinedFields({
       id: cleanId,
       empresa: tenantId || 'default',
+      tenantId: tenantId || 'default',
+      empresaId: tenantId || 'default',
       nomeCompleto: data.name,
+      email: data.email || '',
       telefone: data.phone || '',
       cep: data.cep || '',
       endereco: data.address || '',
       bairro: data.neighborhood || '',
       cidade: data.city || '',
       estado: data.stateUf || '',
+      origem: 'Aplicativo / PWA',
       veiculos: Array.isArray(data.vehicles) && data.vehicles.length > 0 ? data.vehicles.map(v => ({
         tipo: v.type ? (String(v.type).toLowerCase() === 'moto' ? 'Moto' : 'Carro') : 'Carro',
         marca: v.brand || '',
@@ -1140,6 +1186,8 @@ export async function saveClientFullRegistration(
       updatedAt: new Date().toISOString()
     });
 
+    const cleanTId = cleanDocId(tenantId || 'default');
+
     // Agrupa todas as escritas no Firestore em paralelo
     const writes: Promise<any>[] = [
       setDoc(doc(db, 'clients', cleanId), payload, { merge: true }),
@@ -1147,7 +1195,7 @@ export async function saveClientFullRegistration(
     ];
 
     if (tenantId) {
-      writes.push(setDoc(doc(db, 'tenants', tenantId, 'clients', cleanId), payload, { merge: true }));
+      writes.push(setDoc(doc(db, 'tenants', cleanTId, 'clients', cleanId), clienteWorkspacePayload, { merge: true }));
     }
 
     // Se houver usuário autenticado no Firebase Auth, garante a ficha em /usuarios
@@ -1934,6 +1982,51 @@ export async function saveAppointmentToFirestore(tenantId: string, appointment: 
     try {
       await setDoc(doc(db, 'appointments', appId), payload, { merge: true });
     } catch (_) {}
+
+    // 🚗 Garante também que o cliente do agendamento conste no cadastro oficial de clientes deste lava-jato (/clientes e /tenants/{tenantId}/clients)
+    if (appointment.clientName && appointment.clientName.trim()) {
+      try {
+        const clientPhoneDigits = (appointment.clientPhone || '').replace(/\D/g, '');
+        const clientEmailClean = (appointment.clientEmail || '').trim().toLowerCase();
+        const clientCleanId = clientPhoneDigits && clientPhoneDigits.length >= 8
+          ? clientPhoneDigits
+          : (clientEmailClean ? clientEmailClean.replace(/[^a-z0-9]/g, '_') : `c-${cleanDocId(appointment.clientName)}`);
+
+        const vehicleItem = (appointment.plate || appointment.vehicle) ? [{
+          tipo: 'Carro' as const,
+          marca: appointment.vehicle ? appointment.vehicle.split(' ')[0] : 'Geral',
+          modelo: appointment.vehicle || 'Veículo',
+          cor: '',
+          ano: '',
+          placa: (appointment.plate || '').toUpperCase().trim()
+        }] : [];
+
+        const clientDocPayload = removeUndefinedFields({
+          id: clientCleanId,
+          nomeCompleto: appointment.clientName.trim(),
+          telefone: appointment.clientPhone || '',
+          email: clientEmailClean,
+          empresa: cleanTId,
+          tenantId: cleanTId,
+          empresaId: cleanTId,
+          origem: 'Agendamento Online',
+          veiculos: vehicleItem,
+          cep: '',
+          endereco: appointment.addressSummary || '',
+          bairro: '',
+          cidade: '',
+          estado: '',
+          dataCadastro: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+
+        await setDoc(doc(db, 'clientes', clientCleanId), clientDocPayload, { merge: true });
+        await setDoc(doc(db, 'tenants', cleanTId, 'clients', clientCleanId), clientDocPayload, { merge: true });
+        console.log(`👤 [Cliente Sync] Cliente "${appointment.clientName}" integrado à Gestão de Clientes do lava-jato ${cleanTId}`);
+      } catch (clientSyncErr) {
+        console.warn('Aviso ao sincronizar ficha de cliente do agendamento:', clientSyncErr);
+      }
+    }
 
     console.log(`📡 [RealTime Sync] Agendamento ${appId} salvo no Firestore para o lava-jato ${cleanTId}`);
     return true;
@@ -2865,6 +2958,114 @@ export function subscribeToTenantCounterSales(
     return () => {};
   }
 }
+
+/**
+ * =================================================================
+ * 11. BANNERS PROMOCIONAIS PARA O APLICATIVO DO CLIENTE
+ * Permite ao lava-jato criar ofertas, promoções e comunicados visuais
+ * com foto, desconto e botão direto para agendar no app do cliente.
+ * =================================================================
+ */
+
+export async function savePromoBannerToFirestore(
+  tenantId: string,
+  banner: PromoBanner
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanBId = cleanDocId(banner.id || `banner-${Date.now()}`);
+    const dataToSave = removeUndefinedFields({
+      ...banner,
+      id: cleanBId,
+      tenantId: cleanTId,
+      updatedAt: new Date().toISOString()
+    });
+
+    await setDoc(doc(db, 'tenants', cleanTId, 'promo_banners', cleanBId), dataToSave, { merge: true });
+
+    // Fallback local imediato
+    try {
+      const storageKey = `saas_tenant_promo_banners_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((b: any) => b.id !== cleanBId);
+      localStorage.setItem(storageKey, JSON.stringify([dataToSave, ...filtered]));
+      window.dispatchEvent(new Event('storage'));
+      window.dispatchEvent(new CustomEvent('saas_promo_banner_updated', { detail: dataToSave }));
+    } catch (_) {}
+
+    console.log(`📢 [Banners] Banner promocional "${banner.title}" salvo para o tenant ${cleanTId}`);
+    return true;
+  } catch (err) {
+    console.error('savePromoBannerToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deletePromoBannerFromFirestore(
+  tenantId: string,
+  bannerId: string
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const cleanBId = cleanDocId(bannerId);
+    await deleteDoc(doc(db, 'tenants', cleanTId, 'promo_banners', cleanBId));
+
+    try {
+      const storageKey = `saas_tenant_promo_banners_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((b: any) => b.id !== cleanBId);
+      localStorage.setItem(storageKey, JSON.stringify(filtered));
+      window.dispatchEvent(new Event('storage'));
+      window.dispatchEvent(new CustomEvent('saas_promo_banner_deleted', { detail: cleanBId }));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('deletePromoBannerFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantPromoBanners(
+  tenantId: string,
+  callback: (banners: PromoBanner[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'promo_banners');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: PromoBanner[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as PromoBanner);
+      });
+      // Ordena por ordem ou mais recentes
+      items.sort((a, b) => {
+        if (typeof a.order === 'number' && typeof b.order === 'number') {
+          return a.order - b.order;
+        }
+        return new Date(b.createdAt || b.updatedAt || 0).getTime() - new Date(a.createdAt || a.updatedAt || 0).getTime();
+      });
+
+      try {
+        localStorage.setItem(`saas_tenant_promo_banners_${cleanTId}`, JSON.stringify(items));
+      } catch (_) {}
+
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantPromoBanners error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantPromoBanners init error:', err);
+    return () => {};
+  }
+}
+
 
 
 

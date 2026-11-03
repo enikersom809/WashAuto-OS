@@ -572,7 +572,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         }
 
         const effectiveSlug = regSubdomain || (typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('empresa') : '') || '';
-        const tenantToOpen = resolveTenantByDomain(effectiveSlug, effectiveSlug ? `${effectiveSlug} Lava-Jato` : undefined);
+        let resolvedTenant = resolveTenantByDomain(effectiveSlug, effectiveSlug ? `${effectiveSlug} Lava-Jato` : undefined);
+        if (effectiveSlug) {
+          try {
+            const fireTenant = await getTenantByIdOrSlugFirestore(effectiveSlug);
+            if (fireTenant) {
+              resolvedTenant = fireTenant;
+            }
+          } catch (_) {}
+        }
+        const tenantToOpen = resolvedTenant;
         
         const validVehicles = regVehicles
           .filter(v => v.model.trim() || v.plate.trim() || v.brand.trim())

@@ -32,7 +32,7 @@ import {
   Activity,
   CalendarCheck
 } from 'lucide-react';
-import { Tenant } from '../types';
+import { Tenant, PromoBanner } from '../types';
 import { 
   saveClientEmailMapping, 
   saveClientFullRegistration,
@@ -43,7 +43,8 @@ import {
   subscribeToTenantRedemptions,
   subscribeToFidelityPoints,
   subscribeToTenantWashItems,
-  sendUserPasswordResetEmail
+  sendUserPasswordResetEmail,
+  subscribeToTenantPromoBanners
 } from '../lib/firebaseService';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -102,42 +103,73 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   onNewAppointmentCreated,
   onLogout
 }) => {
-  // Carousel State
+  // Carousel State & Banners Promocionais Dinâmicos do Lava-Jato
   const [activeSlide, setActiveSlide] = useState(0);
-  const slides = [
+  const [promoBanners, setPromoBanners] = useState<PromoBanner[]>([]);
+
+  // Escuta os banners promocionais configurados pela empresa no Firestore
+  useEffect(() => {
+    const unsub = subscribeToTenantPromoBanners(tenant.id, (banners) => {
+      const activeOnly = banners.filter(b => b.active !== false);
+      setPromoBanners(activeOnly);
+    });
+    return () => unsub();
+  }, [tenant.id]);
+
+  const defaultSlides = useMemo(() => [
     {
-      id: 1,
+      id: 'default-1',
       tag: '🔥 Oferta da Semana',
       title: 'Combo Vitrificação + Higienização',
       subtitle: 'Ganhe 20% OFF agendando de terça a quinta-feira!',
       image: 'https://images.unsplash.com/photo-1520340356584-f9917d1eea6f?auto=format&fit=crop&w=1200&q=80',
       serviceName: 'Combo Vitrificação + Higienização',
-      discountPrice: 480
+      discountPrice: 480,
+      badge: '20% OFF'
     },
     {
-      id: 2,
+      id: 'default-2',
       tag: '⭐ Lançamento Premium',
       title: 'Lavagem Detalhada + Cera Carnaúba',
       subtitle: 'Proteção de pintura com brilho molhado e secagem a ar quente.',
       image: 'https://images.unsplash.com/photo-1607860108855-64acf2078ed9?auto=format&fit=crop&w=1200&q=80',
       serviceName: 'Lavagem Detalhada + Cera Carnaúba',
-      discountPrice: 120
+      discountPrice: 120,
+      badge: 'R$ 120'
     },
     {
-      id: 3,
+      id: 'default-3',
       tag: '⚡ Lavagem Express',
       title: 'Ducha Ecológica + Pretinho nas Rodas',
       subtitle: 'Atendimento rápido em até 25 minutos sem agendamento demorado.',
       image: 'https://images.unsplash.com/photo-1507136566006-cfc505b114fc?auto=format&fit=crop&w=1200&q=80',
       serviceName: 'Ducha Ecológica + Pretinho',
-      discountPrice: 45
+      discountPrice: 45,
+      badge: 'R$ 45'
     }
-  ];
+  ], []);
+
+  const slides = useMemo(() => {
+    if (promoBanners.length > 0) {
+      return promoBanners.map(b => ({
+        id: b.id,
+        tag: b.tag,
+        title: b.title,
+        subtitle: b.subtitle,
+        image: b.image,
+        serviceName: b.serviceName || b.title,
+        discountPrice: b.discountPrice,
+        badge: b.badge
+      }));
+    }
+    return defaultSlides;
+  }, [promoBanners, defaultSlides]);
 
   // Auto-play banner carousel automatically every 4.5 seconds
   useEffect(() => {
+    if (slides.length <= 1) return;
     const timer = setInterval(() => {
-      setActiveSlide((prev) => (prev === slides.length - 1 ? 0 : prev + 1));
+      setActiveSlide((prev) => (prev >= slides.length - 1 ? 0 : prev + 1));
     }, 4500);
     return () => clearInterval(timer);
   }, [slides.length]);
@@ -1367,10 +1399,14 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                     </p>
                     <div className="pt-2">
                       <button
-                        onClick={() => handleSelectPromotion(slide.serviceName, slide.discountPrice)}
-                        className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-blue-600/30 transition cursor-pointer"
+                        onClick={() => handleSelectPromotion(slide.serviceName, slide.discountPrice || 60)}
+                        className="bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-blue-600/30 transition cursor-pointer"
                       >
-                        <span>Aproveitar por R$ {slide.discountPrice.toFixed(2)}</span>
+                        <span>
+                          {typeof slide.discountPrice === 'number' && slide.discountPrice > 0
+                            ? `Aproveitar por R$ ${slide.discountPrice.toFixed(2)}`
+                            : (slide.badge ? `Aproveitar (${slide.badge})` : 'Aproveitar Oferta')}
+                        </span>
                         <ChevronRight className="w-4 h-4" />
                       </button>
                     </div>

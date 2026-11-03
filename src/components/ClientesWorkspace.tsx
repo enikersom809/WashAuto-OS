@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   collection, 
   addDoc, 
+  setDoc,
   deleteDoc,
   doc,
   query, 
@@ -21,13 +22,16 @@ import {
   CheckCircle2, 
   AlertCircle, 
   Loader2, 
-  ExternalLink,
-  MessageCircle,
-  Calendar
+  MessageCircle, 
+  Mail, 
+  Tablet, 
+  Smartphone, 
+  Calendar,
+  RefreshCw,
+  Sparkles
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
-
 
 export interface Veiculo {
   tipo: 'Carro' | 'Moto';
@@ -42,20 +46,26 @@ export interface Cliente {
   id?: string;
   nomeCompleto: string;
   telefone?: string;
+  email?: string;
   cep: string;
   endereco: string;
   numero?: string;
   bairro: string;
   cidade: string;
   estado: string;
+  origem?: string;
   veiculos: Veiculo[];
   empresa: string;
+  tenantId?: string;
   dataCadastro?: any;
 }
 
 export interface ClientesWorkspaceProps {
-  tenantId: string; // Passado via props após o login do tenant
+  tenantId: string;
   tenantNome?: string;
+  tenantSlug?: string;
+  tenant?: any;
+  appointments?: any[];
 }
 
 const inputStyle: React.CSSProperties = {
@@ -103,19 +113,168 @@ const btnSecondaryStyle: React.CSSProperties = {
   gap: '6px'
 };
 
-export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, tenantNome }) => {
-  const [clientes, setClientes] = useState<Cliente[]>([]);
+function normalizePlate(p?: string): string {
+  return (p || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function cleanDocId(id: string): string {
+  if (!id) return `doc-${Date.now()}`;
+  return String(id).trim().replace(/[^a-zA-Z0-9_\-.:@]/g, '_') || `doc-${Date.now()}`;
+}
+
+/**
+ * Função de mesclagem e deduplicação inteligente de clientes vindos de múltiplas fontes:
+ * /clientes, /tenants/{tenantId}/clients, /usuarios, agendamentos e cache local do totem.
+ */
+function mergeAndDeduplicateClients(sourceGroups: any[][]): Cliente[] {
+  const mapByKey = new Map<string, Cliente>();
+
+  for (const list of sourceGroups) {
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (!raw) continue;
+      const nomeCompleto = String(raw.nomeCompleto || raw.name || raw.nome || raw.clientName || '').trim();
+      if (!nomeCompleto) continue;
+
+      const rawPhone = String(raw.telefone || raw.phone || raw.clientPhone || '').trim();
+      const phoneDigits = cleanDigits(rawPhone);
+      const email = String(raw.email || raw.clientEmail || '').trim().toLowerCase();
+
+      // Extração e normalização de veículos
+      let rawVehicles: any[] = [];
+      if (Array.isArray(raw.veiculos) && raw.veiculos.length > 0) {
+        rawVehicles = raw.veiculos;
+      } else if (raw.vehicle) {
+        if (typeof raw.vehicle === 'object') {
+          rawVehicles = [raw.vehicle];
+        } else if (typeof raw.vehicle === 'string') {
+          const parts = raw.vehicle.trim().split(' ');
+          rawVehicles = [{
+            tipo: 'Carro',
+            marca: parts[0] || 'Geral',
+            modelo: raw.vehicle,
+            placa: raw.plate || raw.placa || ''
+          }];
+        }
+      } else if (raw.plate || raw.placa) {
+        rawVehicles = [{
+          tipo: 'Carro',
+          marca: 'Geral',
+          modelo: 'Veículo',
+          placa: raw.plate || raw.placa || ''
+        }];
+      }
+
+      const formattedVehicles: Veiculo[] = rawVehicles
+        .filter(v => v && (v.marca || v.modelo || v.placa))
+        .map(v => ({
+          tipo: v.tipo ? (String(v.tipo).toLowerCase().includes('moto') ? 'Moto' : 'Carro') : 'Carro',
+          marca: String(v.marca || v.brand || 'Geral').trim(),
+          modelo: String(v.modelo || v.model || 'Veículo').trim(),
+          cor: String(v.cor || v.color || '').trim(),
+          ano: String(v.ano || v.year || '').trim(),
+          placa: String(v.placa || v.plate || '').toUpperCase().trim()
+        }));
+
+      // Chave única para evitar duplicatas:
+      // 1º Telefone com DDD (últimos 9 dígitos)
+      // 2º E-mail
+      // 3º Nome normalizado + Primeira Placa
+      let dedupeKey = '';
+      if (phoneDigits && phoneDigits.length >= 8) {
+        dedupeKey = `tel_${phoneDigits.slice(-9)}`;
+      } else if (email && email.includes('@')) {
+        dedupeKey = `mail_${email}`;
+      } else {
+        const normName = nomeCompleto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+        const firstPlate = formattedVehicles.find(v => v.placa)?.placa || '';
+        dedupeKey = `name_${normName}_${normalizePlate(firstPlate)}`;
+      }
+
+      const existing = mapByKey.get(dedupeKey);
+      if (!existing) {
+        mapByKey.set(dedupeKey, {
+          id: raw.id || raw.uid || `c-${dedupeKey}`,
+          nomeCompleto,
+          telefone: rawPhone,
+          email,
+          cep: raw.cep || '',
+          endereco: raw.endereco || raw.address || '',
+          numero: raw.numero || raw.number || '',
+          bairro: raw.bairro || raw.neighborhood || '',
+          cidade: raw.cidade || raw.city || '',
+          estado: raw.estado || raw.state || raw.stateUf || '',
+          origem: raw.origem || (raw.origin ? String(raw.origin) : 'Balcão / Nuvem'),
+          veiculos: formattedVehicles,
+          empresa: raw.empresa || raw.tenantId || '',
+          tenantId: raw.tenantId || raw.empresa || '',
+          dataCadastro: raw.dataCadastro || raw.createdAt || raw.updatedAt || new Date().toISOString()
+        });
+      } else {
+        // Enriquecimento com dados adicionais
+        if (!existing.telefone && rawPhone) existing.telefone = rawPhone;
+        if (!existing.email && email) existing.email = email;
+        if (!existing.endereco && (raw.endereco || raw.address)) existing.endereco = raw.endereco || raw.address;
+        if (!existing.cep && raw.cep) existing.cep = raw.cep;
+        if (!existing.cidade && (raw.cidade || raw.city)) existing.cidade = raw.cidade || raw.city;
+        if (!existing.bairro && (raw.bairro || raw.neighborhood)) existing.bairro = raw.bairro || raw.neighborhood;
+        if (!existing.estado && (raw.estado || raw.stateUf)) existing.estado = raw.estado || raw.stateUf;
+        
+        // Prioriza origem detalhada
+        if (raw.origem && (!existing.origem || existing.origem === 'Balcão / Nuvem')) {
+          existing.origem = raw.origem;
+        }
+
+        // Adiciona veículos sem duplicar placas iguais
+        for (const newV of formattedVehicles) {
+          const normP = normalizePlate(newV.placa);
+          const existsPlate = normP && existing.veiculos.some(v => normalizePlate(v.placa) === normP);
+          if (!existsPlate && (newV.marca || newV.modelo || newV.placa)) {
+            existing.veiculos.push(newV);
+          }
+        }
+      }
+    }
+  }
+
+  const result = Array.from(mapByKey.values());
+  // Ordena por data de cadastro decrescente (mais recentes primeiro)
+  result.sort((a, b) => {
+    const tA = a.dataCadastro?.toMillis ? a.dataCadastro.toMillis() : (a.dataCadastro ? new Date(a.dataCadastro).getTime() : 0);
+    const tB = b.dataCadastro?.toMillis ? b.dataCadastro.toMillis() : (b.dataCadastro ? new Date(b.dataCadastro).getTime() : 0);
+    return tB - tA;
+  });
+
+  return result;
+}
+
+export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ 
+  tenantId, 
+  tenantNome,
+  tenantSlug,
+  tenant,
+  appointments = []
+}) => {
   const [loading, setLoading] = useState<boolean>(true);
   const [busca, setBusca] = useState<string>('');
   
+  // Estados para as fontes de dados em tempo real
+  const [clientesDb, setClientesDb] = useState<any[]>([]);
+  const [subcollectionDb, setSubcollectionDb] = useState<any[]>([]);
+  const [usuariosDb, setUsuariosDb] = useState<any[]>([]);
+  const [localTotemClients, setLocalTotemClients] = useState<any[]>([]);
+  const [realtimeAppointments, setRealtimeAppointments] = useState<any[]>([]);
+
   // Feedback
   const [feedback, setFeedback] = useState<{ tipo: 'sucesso' | 'erro'; mensagem: string } | null>(null);
   const [isBuscandoCep, setIsBuscandoCep] = useState<boolean>(false);
   const [isSalvando, setIsSalvando] = useState<boolean>(false);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   // Estados para o Formulário de Cadastro Manual/Interno (Balcão)
   const [nomeCompleto, setNomeCompleto] = useState('');
   const [telefone, setTelefone] = useState('');
+  const [emailForm, setEmailForm] = useState('');
   const [cep, setCep] = useState('');
   const [endereco, setEndereco] = useState('');
   const [numero, setNumero] = useState('');
@@ -136,7 +295,60 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
     }
   }, [feedback]);
 
-  // 1. ESCUTA EM TEMPO REAL DOS CLIENTES DESTE LAVA-JATO NO FIRESTORE (/clientes)
+  // Computa slugs alternativos para queries resilientes
+  const cleanTenantSlug = useMemo(() => {
+    const raw = tenantSlug || tenant?.slug || tenantNome || '';
+    return raw
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '')
+      .trim();
+  }, [tenantSlug, tenant?.slug, tenantNome]);
+
+  const cleanTId = useMemo(() => cleanDocId(tenantId), [tenantId]);
+
+  // Carrega clientes do cache local do Totem e perfis salvos
+  const loadLocalClients = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const allLocal: any[] = [];
+      
+      // 1. Totem tablet cache
+      const rawTotem = localStorage.getItem(`saas_totem_clients_${tenantId}`);
+      if (rawTotem) {
+        const parsed = JSON.parse(rawTotem);
+        if (Array.isArray(parsed)) allLocal.push(...parsed);
+      }
+      if (cleanTId !== tenantId) {
+        const rawTotemClean = localStorage.getItem(`saas_totem_clients_${cleanTId}`);
+        if (rawTotemClean) {
+          const parsed = JSON.parse(rawTotemClean);
+          if (Array.isArray(parsed)) allLocal.push(...parsed);
+        }
+      }
+
+      // 2. Client profile
+      const rawProfile = localStorage.getItem(`saas_client_profile_${tenantId}`);
+      if (rawProfile) {
+        const p = JSON.parse(rawProfile);
+        if (p.name) {
+          const rawVeh = localStorage.getItem(`saas_client_vehicles_${tenantId}`);
+          allLocal.push({
+            nomeCompleto: p.name,
+            telefone: p.phone,
+            email: p.email,
+            origem: 'Aplicativo / PWA',
+            veiculos: rawVeh ? JSON.parse(rawVeh) : []
+          });
+        }
+      }
+
+      setLocalTotemClients(allLocal);
+    } catch (_) {}
+  }, [tenantId, cleanTId]);
+
+  // 1. ESCUTA EM TEMPO REAL MULTI-COLEÇÃO DO FIRESTORE
   useEffect(() => {
     if (!tenantId) {
       setLoading(false);
@@ -144,43 +356,145 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
     }
 
     setLoading(true);
+    loadLocalClients();
 
-    // Consulta os clientes pertencentes a esta empresa
-    const q = query(
-      collection(db, 'clientes'),
-      where('empresa', '==', tenantId)
-    );
+    const unsubscribers: (() => void)[] = [];
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const listaClientes: Cliente[] = [];
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        listaClientes.push({ 
-          id: docSnap.id, 
-          ...data,
-          veiculos: Array.isArray(data.veiculos) ? data.veiculos : []
-        } as Cliente);
-      });
+    // A) Escuta na coleção raiz '/clientes' por 'empresa' == tenantId
+    try {
+      const qClientesTenantId = query(
+        collection(db, 'clientes'),
+        where('empresa', '==', tenantId)
+      );
+      const unsub1 = onSnapshot(qClientesTenantId, (snapshot) => {
+        const items: any[] = [];
+        snapshot.forEach((docSnap) => items.push({ id: docSnap.id, ...docSnap.data() }));
+        setClientesDb(prev => {
+          const others = prev.filter(x => x._source !== 'empresa_tenantId');
+          return [...others, ...items.map(i => ({ ...i, _source: 'empresa_tenantId' }))];
+        });
+        setLoading(false);
+      }, (err) => console.warn('Erro na consulta /clientes por tenantId:', err));
+      unsubscribers.push(unsub1);
+    } catch (_) {}
 
-      // Ordena de forma segura em memória (mais recentes primeiro)
-      listaClientes.sort((a, b) => {
-        const tA = a.dataCadastro?.toMillis ? a.dataCadastro.toMillis() : (a.dataCadastro ? new Date(a.dataCadastro).getTime() : 0);
-        const tB = b.dataCadastro?.toMillis ? b.dataCadastro.toMillis() : (b.dataCadastro ? new Date(b.dataCadastro).getTime() : 0);
-        return tB - tA;
-      });
+    // B) Escuta na coleção raiz '/clientes' por slug se for diferente do tenantId (ex: box1000)
+    if (cleanTenantSlug && cleanTenantSlug !== tenantId) {
+      try {
+        const qClientesSlug = query(
+          collection(db, 'clientes'),
+          where('empresa', '==', cleanTenantSlug)
+        );
+        const unsub2 = onSnapshot(qClientesSlug, (snapshot) => {
+          const items: any[] = [];
+          snapshot.forEach((docSnap) => items.push({ id: docSnap.id, ...docSnap.data() }));
+          setClientesDb(prev => {
+            const others = prev.filter(x => x._source !== 'empresa_slug');
+            return [...others, ...items.map(i => ({ ...i, _source: 'empresa_slug' }))];
+          });
+        }, (err) => console.warn('Erro na consulta /clientes por slug:', err));
+        unsubscribers.push(unsub2);
+      } catch (_) {}
 
-      setClientes(listaClientes);
-      setLoading(false);
-    }, (error) => {
-      console.error("Erro ao escutar clientes do Firestore:", error);
-      setFeedback({ tipo: 'erro', mensagem: 'Falha ao sincronizar clientes da nuvem.' });
-      setLoading(false);
-    });
+      try {
+        const qClientesTSlug = query(
+          collection(db, 'clientes'),
+          where('empresa', '==', `t-${cleanTenantSlug}`)
+        );
+        const unsub3 = onSnapshot(qClientesTSlug, (snapshot) => {
+          const items: any[] = [];
+          snapshot.forEach((docSnap) => items.push({ id: docSnap.id, ...docSnap.data() }));
+          setClientesDb(prev => {
+            const others = prev.filter(x => x._source !== 'empresa_tslug');
+            return [...others, ...items.map(i => ({ ...i, _source: 'empresa_tslug' }))];
+          });
+        }, (err) => console.warn('Erro na consulta /clientes por t-slug:', err));
+        unsubscribers.push(unsub3);
+      } catch (_) {}
+    }
 
-    return () => unsubscribe();
-  }, [tenantId]);
+    // C) Escuta na subcoleção do lava-jato '/tenants/{cleanTId}/clients'
+    try {
+      const colSubRef = collection(db, 'tenants', cleanTId, 'clients');
+      const unsubSub = onSnapshot(colSubRef, (snapshot) => {
+        const items: any[] = [];
+        snapshot.forEach((docSnap) => items.push({ id: docSnap.id, ...docSnap.data() }));
+        setSubcollectionDb(items);
+        setLoading(false);
+      }, (err) => console.warn('Erro ao escutar subcoleção tenants/clients:', err));
+      unsubscribers.push(unsubSub);
+    } catch (_) {}
 
-  // 2. BUSCA AUTOMÁTICA DE CEP VIA API (ViaCEP corrigido)
+    // D) Escuta em '/usuarios' com role == 'cliente'
+    try {
+      const qUsuarios = query(
+        collection(db, 'usuarios'),
+        where('role', '==', 'cliente')
+      );
+      const unsubUsers = onSnapshot(qUsuarios, (snapshot) => {
+        const items: any[] = [];
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data();
+          const matches = d.tenantId === tenantId || 
+                          d.tenantId === cleanTId || 
+                          d.empresaId === tenantId || 
+                          d.empresaId === cleanTId ||
+                          (cleanTenantSlug && (d.tenantId === cleanTenantSlug || d.empresaId === cleanTenantSlug));
+          if (matches) {
+            items.push({ id: docSnap.id, ...d });
+          }
+        });
+        setUsuariosDb(items);
+      }, (err) => console.warn('Erro ao escutar usuarios:', err));
+      unsubscribers.push(unsubUsers);
+    } catch (_) {}
+
+    // E) Escuta em tempo real em '/tenants/{cleanTId}/appointments'
+    try {
+      const colAppRef = collection(db, 'tenants', cleanTId, 'appointments');
+      const unsubApps = onSnapshot(colAppRef, (snapshot) => {
+        const items: any[] = [];
+        snapshot.forEach((docSnap) => items.push({ id: docSnap.id, ...docSnap.data() }));
+        setRealtimeAppointments(items);
+      }, (err) => console.warn('Erro ao escutar agendamentos para clientes:', err));
+      unsubscribers.push(unsubApps);
+    } catch (_) {}
+
+    // Escuta evento de storage para sincronização instantânea de totem
+    const handleStorageEvent = () => loadLocalClients();
+    window.addEventListener('storage', handleStorageEvent);
+    window.addEventListener('saas_data_sync', handleStorageEvent);
+
+    return () => {
+      unsubscribers.forEach(unsub => unsub());
+      window.removeEventListener('storage', handleStorageEvent);
+      window.removeEventListener('saas_data_sync', handleStorageEvent);
+    };
+  }, [tenantId, cleanTId, cleanTenantSlug, loadLocalClients]);
+
+  // Agrega e deduplica todas as fontes em uma lista única
+  const clientes = useMemo(() => {
+    return mergeAndDeduplicateClients([
+      clientesDb,
+      subcollectionDb,
+      usuariosDb,
+      realtimeAppointments,
+      appointments,
+      localTotemClients
+    ]);
+  }, [clientesDb, subcollectionDb, usuariosDb, realtimeAppointments, appointments, localTotemClients]);
+
+  // Ação manual de recarregar dados
+  const handleManualRefresh = () => {
+    setIsRefreshing(true);
+    loadLocalClients();
+    setTimeout(() => {
+      setIsRefreshing(false);
+      setFeedback({ tipo: 'sucesso', mensagem: 'Base de clientes atualizada com a nuvem!' });
+    }, 600);
+  };
+
+  // 2. BUSCA AUTOMÁTICA DE CEP VIA API
   const handleBuscarCEP = async (cepValue: string) => {
     const limpo = cleanDigits(cepValue).slice(0, 8);
     if (limpo.length !== 8) return;
@@ -205,7 +519,6 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
       setIsBuscandoCep(false);
     }
   };
-
 
   // 3. ADICIONAR / REMOVER CAMPO DE VEÍCULO DINAMICAMENTE
   const handleAddVehicleField = () => {
@@ -239,35 +552,50 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
         .filter(v => v.marca.trim() || v.modelo.trim() || v.placa.trim())
         .map(v => ({
           tipo: v.tipo || 'Carro',
-          marca: v.marca.trim(),
-          modelo: v.modelo.trim(),
+          marca: v.marca.trim() || 'Geral',
+          modelo: v.modelo.trim() || 'Veículo',
           cor: v.cor.trim(),
           ano: v.ano.trim(),
-          placa: v.placa.trim().toUpperCase()
+          placa: (v.placa || '').toUpperCase().trim()
         }));
 
-      const novoCliente: Omit<Cliente, 'id'> = {
+      const finalVeiculos = veiculosFormatados.length > 0 ? veiculosFormatados : [
+        { tipo: 'Carro' as const, marca: 'Geral', modelo: 'Veículo', cor: 'Padrão', ano: '2024', placa: 'BR-0000' }
+      ];
+
+      const cleanPhoneDigits = cleanDigits(telefone);
+      const cleanClientId = cleanPhoneDigits && cleanPhoneDigits.length >= 8
+        ? cleanPhoneDigits
+        : `c-${Date.now()}`;
+
+      const novoCliente = {
+        id: cleanClientId,
         empresa: tenantId,
+        tenantId: tenantId,
+        empresaId: tenantId,
         nomeCompleto: nomeCompleto.trim(),
         telefone: formatCelular(telefone.trim()),
+        email: emailForm.trim().toLowerCase(),
         cep: formatCep(cep.trim()),
         endereco: endereco.trim(),
         numero: numero.trim(),
         bairro: bairro.trim(),
         cidade: cidade.trim(),
         estado: estado.trim().toUpperCase(),
-        veiculos: veiculosFormatados.length > 0 ? veiculosFormatados : [
-          { tipo: 'Carro', marca: 'Geral', modelo: 'Veículo', cor: 'Padrão', ano: '2024', placa: 'BR-0000' }
-        ],
-        dataCadastro: serverTimestamp()
+        origem: 'Balcão da Empresa',
+        veiculos: finalVeiculos,
+        dataCadastro: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
       };
 
-
-      await addDoc(collection(db, 'clientes'), novoCliente);
+      // Salva em /clientes e na subcoleção /tenants/{tenantId}/clients
+      await setDoc(doc(db, 'clientes', cleanClientId), novoCliente, { merge: true });
+      await setDoc(doc(db, 'tenants', cleanTId, 'clients', cleanClientId), novoCliente, { merge: true });
       
       // Limpa o formulário após o sucesso
       setNomeCompleto('');
       setTelefone('');
+      setEmailForm('');
       setCep('');
       setEndereco('');
       setNumero('');
@@ -290,6 +618,20 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
     if (!clienteId) return;
     try {
       await deleteDoc(doc(db, 'clientes', clienteId));
+      try {
+        await deleteDoc(doc(db, 'tenants', cleanTId, 'clients', clienteId));
+      } catch (_) {}
+
+      // Limpa se estava no cache do totem
+      try {
+        const rawTotem = localStorage.getItem(`saas_totem_clients_${tenantId}`);
+        if (rawTotem) {
+          const list = JSON.parse(rawTotem);
+          const filtered = list.filter((c: any) => c.id !== clienteId && c.uid !== clienteId);
+          localStorage.setItem(`saas_totem_clients_${tenantId}`, JSON.stringify(filtered));
+        }
+      } catch (_) {}
+
       setFeedback({ tipo: 'sucesso', mensagem: 'Ficha do cliente excluída da nuvem.' });
     } catch (err) {
       console.error('Erro ao excluir cliente:', err);
@@ -297,7 +639,7 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
     }
   };
 
-  // Filtro de busca de clientes (por Nome, Placa, Modelo ou Telefone)
+  // Filtro de busca de clientes (por Nome, Placa, Modelo, Marca, Telefone ou E-mail)
   const clientesFiltrados = useMemo(() => {
     const termo = busca.trim().toLowerCase();
     if (!termo) return clientes;
@@ -305,14 +647,50 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
     return clientes.filter(c => {
       const matchNome = (c.nomeCompleto || '').toLowerCase().includes(termo);
       const matchTel = (c.telefone || '').toLowerCase().includes(termo);
+      const matchEmail = (c.email || '').toLowerCase().includes(termo);
       const matchPlacaOuModelo = c.veiculos?.some(v => 
         (v.placa || '').toLowerCase().includes(termo) ||
         (v.modelo || '').toLowerCase().includes(termo) ||
         (v.marca || '').toLowerCase().includes(termo)
       );
-      return matchNome || matchTel || matchPlacaOuModelo;
+      return matchNome || matchTel || matchEmail || matchPlacaOuModelo;
     });
   }, [clientes, busca]);
+
+  // Helper para renderizar badge de origem
+  const renderOrigemBadge = (origem?: string) => {
+    const orig = (origem || '').toLowerCase();
+    if (orig.includes('totem')) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30">
+          <Tablet className="w-3 h-3 text-purple-400" />
+          Totem Tablet
+        </span>
+      );
+    }
+    if (orig.includes('aplicativo') || orig.includes('pwa') || orig.includes('app')) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+          <Smartphone className="w-3 h-3 text-cyan-400" />
+          App Celular
+        </span>
+      );
+    }
+    if (orig.includes('agendamento')) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+          <Calendar className="w-3 h-3 text-amber-400" />
+          Agendamento Online
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/15 text-blue-300 border border-blue-500/30">
+        <User className="w-3 h-3 text-blue-400" />
+        Balcão
+      </span>
+    );
+  };
 
   return (
     <div style={{ backgroundColor: '#0B0F19', color: '#F3F4F6', padding: '24px', minHeight: '100vh', boxSizing: 'border-box' }}>
@@ -325,14 +703,26 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
             Gestão de Clientes & Balcão
           </h1>
           <p style={{ color: '#9CA3AF', fontSize: '13px', margin: '4px 0 0 0' }}>
-            Cadastre clientes no balcão e visualize todos os clientes recebidos via QR Code do lava-jato em tempo real.
+            Cadastro unificado em tempo real: clientes do Balcão, do Totem de autoatendimento, do Aplicativo e de Agendamentos.
           </p>
         </div>
 
-        {/* CONTADOR TOTAL */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#111827', border: '1px solid #1F2937', padding: '8px 16px', borderRadius: '10px' }}>
-          <span style={{ fontSize: '12px', color: '#9CA3AF' }}>Total cadastrados:</span>
-          <span style={{ fontSize: '16px', fontWeight: 700, color: '#00A3FF' }}>{clientes.length}</span>
+        {/* CONTADOR TOTAL & BOTÃO ATUALIZAR */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            onClick={handleManualRefresh}
+            disabled={isRefreshing}
+            className="flex items-center gap-1.5 px-3 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer active:scale-95"
+            title="Recarregar clientes da nuvem"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-cyan-400' : 'text-slate-400'}`} />
+            <span>Atualizar</span>
+          </button>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#111827', border: '1px solid #1F2937', padding: '8px 16px', borderRadius: '10px' }}>
+            <span style={{ fontSize: '12px', color: '#9CA3AF' }}>Total cadastrados:</span>
+            <span style={{ fontSize: '16px', fontWeight: 700, color: '#00A3FF' }}>{clientes.length}</span>
+          </div>
         </div>
       </div>
 
@@ -381,19 +771,34 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
               />
             </div>
 
-            {/* Telefone / WhatsApp */}
-            <div style={{ marginBottom: '12px' }}>
-              <label style={{ display: 'block', fontSize: '13px', color: '#9CA3AF', marginBottom: '4px', fontWeight: 500 }}>
-                WhatsApp / Celular (Opcional)
-              </label>
-              <input 
-                type="tel" 
-                placeholder="(11) 98765-4321"
-                maxLength={15}
-                value={telefone} 
-                onChange={e => setTelefone(formatCelular(e.target.value))} 
-                style={inputStyle} 
-              />
+            {/* Telefone e E-mail */}
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '13px', color: '#9CA3AF', marginBottom: '4px', fontWeight: 500 }}>
+                  WhatsApp / Celular
+                </label>
+                <input 
+                  type="tel" 
+                  placeholder="(11) 98765-4321"
+                  maxLength={15}
+                  value={telefone} 
+                  onChange={e => setTelefone(formatCelular(e.target.value))} 
+                  style={inputStyle} 
+                />
+              </div>
+
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '13px', color: '#9CA3AF', marginBottom: '4px', fontWeight: 500 }}>
+                  E-mail (Opcional)
+                </label>
+                <input 
+                  type="email" 
+                  placeholder="cliente@email.com"
+                  value={emailForm} 
+                  onChange={e => setEmailForm(e.target.value)} 
+                  style={inputStyle} 
+                />
+              </div>
             </div>
 
             {/* CEP e Endereço */}
@@ -560,15 +965,21 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
           </form>
         </div>
 
-        {/* COLUNA DIREITA: LISTAGEM EM TEMPO REAL */}
+        {/* COLUNA DIREITA: LISTAGEM UNIFICADA EM TEMPO REAL */}
         <div style={{ backgroundColor: '#111827', border: '1px solid #1F2937', borderRadius: '12px', padding: '24px', display: 'flex', flexDirection: 'column' }}>
           
           <div style={{ borderBottom: '1px solid #1F2937', paddingBottom: '12px', marginBottom: '16px' }}>
-            <h2 style={{ color: '#FFF', fontSize: '17px', fontWeight: 600, margin: 0 }}>
-              Clientes Cadastrados (QR Code & Balcão)
-            </h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 style={{ color: '#FFF', fontSize: '17px', fontWeight: 600, margin: 0 }}>
+                Clientes Cadastrados ({clientesFiltrados.length})
+              </h2>
+              <span className="text-[11px] text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Tempo Real
+              </span>
+            </div>
             <p style={{ color: '#9CA3AF', fontSize: '12px', margin: '4px 0 0 0' }}>
-              Atualização em tempo real sincronizada com o banco Firestore.
+              Sincronizado automaticamente com Totem, Aplicativo, Agendamentos e Balcão.
             </p>
 
             {/* BARRA DE PESQUISA */}
@@ -576,7 +987,7 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
               <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#6B7280' }} />
               <input 
                 type="text"
-                placeholder="Buscar por cliente, placa ou modelo..."
+                placeholder="Buscar por cliente, placa, telefone, e-mail ou modelo..."
                 value={busca}
                 onChange={e => setBusca(e.target.value)}
                 style={{ ...inputStyle, paddingLeft: '36px' }}
@@ -587,11 +998,11 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
           {loading ? (
             <div style={{ textAlign: 'center', padding: '40px 0', color: '#9CA3AF', fontStyle: 'italic', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
               <Loader2 size={24} className="animate-spin text-cyan-400" />
-              <span>Carregando dados da nuvem...</span>
+              <span>Sincronizando clientes da nuvem em tempo real...</span>
             </div>
           ) : clientesFiltrados.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '40px 16px', color: '#6B7280', fontStyle: 'italic' }}>
-              {busca ? 'Nenhum cliente corresponde ao filtro de busca.' : 'Nenhum cliente cadastrado neste lava-jato ainda.'}
+              {busca ? 'Nenhum cliente corresponde ao filtro de busca.' : 'Nenhum cliente cadastrado neste lava-jato ainda. Registros feitos no Totem, Aplicativo ou Agendamento aparecerão aqui automaticamente!'}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', maxHeight: '600px', overflowY: 'auto', paddingRight: '4px' }}>
@@ -605,35 +1016,59 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
                     borderRadius: '10px',
                     transition: 'border-color 0.2s'
                   }}
+                  className="hover:border-cyan-500/40"
                 >
                   {/* CABEÇALHO DO CARD DO CLIENTE */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', marginBottom: '8px' }}>
                     <div>
-                      <h4 style={{ color: '#FFFFFF', fontSize: '15px', fontWeight: 600, margin: 0 }}>
-                        {cliente.nomeCompleto}
-                      </h4>
-                      {cliente.telefone && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-                          <Phone size={12} style={{ color: '#00A3FF' }} />
-                          <span style={{ fontSize: '12px', color: '#9CA3AF', fontFamily: 'monospace' }}>{formatCelular(cliente.telefone)}</span>
-                          <a 
-                            href={`https://wa.me/55${cleanDigits(cliente.telefone)}`} 
-                            target="_blank" 
-                            rel="noopener noreferrer"
-                            style={{ 
-                              color: '#22C55E', 
-                              fontSize: '11px', 
-                              display: 'inline-flex', 
-                              alignItems: 'center', 
-                              gap: '2px', 
-                              marginLeft: '6px',
-                              textDecoration: 'none'
-                            }}
-                          >
-                            <MessageCircle size={12} /> WhatsApp
-                          </a>
-                        </div>
-                      )}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 style={{ color: '#FFFFFF', fontSize: '15px', fontWeight: 600, margin: 0 }}>
+                          {cliente.nomeCompleto}
+                        </h4>
+                        {renderOrigemBadge(cliente.origem)}
+                      </div>
+
+                      {/* CONTATOS: TELEFONE / WHATSAPP & EMAIL */}
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-1.5">
+                        {cliente.telefone && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                            <Phone size={12} style={{ color: '#00A3FF' }} />
+                            <span style={{ fontSize: '12px', color: '#9CA3AF', fontFamily: 'monospace' }}>
+                              {formatCelular(cliente.telefone)}
+                            </span>
+                            <a 
+                              href={`https://wa.me/55${cleanDigits(cliente.telefone)}`} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              style={{ 
+                                color: '#22C55E', 
+                                fontSize: '11px', 
+                                display: 'inline-flex', 
+                                alignItems: 'center', 
+                                gap: '3px', 
+                                marginLeft: '4px',
+                                textDecoration: 'none',
+                                fontWeight: 600
+                              }}
+                            >
+                              <MessageCircle size={12} /> WhatsApp
+                            </a>
+                          </div>
+                        )}
+
+                        {cliente.email && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                            <Mail size={12} style={{ color: '#A855F7' }} />
+                            <a
+                              href={`mailto:${cliente.email}`}
+                              style={{ fontSize: '12px', color: '#CBD5E1', textDecoration: 'none' }}
+                              className="hover:underline"
+                            >
+                              {cliente.email}
+                            </a>
+                          </div>
+                        )}
+                      </div>
 
                     </div>
 
@@ -648,6 +1083,7 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
                         padding: '4px',
                         borderRadius: '4px'
                       }}
+                      className="hover:text-red-400 transition"
                       title="Excluir cadastro do cliente"
                     >
                       <Trash2 size={15} />
@@ -659,10 +1095,9 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({ tenantId, 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#9CA3AF', marginBottom: '10px' }}>
                       <MapPin size={12} style={{ color: '#F59E0B', flexShrink: 0 }} />
                       <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {[cliente.endereco, cliente.bairro, cliente.cidade ? `${cliente.cidade}/${cliente.estado}` : ''].filter(Boolean).join(' - ')}
+                        {[cliente.endereco, cliente.numero ? `Nº ${cliente.numero}` : '', cliente.bairro, cliente.cidade ? `${cliente.cidade}/${cliente.estado}` : ''].filter(Boolean).join(' - ')}
                         {cliente.cep && ` (CEP: ${formatCep(cliente.cep)})`}
                       </span>
-
                     </div>
                   )}
 
