@@ -46,7 +46,7 @@ import {
 export type AuthSession = 
   | { role: 'admin'; userEmail: string; userName?: string; uid?: string }
   | { role: 'empresa'; tenant: Tenant; userEmail: string; userName?: string; uid?: string }
-  | { role: 'cliente'; tenant: Tenant; clientInfo: { name: string; phone: string; email?: string }; userEmail: string; userName?: string; uid?: string }
+  | { role: 'cliente'; tenant: Tenant; clientInfo: { name: string; phone: string; email?: string; vehicles?: any[]; veiculos?: any[]; [key: string]: any }; userEmail: string; userName?: string; uid?: string }
   | { role: 'totem'; tenant: Tenant; exitPin?: string; userEmail?: string }
   | null;
 
@@ -951,6 +951,13 @@ export default function App() {
             tenants={tenants}
             onLoginAsClient={(tenant, clientInfo) => {
               setTenants(prev => prev.some(t => t.id === tenant.id) ? prev : [...prev, tenant]);
+              const rawVehicles = (clientInfo as any)?.vehicles || (clientInfo as any)?.veiculos;
+              if (Array.isArray(rawVehicles) && rawVehicles.length > 0) {
+                try {
+                  localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(rawVehicles));
+                  localStorage.setItem('saas_client_vehicles', JSON.stringify(rawVehicles));
+                } catch (_) {}
+              }
               const newSession: AuthSession = {
                 role: 'cliente',
                 tenant,

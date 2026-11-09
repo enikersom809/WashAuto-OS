@@ -611,6 +611,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         localStorage.setItem(`saas_client_profile_${tenantToOpen.id}`, JSON.stringify(clientData));
         if (validVehicles.length > 0) {
           localStorage.setItem(`saas_client_vehicles_${tenantToOpen.id}`, JSON.stringify(validVehicles));
+          localStorage.setItem('saas_client_vehicles', JSON.stringify(validVehicles));
+          sessionStorage.setItem('saas_active_client_vehicles', JSON.stringify(validVehicles));
         }
 
         // Associa e-mail do cliente ao lava-jato registrado

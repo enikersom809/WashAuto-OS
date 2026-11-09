@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Droplet, 
   UserCircle, 
@@ -54,7 +54,8 @@ import {
   sendUserPasswordResetEmail,
   subscribeToTenantPromoBanners,
   saveLevaETrazRequest,
-  subscribeToTenantLevaETraz
+  subscribeToTenantLevaETraz,
+  subscribeToTenantClients
 } from '../lib/firebaseService';
 import {
   parseAppointmentDateTime,
@@ -85,6 +86,9 @@ interface ClientPortalProps {
     name: string;
     phone: string;
     email?: string;
+    vehicles?: any[];
+    veiculos?: any[];
+    [key: string]: any;
   };
   onNewAppointmentCreated: (appointment: {
     id?: string;
@@ -315,6 +319,19 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     localStorage.setItem(`saas_client_address_${tenant.id}`, JSON.stringify(addressObj));
   }, [cep, address, neighborhood, city, stateUf, tenant.id]);
 
+  // Salva dados pessoais automaticamente no localStorage ao digitar
+  useEffect(() => {
+    if (editName.trim() || editPhone.trim() || editEmail.trim()) {
+      const updated = {
+        name: editName.trim() || clientProfile.name || 'Cliente',
+        email: editEmail.trim() || clientProfile.email || '',
+        phone: editPhone.trim() || clientProfile.phone || ''
+      };
+      setClientProfile(updated);
+      localStorage.setItem(`saas_client_profile_${tenant.id}`, JSON.stringify(updated));
+    }
+  }, [editName, editPhone, editEmail, tenant.id, clientProfile.name, clientProfile.email, clientProfile.phone]);
+
   const handleSavePersonalProfile = (e: React.FormEvent) => {
     e.preventDefault();
     const updated = {
@@ -355,25 +372,155 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     }
   };
 
-  // ================= 2. LISTA DE VEÍCULOS =================
-  // Inicia vazia para novos cadastros (sem veículo pré-cadastrado forçado)
-  const [vehicles, setVehicles] = useState<Vehicle[]>(() => {
+  // ================= 2. RESOLUÇÃO E SINCRONIZAÇÃO DE VEÍCULOS =================
+  // Helper para carregar e unificar veículos cadastrados (clientInfo, localStorage da empresa, perfil ou global)
+  const resolveInitialVehicles = (): Vehicle[] => {
+    // 1. Tenta carregar do clientInfo (passado no login/cadastro ou totem)
+    if (clientInfo) {
+      const fromInfo = (clientInfo as any).vehicles || (clientInfo as any).veiculos;
+      if (Array.isArray(fromInfo) && fromInfo.length > 0) {
+        const mapped = fromInfo
+          .filter((v: any) => v && (v.brand || v.marca || v.model || v.modelo || v.plate || v.placa))
+          .map((v: any, idx: number) => ({
+            id: v.id || `v-init-${idx}`,
+            type: (v.type === 'moto' || String(v.tipo || '').toLowerCase() === 'moto') ? ('moto' as const) : ('carro' as const),
+            brand: (v.brand || v.marca || '').trim() || 'Veículo',
+            model: (v.model || v.modelo || '').trim() || 'Modelo',
+            year: String(v.year || v.ano || new Date().getFullYear()),
+            plate: (v.plate || v.placa || '').toUpperCase().trim() || 'ABC-1234',
+            color: (v.color || v.cor || '').trim() || 'Padrão'
+          }));
+        if (mapped.length > 0) return mapped;
+      }
+    }
+
+    // 2. Tenta do localStorage específico do tenant
     const saved = localStorage.getItem(`saas_client_vehicles_${tenant.id}`);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((v: any, idx: number) => ({
+            id: v.id || `v-local-${idx}`,
+            type: v.type === 'moto' ? ('moto' as const) : ('carro' as const),
+            brand: (v.brand || v.marca || '').trim() || 'Veículo',
+            model: (v.model || v.modelo || '').trim() || 'Modelo',
+            year: String(v.year || v.ano || new Date().getFullYear()),
+            plate: (v.plate || v.placa || '').toUpperCase().trim() || 'ABC-1234',
+            color: (v.color || v.cor || '').trim() || 'Padrão'
+          }));
+        }
       } catch (e) {
         console.error(e);
       }
     }
-    return [];
-  });
 
-  // Sync vehicles to localStorage
+    // 3. Tenta do perfil do cliente no localStorage
+    const savedProfile = localStorage.getItem(`saas_client_profile_${tenant.id}`);
+    if (savedProfile) {
+      try {
+        const parsed = JSON.parse(savedProfile);
+        const pVehicles = parsed.vehicles || parsed.veiculos;
+        if (Array.isArray(pVehicles) && pVehicles.length > 0) {
+          return pVehicles.map((v: any, idx: number) => ({
+            id: v.id || `v-prof-${idx}`,
+            type: (v.type === 'moto' || String(v.tipo || '').toLowerCase() === 'moto') ? ('moto' as const) : ('carro' as const),
+            brand: (v.brand || v.marca || '').trim() || 'Veículo',
+            model: (v.model || v.modelo || '').trim() || 'Modelo',
+            year: String(v.year || v.ano || new Date().getFullYear()),
+            plate: (v.plate || v.placa || '').toUpperCase().trim() || 'ABC-1234',
+            color: (v.color || v.cor || '').trim() || 'Padrão'
+          }));
+        }
+      } catch (e) {}
+    }
+
+    // 4. Tenta da sessão ativa
+    const activeSession = sessionStorage.getItem('saas_active_auth_session');
+    if (activeSession) {
+      try {
+        const sess = JSON.parse(activeSession);
+        const sessVehicles = sess.clientInfo?.vehicles || sess.clientInfo?.veiculos;
+        if (Array.isArray(sessVehicles) && sessVehicles.length > 0) {
+          return sessVehicles.map((v: any, idx: number) => ({
+            id: v.id || `v-sess-${idx}`,
+            type: (v.type === 'moto' || String(v.tipo || '').toLowerCase() === 'moto') ? ('moto' as const) : ('carro' as const),
+            brand: (v.brand || v.marca || '').trim() || 'Veículo',
+            model: (v.model || v.modelo || '').trim() || 'Modelo',
+            year: String(v.year || v.ano || new Date().getFullYear()),
+            plate: (v.plate || v.placa || '').toUpperCase().trim() || 'ABC-1234',
+            color: (v.color || v.cor || '').trim() || 'Padrão'
+          }));
+        }
+      } catch (e) {}
+    }
+
+    // 5. Tenta do fallback global no localStorage
+    const globalSaved = localStorage.getItem('saas_client_vehicles');
+    if (globalSaved) {
+      try {
+        const parsed = JSON.parse(globalSaved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {}
+    }
+
+    return [];
+  };
+
+  const [vehicles, setVehicles] = useState<Vehicle[]>(() => resolveInitialVehicles());
+
+  // Salva no localStorage somente quando houver veículos válidos (para não limpar o cache prematuramente)
   useEffect(() => {
-    localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(vehicles));
+    if (vehicles.length > 0) {
+      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(vehicles));
+      localStorage.setItem('saas_client_vehicles', JSON.stringify(vehicles));
+    }
   }, [vehicles, tenant.id]);
+
+  // Escuta dados cadastrais do cliente no Firestore para sincronizar veículos entre dispositivos ou totem
+  useEffect(() => {
+    const phoneDigits = (editPhone || clientProfile.phone || clientInfo?.phone || '').replace(/\D/g, '');
+    const cleanEmail = (editEmail || clientProfile.email || clientInfo?.email || '').trim().toLowerCase();
+
+    if (!phoneDigits && !cleanEmail) return;
+
+    const unsubClients = subscribeToTenantClients(tenant.id, (allClients) => {
+      const match = allClients.find(c => {
+        const cPhone = (c.telefone || c.phone || '').replace(/\D/g, '');
+        const cEmail = (c.email || '').trim().toLowerCase();
+        return (phoneDigits && phoneDigits.length >= 8 && cPhone === phoneDigits) ||
+               (cleanEmail && cleanEmail.includes('@') && cEmail === cleanEmail);
+      });
+
+      if (match) {
+        const remoteVehicles = match.veiculos || match.vehicles;
+        if (Array.isArray(remoteVehicles) && remoteVehicles.length > 0) {
+          const parsedRemote: Vehicle[] = remoteVehicles
+            .filter((v: any) => v && (v.marca || v.brand || v.modelo || v.model || v.placa || v.plate))
+            .map((v: any, idx: number) => ({
+              id: v.id || `v-cloud-${idx}`,
+              type: (String(v.tipo || v.type).toLowerCase() === 'moto') ? ('moto' as const) : ('carro' as const),
+              brand: v.marca || v.brand || 'Veículo',
+              model: v.modelo || v.model || 'Modelo',
+              year: String(v.ano || v.year || new Date().getFullYear()),
+              plate: (v.placa || v.plate || '').toUpperCase().trim() || 'ABC-1234',
+              color: v.cor || v.color || 'Padrão'
+            }));
+
+          if (parsedRemote.length > 0) {
+            setVehicles(prev => {
+              if (prev.length === 0) return parsedRemote;
+              const existingPlates = new Set(prev.map(p => p.plate.toUpperCase().replace(/[^A-Z0-9]/g, '')));
+              const toAdd = parsedRemote.filter(r => !existingPlates.has(r.plate.toUpperCase().replace(/[^A-Z0-9]/g, '')));
+              return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+            });
+          }
+        }
+      }
+    });
+
+    return () => unsubClients();
+  }, [tenant.id, clientProfile.phone, clientProfile.email, editPhone, editEmail, clientInfo]);
 
   // New Vehicle Inputs
   const [showAddVehicle, setShowAddVehicle] = useState(false);
@@ -386,14 +533,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
   // ================= 3. AGENDAMENTO & CALENDÁRIO VISUAL =================
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
-    const saved = localStorage.getItem(`saas_client_vehicles_${tenant.id}`);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed[0].id;
-      } catch (e) {}
-    }
-    return '';
+    const list = resolveInitialVehicles();
+    return list.length > 0 ? list[0].id : '';
   });
 
   const [selectedService, setSelectedService] = useState('Lavagem Detalhada + Cera');
@@ -519,6 +660,49 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     };
   }, [tenant.id]);
 
+  // 🔒 Filtra e isola exclusivamente os agendamentos pertencentes a este cliente logado
+  const myAppointments = useMemo(() => {
+    let myStoredIds = new Set<string>();
+    try {
+      const ids = JSON.parse(localStorage.getItem(`saas_my_appointment_ids_${tenant.id}`) || '[]');
+      if (Array.isArray(ids)) myStoredIds = new Set(ids);
+    } catch (_) {}
+
+    const cleanClientPhone = (clientProfile.phone || clientInfo?.phone || editPhone || '').replace(/\D/g, '');
+    const cleanClientEmail = (clientProfile.email || clientInfo?.email || editEmail || '').trim().toLowerCase();
+    const cleanClientName = (clientProfile.name || clientInfo?.name || editName || '').trim().toLowerCase();
+    const clientPlates = new Set(
+      vehicles.map(v => (v.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean)
+    );
+
+    return tenantAppointments
+      .filter(a => !a.id?.startsWith('app-init-'))
+      .filter(a => {
+        // 1. Se foi agendado diretamente por este dispositivo/sessão
+        if (myStoredIds.has(a.id)) return true;
+
+        const aPhone = (a.clientPhone || '').replace(/\D/g, '');
+        const aEmail = (a.clientEmail || '').trim().toLowerCase();
+        const aName = (a.clientName || '').trim().toLowerCase();
+        const aPlate = (a.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+        // 2. Vínculo por telefone
+        const matchPhone = cleanClientPhone && cleanClientPhone.length >= 8 && 
+          (aPhone.includes(cleanClientPhone) || cleanClientPhone.includes(aPhone));
+
+        // 3. Vínculo por e-mail
+        const matchEmail = cleanClientEmail && cleanClientEmail.includes('@') && aEmail === cleanClientEmail;
+
+        // 4. Vínculo por nome
+        const matchName = cleanClientName && cleanClientName.length >= 3 && cleanClientName !== 'cliente' && aName === cleanClientName;
+
+        // 5. Vínculo por placa de qualquer veículo cadastrado do cliente
+        const matchPlate = aPlate && clientPlates.has(aPlate);
+
+        return matchPhone || matchEmail || matchName || matchPlate;
+      });
+  }, [tenantAppointments, clientProfile, clientInfo, editPhone, editEmail, editName, vehicles, tenant.id]);
+
   // Calcula conjunto de horários travados / ocupados para a data selecionada (apenas agendamentos reais)
   const lockedSlotsSet = useMemo(() => {
     const locked = new Set<string>();
@@ -602,7 +786,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     }
   };
 
-  // Seção de Veículos Dinâmicos para a Ficha de Cadastro
+  // Seção de Veículos Dinâmicos para a Ficha de Cadastro (inicia com os veículos salvos se existirem)
   const [formVehicles, setFormVehicles] = useState<Array<{
     id: string;
     type: 'carro' | 'moto';
@@ -612,12 +796,17 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     plate: string;
     color: string;
   }>>(() => {
-    const saved = localStorage.getItem(`saas_client_vehicles_${tenant.id}`);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch (e) {}
+    const list = resolveInitialVehicles();
+    if (list.length > 0) {
+      return list.map(v => ({
+        id: v.id,
+        type: v.type,
+        brand: v.brand,
+        model: v.model,
+        year: v.year,
+        plate: v.plate,
+        color: v.color
+      }));
     }
     return [{
       id: `v-${Date.now()}`,
@@ -629,6 +818,115 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       color: ''
     }];
   });
+
+  // 🔄 AUTO-SAVE & SINCRONIZAÇÃO EM TEMPO REAL: Veículos da Ficha de Cadastro -> Agendamento & LocalStorage
+  useEffect(() => {
+    const valid = formVehicles.filter(v => 
+      v.brand.trim() || v.model.trim() || v.plate.trim() || v.color.trim()
+    );
+
+    if (valid.length > 0) {
+      const normalized: Vehicle[] = valid.map(v => ({
+        id: v.id,
+        type: v.type,
+        brand: v.brand.trim() || 'Veículo',
+        model: v.model.trim() || 'Modelo',
+        year: v.year.trim() || new Date().getFullYear().toString(),
+        plate: v.plate.trim().toUpperCase() || 'ABC-1234',
+        color: v.color.trim() || 'Padrão'
+      }));
+
+      // Atualiza lista de veículos na hora para agendamento
+      setVehicles(normalized);
+
+      // Salva no localStorage (específico da empresa e global)
+      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(normalized));
+      localStorage.setItem('saas_client_vehicles', JSON.stringify(normalized));
+
+      // Atualiza no perfil do cliente
+      try {
+        const curProfile = JSON.parse(localStorage.getItem(`saas_client_profile_${tenant.id}`) || '{}');
+        localStorage.setItem(`saas_client_profile_${tenant.id}`, JSON.stringify({
+          ...curProfile,
+          vehicles: normalized
+        }));
+      } catch (_) {}
+
+      // Mantém veículo selecionado para o agendamento
+      setSelectedVehicleId(prev => {
+        if (prev && normalized.some(v => v.id === prev)) return prev;
+        return normalized[0].id;
+      });
+    }
+  }, [formVehicles, tenant.id]);
+
+  // 🔄 Sincroniza veículos de volta para formVehicles quando a aba Ficha de Cadastro for aberta ou quando vehicles mudar
+  useEffect(() => {
+    if (vehicles.length > 0) {
+      setFormVehicles(prev => {
+        const isPrevBlank = prev.length === 0 || (prev.length === 1 && !prev[0].brand.trim() && !prev[0].model.trim() && !prev[0].plate.trim());
+        if (isPrevBlank) {
+          return vehicles.map(v => ({
+            id: v.id,
+            type: v.type,
+            brand: v.brand,
+            model: v.model,
+            year: v.year,
+            plate: v.plate,
+            color: v.color
+          }));
+        }
+        return prev;
+      });
+
+      setSelectedVehicleId(prev => {
+        if (prev && vehicles.some(v => v.id === prev)) return prev;
+        return vehicles[0].id;
+      });
+    }
+  }, [portalTab, vehicles]);
+
+  // ☁️ Auto-save debounced no Firebase Firestore para garantir persistência na nuvem
+  const lastSavedCloudSignatureRef = useRef<string>('');
+  useEffect(() => {
+    const finalName = editName.trim() || clientProfile.name.trim();
+    const finalPhone = editPhone.trim() || clientProfile.phone.trim();
+    if (!finalName && !finalPhone) return;
+
+    const timer = setTimeout(() => {
+      const validVehicles = formVehicles.filter(v => v.brand.trim() || v.model.trim() || v.plate.trim() || v.color.trim());
+      const vehiclesToSave = validVehicles.length > 0 ? validVehicles : vehicles;
+
+      const currentSignature = JSON.stringify({
+        finalName,
+        finalPhone,
+        editEmail,
+        cep,
+        address,
+        neighborhood,
+        city,
+        stateUf,
+        vehiclesToSave
+      });
+
+      if (currentSignature === lastSavedCloudSignatureRef.current) return;
+      lastSavedCloudSignatureRef.current = currentSignature;
+
+      saveClientFullRegistration(tenant.id, {
+        name: finalName || 'Cliente',
+        email: editEmail.trim() || clientProfile.email,
+        phone: finalPhone || clientProfile.phone,
+        cep,
+        address,
+        neighborhood,
+        city,
+        stateUf,
+        vehicles: vehiclesToSave
+      }).catch(err => console.warn('Aviso no auto-save em nuvem:', err));
+    }, 2000);
+
+    return () => clearTimeout(timer);
+  }, [editName, editPhone, editEmail, cep, address, neighborhood, city, stateUf, formVehicles, vehicles, tenant.id, clientProfile]);
 
   const handleAddDynamicVehicle = () => {
     setFormVehicles(prev => [
@@ -646,7 +944,18 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   };
 
   const handleRemoveDynamicVehicle = (index: number) => {
-    if (formVehicles.length <= 1) return;
+    if (formVehicles.length <= 1) {
+      setFormVehicles([{
+        id: `v-${Date.now()}`,
+        type: 'carro',
+        brand: '',
+        model: '',
+        year: new Date().getFullYear().toString(),
+        plate: '',
+        color: ''
+      }]);
+      return;
+    }
     setFormVehicles(prev => prev.filter((_, idx) => idx !== index));
   };
 
@@ -680,9 +989,9 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     const addressObj = { cep, address, neighborhood, city, stateUf };
     localStorage.setItem(`saas_client_address_${tenant.id}`, JSON.stringify(addressObj));
 
-    // Salva veículos (filtrando os que têm ao menos marca ou modelo ou placa)
+    // Salva veículos (filtrando os que têm ao menos marca ou modelo ou placa ou cor)
     const validVehicles: Vehicle[] = formVehicles
-      .filter(v => v.brand.trim() || v.model.trim() || v.plate.trim())
+      .filter(v => v.brand.trim() || v.model.trim() || v.plate.trim() || v.color.trim())
       .map(v => ({
         id: v.id,
         type: v.type,
@@ -693,10 +1002,13 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         color: v.color.trim() || 'Padrão'
       }));
 
-    if (validVehicles.length > 0) {
-      setVehicles(validVehicles);
-      setSelectedVehicleId(validVehicles[0].id);
-      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(validVehicles));
+    const finalVehiclesList = validVehicles.length > 0 ? validVehicles : vehicles;
+
+    if (finalVehiclesList.length > 0) {
+      setVehicles(finalVehiclesList);
+      setSelectedVehicleId(finalVehiclesList[0].id);
+      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(finalVehiclesList));
+      localStorage.setItem('saas_client_vehicles', JSON.stringify(finalVehiclesList));
     }
 
     // Grava no Firebase Firestore
@@ -709,7 +1021,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       neighborhood,
       city,
       stateUf,
-      vehicles: validVehicles
+      vehicles: finalVehiclesList
     });
 
     showToast('🎉 Ficha de cadastro e veículos salvos com sucesso!');
@@ -730,7 +1042,21 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       color: vColor || 'Indefinida'
     };
 
-    setVehicles(prev => [...prev, newV]);
+    setVehicles(prev => {
+      const updated = [...prev, newV];
+      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(updated));
+      localStorage.setItem('saas_client_vehicles', JSON.stringify(updated));
+      return updated;
+    });
+
+    setFormVehicles(prev => {
+      const isPrevBlank = prev.length === 1 && !prev[0].brand.trim() && !prev[0].model.trim() && !prev[0].plate.trim();
+      if (isPrevBlank) {
+        return [newV];
+      }
+      return [...prev, newV];
+    });
+
     setSelectedVehicleId(newV.id);
     setShowAddVehicle(false);
     setVBrand('');
@@ -747,8 +1073,27 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       if (selectedVehicleId === id) {
         setSelectedVehicleId(remaining.length > 0 ? remaining[0].id : '');
       }
+      localStorage.setItem(`saas_client_vehicles_${tenant.id}`, JSON.stringify(remaining));
+      localStorage.setItem('saas_client_vehicles', JSON.stringify(remaining));
       return remaining;
     });
+
+    setFormVehicles(prev => {
+      const remaining = prev.filter(v => v.id !== id);
+      if (remaining.length === 0) {
+        return [{
+          id: `v-${Date.now()}`,
+          type: 'carro',
+          brand: '',
+          model: '',
+          year: new Date().getFullYear().toString(),
+          plate: '',
+          color: ''
+        }];
+      }
+      return remaining;
+    });
+
     showToast('Veículo removido!');
   };
 
@@ -845,6 +1190,15 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
     const appId = `app-${Date.now()}`;
     const levaRequestId = `leva-${Date.now()}`;
+
+    // Registra ID do agendamento localmente para garantir isolamento do cliente
+    try {
+      const myIds = JSON.parse(localStorage.getItem(`saas_my_appointment_ids_${tenant.id}`) || '[]');
+      if (Array.isArray(myIds) && !myIds.includes(appId)) {
+        myIds.unshift(appId);
+        localStorage.setItem(`saas_my_appointment_ids_${tenant.id}`, JSON.stringify(myIds));
+      }
+    } catch (_) {}
 
     const newAppPayload = {
       id: appId,
@@ -1124,7 +1478,23 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
           <button
             type="button"
-            onClick={() => setPortalTab('cadastro')}
+            onClick={() => {
+              if (vehicles.length > 0) {
+                const isBlank = formVehicles.length === 0 || (formVehicles.length === 1 && !formVehicles[0].brand.trim() && !formVehicles[0].model.trim() && !formVehicles[0].plate.trim());
+                if (isBlank) {
+                  setFormVehicles(vehicles.map(v => ({
+                    id: v.id,
+                    type: v.type,
+                    brand: v.brand,
+                    model: v.model,
+                    year: v.year,
+                    plate: v.plate,
+                    color: v.color
+                  })));
+                }
+              }
+              setPortalTab('cadastro');
+            }}
             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer ${
               portalTab === 'cadastro'
                 ? 'text-slate-950 shadow-md shadow-cyan-500/20 font-black'
@@ -1145,7 +1515,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
             }`}
           >
             <Activity className="w-4 h-4" /> 3. Acompanhar em Tempo Real
-            {tenantAppointments.some(a => a.clientPhone === clientProfile.phone || a.clientName === clientProfile.name) && (
+            {myAppointments.some(a => a.status === 'Em Lavagem' || a.status === 'Pendente' || a.status === 'Aprovado') && (
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping absolute top-2 right-2" />
             )}
           </button>
@@ -1427,29 +1797,22 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
           </div>
         )}
 
-        {/* ================= ABA 3: ACOMPANHAR EM TEMPO REAL (CELULAR ⇄ COMPUTADOR) ================= */}
+        {/* ================= ABA 3: ACOMPANHAR EM TEMPO REAL ================= */}
         {portalTab === 'status' && (
           <div className="space-y-6 animate-fadeIn">
-            {/* Banner de Sincronização em Tempo Real */}
-            <div className="bg-gradient-to-r from-emerald-950/60 via-slate-900 to-blue-950/60 border border-emerald-500/30 rounded-2xl p-5 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-3.5">
-                <div className="w-12 h-12 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                  <Activity className="w-6 h-6 animate-pulse" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-base font-bold text-white">Comunicação Celular ⇄ Computador Ativa</h3>
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
-                  </div>
-                  <p className="text-xs text-slate-300 mt-0.5">
-                    Os dados deste celular estão conectados em tempo real com o painel operacional da empresa no computador via Firestore.
-                  </p>
-                </div>
+            <div className="flex items-center justify-between pb-3 border-b border-[#1e293b]">
+              <div>
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-emerald-400" /> Acompanhamento em Tempo Real
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Consulte o status dos seus serviços, solicitações e a fila de lavagem do lava-jato.
+                </p>
               </div>
               <button
                 type="button"
                 onClick={() => setPortalTab('agendar')}
-                className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-lg shadow-blue-600/25 shrink-0 flex items-center gap-1.5 cursor-pointer"
+                className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-4 py-2 rounded-xl transition shadow-lg shadow-blue-600/25 shrink-0 flex items-center gap-1.5 cursor-pointer"
               >
                 <CalendarIcon className="w-4 h-4" /> Novo Agendamento
               </button>
@@ -1457,32 +1820,49 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
             {/* ================= ACOMPANHAMENTO ONLINE: STATUS DO VEÍCULO & LEVA E TRAZ ================= */}
             {(() => {
-              // Procura solicitações ativas ou mais recentes de Leva e Traz
-              const relevantLeva = tenantLevaETraz.length > 0 
-                ? tenantLevaETraz 
-                : tenantAppointments
-                    .filter(a => a.hasLevaETraz)
-                    .map(a => {
-                      const req: LevaETrazRequest = {
-                        id: a.id,
-                        tenantId: tenant.id,
-                        type: a.levaETrazType || 'completo',
-                        status: (a.levaETrazStatus || (a.status === 'Concluído' ? 'entregue' : a.status === 'Em Lavagem' ? 'no_patio' : 'solicitado')) as LevaETrazStatus,
-                        clientName: a.clientName,
-                        clientPhone: a.clientPhone || '',
-                        vehicle: a.vehicle,
-                        plate: a.plate || '',
-                        service: a.service,
-                        servicePrice: a.price,
-                        feePrice: a.levaETrazFee || 25,
-                        totalPrice: a.price,
-                        address: a.levaETrazAddress || { street: a.addressSummary || '', number: '', neighborhood: '', city: '' },
-                        driverName: a.levaETrazDriverName,
-                        createdAt: a.createdAt
-                      };
-                      return req;
-                    });
+              const cleanClientPhone = (clientProfile.phone || clientInfo?.phone || editPhone || '').replace(/\D/g, '');
+              const cleanClientName = (clientProfile.name || clientInfo?.name || editName || '').trim().toLowerCase();
+              const clientPlates = new Set(
+                vehicles.map(v => (v.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean)
+              );
 
+              // Procura solicitações ativas ou mais recentes de Leva e Traz EXCLUSIVAMENTE deste cliente
+              const clientLevaList = tenantLevaETraz.filter(l => {
+                const lPhone = (l.clientPhone || '').replace(/\D/g, '');
+                const lName = (l.clientName || '').trim().toLowerCase();
+                const lPlate = (l.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+                const matchPhone = cleanClientPhone && cleanClientPhone.length >= 8 && (lPhone.includes(cleanClientPhone) || cleanClientPhone.includes(lPhone));
+                const matchName = cleanClientName && cleanClientName.length >= 3 && cleanClientName !== 'cliente' && lName === cleanClientName;
+                const matchPlate = lPlate && clientPlates.has(lPlate);
+
+                return matchPhone || matchName || matchPlate;
+              });
+
+              const fallbackFromAppointments = myAppointments
+                .filter(a => a.hasLevaETraz)
+                .map(a => {
+                  const req: LevaETrazRequest = {
+                    id: a.id,
+                    tenantId: tenant.id,
+                    type: a.levaETrazType || 'completo',
+                    status: (a.levaETrazStatus || (a.status === 'Concluído' ? 'entregue' : a.status === 'Em Lavagem' ? 'no_patio' : 'solicitado')) as LevaETrazStatus,
+                    clientName: a.clientName,
+                    clientPhone: a.clientPhone || '',
+                    vehicle: a.vehicle,
+                    plate: a.plate || '',
+                    service: a.service,
+                    servicePrice: a.price,
+                    feePrice: a.levaETrazFee || 25,
+                    totalPrice: a.price,
+                    address: a.levaETrazAddress || { street: a.addressSummary || '', number: '', neighborhood: '', city: '' },
+                    driverName: a.levaETrazDriverName,
+                    createdAt: a.createdAt
+                  };
+                  return req;
+                });
+
+              const relevantLeva = clientLevaList.length > 0 ? clientLevaList : fallbackFromAppointments;
               const activeLeva = relevantLeva.find(r => r.status !== 'cancelado') || relevantLeva[0];
 
               const getStageNumber = (status: LevaETrazStatus) => {
@@ -1730,14 +2110,14 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                   <h3 className="text-base font-bold text-white">Meus Agendamentos no Lava-Jato</h3>
                 </div>
                 <span className="text-xs text-slate-400 font-mono">
-                  {tenantAppointments.filter(a => !a.id?.startsWith('app-init-')).length} registro(s)
+                  {myAppointments.length} registro(s)
                 </span>
               </div>
 
-              {tenantAppointments.filter(a => !a.id?.startsWith('app-init-')).length === 0 ? (
+              {myAppointments.length === 0 ? (
                 <div className="py-12 text-center text-slate-500 space-y-3">
                   <CalendarIcon className="w-10 h-10 mx-auto opacity-40 text-slate-400" />
-                  <p className="text-xs">Nenhum agendamento realizado ainda neste dispositivo.</p>
+                  <p className="text-xs">Nenhum agendamento realizado ainda para o seu cadastro.</p>
                   <button
                     type="button"
                     onClick={() => setPortalTab('agendar')}
@@ -1748,9 +2128,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {tenantAppointments
-                    .filter(a => !a.id?.startsWith('app-init-'))
-                    .map((app) => {
+                  {myAppointments.map((app) => {
                       const isPending = app.status === 'Pendente' || !app.status;
                       const isApproved = app.status === 'Aprovado';
                       const isInWash = app.status === 'Em Lavagem' || app.status === 'Em Execução';
@@ -1772,7 +2150,6 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                             <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
                               <span>🚗 {app.vehicle} {app.plate ? `(${app.plate})` : ''}</span>
                               <span>📅 {app.dateTime}</span>
-                              <span>👤 {app.clientName}</span>
                             </div>
 
                             {/* Status de Notificação 24h & Ações de Calendário */}
@@ -1867,6 +2244,11 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                                     const updated = tenantAppointments.filter(a => a.id !== app.id);
                                     setTenantAppointments(updated);
                                     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updated));
+                                    try {
+                                      const myIds = JSON.parse(localStorage.getItem(`saas_my_appointment_ids_${tenant.id}`) || '[]');
+                                      const filteredMyIds = myIds.filter((id: string) => id !== app.id);
+                                      localStorage.setItem(`saas_my_appointment_ids_${tenant.id}`, JSON.stringify(filteredMyIds));
+                                    } catch (_) {}
                                     await deleteAppointmentFromFirestore(tenant.id, app.id);
                                     showToast('Agendamento finalizado arquivado e limpo com sucesso.');
                                   }}
@@ -1908,27 +2290,47 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                 </p>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {patioWashes.map(w => (
-                    <div key={w.id} className="bg-[#020617] border border-[#1e293b] p-3.5 rounded-xl space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-xs text-white truncate">{w.vehicle}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-cyan-300 font-bold">
-                          {w.plate}
-                        </span>
+                  {patioWashes.map(w => {
+                    const cleanClientPhone = (clientProfile.phone || clientInfo?.phone || editPhone || '').replace(/\D/g, '');
+                    const clientPlates = new Set(
+                      vehicles.map(v => (v.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean)
+                    );
+                    const wPlate = (w.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+                    const wPhone = (w.clientPhone || '').replace(/\D/g, '');
+                    const isMyVehicle = (wPlate && clientPlates.has(wPlate)) || (cleanClientPhone && cleanClientPhone.length >= 8 && wPhone.includes(cleanClientPhone));
+
+                    return (
+                      <div key={w.id} className={`bg-[#020617] border p-3.5 rounded-xl space-y-2.5 transition ${
+                        isMyVehicle ? 'border-cyan-500/50 bg-cyan-950/20 shadow-md shadow-cyan-500/10' : 'border-[#1e293b]'
+                      }`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Car className={`w-4 h-4 shrink-0 ${isMyVehicle ? 'text-cyan-400' : 'text-slate-400'}`} />
+                            <span className="font-bold text-xs text-white truncate">
+                              {w.vehicle || 'Veículo em Atendimento'}
+                            </span>
+                          </div>
+                          {isMyVehicle && (
+                            <span className="text-[10px] bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded-md border border-cyan-500/30 shrink-0">
+                              Seu Veículo
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between">
+                          <span className="text-[11px] text-slate-400 font-medium">Status Atual</span>
+                          <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5 ${
+                            w.status === 'Concluído' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                            w.status === 'Em Execução' || w.status === 'Em Lavagem' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse' :
+                            'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                          }`}>
+                            <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                            {w.status || 'No Pátio'}
+                          </span>
+                        </div>
                       </div>
-                      <div className="text-[11px] text-slate-400">{w.service}</div>
-                      <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between">
-                        <span className="text-[10px] text-slate-500">{w.clientName}</span>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          w.status === 'Concluído' ? 'bg-emerald-500/20 text-emerald-400' :
-                          w.status === 'Em Execução' ? 'bg-blue-500/20 text-blue-400 animate-pulse' :
-                          'bg-amber-500/20 text-amber-400'
-                        }`}>
-                          {w.status}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2448,7 +2850,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                 <div>
                   <label className="block text-slate-300 font-bold mb-1">Selecione o Veículo *</label>
                   <select
-                    value={selectedVehicleId}
+                    value={selectedVehicleId || (vehicles.length > 0 ? vehicles[0].id : '')}
                     onChange={(e) => setSelectedVehicleId(e.target.value)}
                     className="w-full bg-[#020617] border border-[#1e293b] rounded-xl px-3.5 py-2.5 text-slate-100 font-bold focus:outline-none focus:border-blue-500 cursor-pointer"
                   >
