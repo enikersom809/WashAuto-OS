@@ -28,7 +28,7 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { db, auth, OperationType, handleFirestoreError } from './firebase';
-import { Tenant, OilProductItem, OilChangeRecord, CashTransaction, CashRegisterSession, SaleProductItem, CounterSaleRecord, PromoBanner } from '../types';
+import { Tenant, OilProductItem, OilChangeRecord, CashTransaction, CashRegisterSession, SaleProductItem, CounterSaleRecord, PromoBanner, LevaETrazRequest, LevaETrazStatus } from '../types';
 import { sendTotemPushNotification } from './pushNotificationService';
 
 /**
@@ -2059,6 +2059,37 @@ export async function updateAppointmentStatusInFirestore(
   }
 }
 
+export async function updateAppointmentReminderInFirestore(
+  tenantId: string,
+  appointmentId: string,
+  reminderData: {
+    reminder24hSent?: boolean;
+    reminder24hSentAt?: string;
+    reminderChannel?: 'whatsapp' | 'email' | 'ambos';
+    reminderNotes?: string;
+    reminder24hScheduledAt?: string;
+  }
+): Promise<boolean> {
+  try {
+    await ensureFirebaseAuthSession();
+    const cleanTId = cleanDocId(tenantId);
+    const appId = cleanDocId(appointmentId);
+    const docRef = doc(db, 'tenants', cleanTId, 'appointments', appId);
+    const payload = removeUndefinedFields({
+      ...reminderData,
+      updatedAt: new Date().toISOString()
+    });
+    await updateDoc(docRef, payload);
+    try {
+      await updateDoc(doc(db, 'appointments', appId), payload);
+    } catch (_) {}
+    return true;
+  } catch (err) {
+    console.error('updateAppointmentReminderInFirestore error:', err);
+    return false;
+  }
+}
+
 export async function deleteAppointmentFromFirestore(tenantId: string, appointmentId: string): Promise<boolean> {
   try {
     await ensureFirebaseAuthSession();
@@ -3079,6 +3110,167 @@ export function subscribeToTenantPromoBanners(
   }
 }
 
+/**
+ * =================================================================
+ * 19. SISTEMA DE LEVA E TRAZ (VALET PICK-UP & DELIVERY)
+ * Gerenciamento de solicitações de leva e traz, acompanhamento e status.
+ * =================================================================
+ */
 
+export async function saveLevaETrazRequest(request: LevaETrazRequest): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(request.tenantId);
+    const cleanRId = cleanDocId(request.id);
+    const docRef = doc(db, 'tenants', cleanTId, 'leva_e_traz', cleanRId);
+    const cleanedData = removeUndefinedFields({
+      ...request,
+      updatedAt: new Date().toISOString()
+    });
 
+    await setDoc(docRef, cleanedData, { merge: true });
 
+    // LocalStorage fallback cache
+    try {
+      const storageKey = `saas_tenant_leva_e_traz_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const index = local.findIndex((item: any) => item.id === cleanRId);
+      if (index >= 0) {
+        local[index] = cleanedData;
+      } else {
+        local.unshift(cleanedData);
+      }
+      localStorage.setItem(storageKey, JSON.stringify(local));
+      window.dispatchEvent(new Event('storage'));
+      window.dispatchEvent(new CustomEvent('saas_leva_e_traz_updated', { detail: cleanedData }));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('saveLevaETrazRequest error:', err);
+    // Offline / Local fallback
+    try {
+      const cleanTId = cleanDocId(request.tenantId);
+      const storageKey = `saas_tenant_leva_e_traz_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const index = local.findIndex((item: any) => item.id === request.id);
+      if (index >= 0) {
+        local[index] = request;
+      } else {
+        local.unshift(request);
+      }
+      localStorage.setItem(storageKey, JSON.stringify(local));
+      window.dispatchEvent(new Event('storage'));
+      window.dispatchEvent(new CustomEvent('saas_leva_e_traz_updated', { detail: request }));
+    } catch (_) {}
+    return false;
+  }
+}
+
+export async function updateLevaETrazStatusInFirestore(
+  tenantId: string,
+  requestId: string,
+  status: LevaETrazStatus,
+  updateData?: Partial<LevaETrazRequest>
+): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const cleanRId = cleanDocId(requestId);
+    const docRef = doc(db, 'tenants', cleanTId, 'leva_e_traz', cleanRId);
+
+    const docSnap = await getDoc(docRef);
+    const existingData = docSnap.exists() ? (docSnap.data() as LevaETrazRequest) : null;
+    const history = existingData?.statusHistory || [];
+    history.push({
+      status,
+      timestamp: new Date().toISOString(),
+      note: updateData?.notes
+    });
+
+    const payload: Partial<LevaETrazRequest> = {
+      ...updateData,
+      status,
+      statusHistory: history,
+      updatedAt: new Date().toISOString()
+    };
+
+    const cleanedPayload = removeUndefinedFields(payload);
+    await updateDoc(docRef, cleanedPayload);
+
+    // Sync localStorage
+    try {
+      const storageKey = `saas_tenant_leva_e_traz_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const index = local.findIndex((item: any) => item.id === cleanRId);
+      if (index >= 0) {
+        local[index] = { ...local[index], ...cleanedPayload };
+        localStorage.setItem(storageKey, JSON.stringify(local));
+        window.dispatchEvent(new Event('storage'));
+        window.dispatchEvent(new CustomEvent('saas_leva_e_traz_updated', { detail: local[index] }));
+      }
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('updateLevaETrazStatusInFirestore error:', err);
+    return false;
+  }
+}
+
+export async function deleteLevaETrazRequestFromFirestore(
+  tenantId: string,
+  requestId: string
+): Promise<boolean> {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const cleanRId = cleanDocId(requestId);
+    const docRef = doc(db, 'tenants', cleanTId, 'leva_e_traz', cleanRId);
+    await deleteDoc(docRef);
+
+    try {
+      const storageKey = `saas_tenant_leva_e_traz_${cleanTId}`;
+      const local = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const filtered = local.filter((item: any) => item.id !== cleanRId);
+      localStorage.setItem(storageKey, JSON.stringify(filtered));
+      window.dispatchEvent(new Event('storage'));
+      window.dispatchEvent(new CustomEvent('saas_leva_e_traz_deleted', { detail: cleanRId }));
+    } catch (_) {}
+
+    return true;
+  } catch (err) {
+    console.error('deleteLevaETrazRequestFromFirestore error:', err);
+    return false;
+  }
+}
+
+export function subscribeToTenantLevaETraz(
+  tenantId: string,
+  callback: (items: LevaETrazRequest[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'leva_e_traz');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const items: LevaETrazRequest[] = [];
+      snapshot.forEach(docSnap => {
+        items.push({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as LevaETrazRequest);
+      });
+
+      items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+      try {
+        localStorage.setItem(`saas_tenant_leva_e_traz_${cleanTId}`, JSON.stringify(items));
+      } catch (_) {}
+
+      callback(items);
+    }, (err) => {
+      console.warn('subscribeToTenantLevaETraz error:', err);
+    });
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToTenantLevaETraz init error:', err);
+    return () => {};
+  }
+}

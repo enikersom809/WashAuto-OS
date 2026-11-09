@@ -291,3 +291,95 @@ export interface PromoBanner {
   createdAt?: string;
   updatedAt?: string;
 }
+
+// ================= GESTÃO DE AGENDAMENTOS & NOTIFICAÇÕES 24H =================
+export interface CustomerAppointment {
+  id: string;
+  dateTime: string;
+  date?: string; // YYYY-MM-DD
+  time?: string; // HH:mm
+  clientName: string;
+  clientPhone?: string;
+  clientEmail?: string;
+  vehicle: string;
+  plate: string;
+  service: string;
+  price: number;
+  lavadorId?: string;
+  lavadorName?: string;
+  status: 'Pendente' | 'Aprovado' | 'Cancelado' | 'Concluído' | 'Em Lavagem';
+  addressSummary?: string;
+  notes?: string;
+  createdAt?: string;
+  // Notificações e Lembretes 24h
+  reminder24hEnabled?: boolean;
+  reminder24hScheduledAt?: string; // Data ISO ou formatada do lembrete (24h antes)
+  reminder24hSent?: boolean;
+  reminder24hSentAt?: string;
+  reminderChannel?: 'whatsapp' | 'email' | 'ambos';
+  reminderNotes?: string;
+  // Sistema de Leva e Traz
+  hasLevaETraz?: boolean;
+  levaETrazType?: LevaETrazType;
+  levaETrazFee?: number;
+  levaETrazAddress?: LevaETrazAddress;
+  levaETrazStatus?: LevaETrazStatus;
+  levaETrazDriverName?: string;
+}
+
+// ================= SISTEMA DE LEVA E TRAZ (VALET & DELIVERY) =================
+export type LevaETrazType = 'completo' | 'buscar' | 'entregar';
+
+export type LevaETrazStatus = 
+  | 'solicitado'           // 1. Solicitação recebida no app
+  | 'motorista_a_caminho'  // 2. Motorista a caminho para coletar o carro
+  | 'coletado'             // 3. Veículo recolhido / A caminho do Lava-Jato
+  | 'no_patio'             // 4. No Pátio / Em Lavagem
+  | 'concluido'            // 5. Lavagem Concluída / Pronto para retorno
+  | 'em_entrega'           // 6. Motorista a caminho da entrega
+  | 'entregue'             // 7. Entregue com sucesso na casa/empresa do cliente
+  | 'cancelado';
+
+export interface LevaETrazAddress {
+  cep?: string;
+  street: string;
+  number: string;
+  neighborhood: string;
+  complement?: string;
+  city: string;
+  state?: string;
+  reference?: string;
+}
+
+export interface LevaETrazRequest {
+  id: string;
+  tenantId: string;
+  type: LevaETrazType;
+  status: LevaETrazStatus;
+  clientName: string;
+  clientPhone: string;
+  clientEmail?: string;
+  vehicle: string;
+  plate: string;
+  service: string;
+  servicePrice: number;
+  feePrice: number; // Taxa de leva e traz
+  totalPrice: number;
+  address: LevaETrazAddress;
+  appointmentId?: string;
+  washItemId?: string;
+  scheduledDate?: string;
+  scheduledTime?: string;
+  driverId?: string;
+  driverName?: string;
+  driverPhone?: string;
+  notes?: string;
+  statusHistory?: {
+    status: LevaETrazStatus;
+    timestamp: string;
+    note?: string;
+  }[];
+  createdAt: string;
+  updatedAt?: string;
+}
+

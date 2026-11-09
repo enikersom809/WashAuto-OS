@@ -38,6 +38,7 @@ import {
   Phone,
   PhoneCall,
   MessageSquare,
+  Mail,
   ExternalLink,
   FileSpreadsheet,
   FileText,
@@ -56,10 +57,13 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Tablet,
-  Copy
+  Copy,
+  Truck,
+  MapPin,
+  Navigation
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Tenant } from '../types';
+import { Tenant, LevaETrazRequest, LevaETrazStatus, LevaETrazType, LevaETrazAddress } from '../types';
 import { TenantConfigSettings } from './TenantConfigSettings';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ClientesWorkspace } from './ClientesWorkspace';
@@ -79,6 +83,7 @@ import {
   saveTenantToFirestore,
   saveAppointmentToFirestore,
   updateAppointmentStatusInFirestore,
+  updateAppointmentReminderInFirestore,
   deleteAppointmentFromFirestore,
   subscribeToTenantAppointments,
   syncAllLocalAppointmentsToFirestore,
@@ -98,10 +103,26 @@ import {
   sendBroadcastNotificationFirestore,
   subscribeToTenantBroadcastNotification,
   dismissBroadcastNotificationFirestore,
-  BroadcastNotification
+  BroadcastNotification,
+  saveLevaETrazRequest,
+  updateLevaETrazStatusInFirestore,
+  deleteLevaETrazRequestFromFirestore,
+  subscribeToTenantLevaETraz
 } from '../lib/firebaseService';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import {
+  parseAppointmentDateTime,
+  calculateReminder24hTarget,
+  formatDateTimeDisplay,
+  getAppointmentReminderAnalysis,
+  buildReminderWhatsAppText,
+  buildReminderWhatsAppUrl,
+  buildReminderEmailContent,
+  buildGoogleCalendarUrl,
+  generateIcsFileContent,
+  ReminderAnalysis
+} from '../utils/reminderService';
 
 
 interface WashItem {
@@ -118,11 +139,15 @@ interface WashItem {
   commissionRate: number; // percentage, e.g. 10 = 10%
   commissionAmount: number; // R$
   createdAt: string;
+  completedAt?: string;
+  completedDate?: string;
 }
 
 export interface CustomerAppointment {
   id: string;
   dateTime: string;
+  date?: string; // YYYY-MM-DD
+  time?: string; // HH:mm
   clientName: string;
   clientPhone?: string;
   clientEmail?: string;
@@ -132,10 +157,17 @@ export interface CustomerAppointment {
   price: number;
   lavadorId?: string;
   lavadorName?: string;
-  status: 'Pendente' | 'Aprovado' | 'Cancelado' | 'Concluído';
+  status: 'Pendente' | 'Aprovado' | 'Cancelado' | 'Concluído' | 'Em Lavagem';
   addressSummary?: string;
   notes?: string;
   createdAt?: string;
+  // Lembretes & Notificações 24h
+  reminder24hEnabled?: boolean;
+  reminder24hScheduledAt?: string;
+  reminder24hSent?: boolean;
+  reminder24hSentAt?: string;
+  reminderChannel?: 'whatsapp' | 'email' | 'ambos';
+  reminderNotes?: string;
 }
 
 export interface CompletedWashRecord {
@@ -250,6 +282,54 @@ function deduplicateAppointments(apps: CustomerAppointment[]): CustomerAppointme
   return result;
 }
 
+/**
+ * Formata a data/horário real de conclusão do recibo, garantindo que registros
+ * realizados no passado exibam a data real (ex: '02/11/2026 às 14:30') e não fiquem
+ * travados com 'Hoje' ou com a data atual.
+ */
+function formatReceiptCompletedAt(completedAt?: string, dateStr?: string): string {
+  const now = new Date();
+  const todayIso = now.toISOString().split('T')[0];
+  const yesterdayIso = new Date(now.getTime() - 86400000).toISOString().split('T')[0];
+
+  // Extrai o horário (HH:mm)
+  let timePart = '';
+  if (completedAt) {
+    const timeMatch = completedAt.match(/(\d{2}:\d{2})/);
+    if (timeMatch) timePart = timeMatch[1];
+  }
+
+  // Se temos a data no formato ISO YYYY-MM-DD
+  if (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    const [y, m, d] = dateStr.split('-');
+    const formattedDateBR = `${d}/${m}/${y}`;
+
+    if (dateStr === todayIso) {
+      return timePart ? `Hoje às ${timePart}` : `Hoje (${formattedDateBR})`;
+    }
+    if (dateStr === yesterdayIso) {
+      return timePart ? `Ontem às ${timePart}` : `Ontem (${formattedDateBR})`;
+    }
+    return timePart ? `${formattedDateBR} às ${timePart}` : formattedDateBR;
+  }
+
+  // Se já contém data completa no formato DD/MM/AAAA
+  if (completedAt && /\d{2}\/\d{2}\/\d{4}/.test(completedAt)) {
+    return completedAt;
+  }
+
+  // Se tem dateStr mas não é hoje
+  if (dateStr && dateStr !== todayIso) {
+    const dObj = new Date(dateStr);
+    if (!isNaN(dObj.getTime())) {
+      const formattedDateBR = dObj.toLocaleDateString('pt-BR');
+      return timePart ? `${formattedDateBR} às ${timePart}` : formattedDateBR;
+    }
+  }
+
+  return completedAt || `${now.toLocaleDateString('pt-BR')} às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 interface TenantWorkspaceProps {
   tenant: Tenant;
   onExitImpersonation?: () => void;
@@ -283,7 +363,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, [initialTenant?.id]);
 
 
-  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'caixa' | 'vendas' | 'clientes' | 'troca-oleo' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'comprar-vitalicio' | 'totem' | 'banners-app'>('fila');
+  const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'lembretes-24h' | 'leva-e-traz' | 'caixa' | 'vendas' | 'clientes' | 'troca-oleo' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'comprar-vitalicio' | 'totem' | 'banners-app'>('fila');
 
   // Notificação Toast Visual para Novo Cadastro no Totem
   const [totemToast, setTotemToast] = useState<{
@@ -685,6 +765,125 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     localStorage.setItem(`saas_tenant_products_${tenant.id}`, JSON.stringify(products));
   }, [products, tenant.id]);
 
+  // ================= 1.1 SISTEMA DE LEVA E TRAZ (VALET & DELIVERY) =================
+  const [levaETrazRequests, setLevaETrazRequests] = useState<LevaETrazRequest[]>(() => {
+    const saved = localStorage.getItem(`saas_tenant_leva_e_traz_${tenant.id}`);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (e) { console.error(e); }
+    }
+    return [];
+  });
+
+  const [levaFilter, setLevaFilter] = useState<'todos' | 'solicitado' | 'coleta' | 'patio' | 'entrega' | 'entregue'>('todos');
+  const [levaSearch, setLevaSearch] = useState('');
+  const [showAddLevaModal, setShowAddLevaModal] = useState(false);
+  const [selectedLevaDriver, setSelectedLevaDriver] = useState<Record<string, string>>({});
+
+  // Formulário Manual de Leva e Traz
+  const [newLTClientName, setNewLTClientName] = useState('');
+  const [newLTClientPhone, setNewLTClientPhone] = useState('');
+  const [newLTVehicle, setNewLTVehicle] = useState('');
+  const [newLTPlate, setNewLTPlate] = useState('');
+  const [newLTService, setNewLTService] = useState('Lavagem Completa');
+  const [newLTServicePrice, setNewLTServicePrice] = useState(70);
+  const [newLTType, setNewLTType] = useState<LevaETrazType>('completo');
+  const [newLTStreet, setNewLTStreet] = useState('');
+  const [newLTNumber, setNewLTNumber] = useState('');
+  const [newLTNeighborhood, setNewLTNeighborhood] = useState('');
+  const [newLTCity, setNewLTCity] = useState(tenant.cidade || '');
+  const [newLTCep, setNewLTCep] = useState('');
+  const [newLTNotes, setNewLTNotes] = useState('');
+  const [newLTDriver, setNewLTDriver] = useState('');
+
+  const handleCreateManualLevaRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newLTClientName || !newLTVehicle || !newLTPlate || !newLTStreet) {
+      showToast('⚠️ Preencha nome, veículo, placa e endereço de coleta.');
+      return;
+    }
+
+    const fee = newLTType === 'completo' ? 25 : 15;
+    const total = Number(newLTServicePrice) + fee;
+
+    const newReq: LevaETrazRequest = {
+      id: `leva-manual-${Date.now()}`,
+      tenantId: tenant.id,
+      type: newLTType,
+      status: 'solicitado',
+      clientName: newLTClientName,
+      clientPhone: newLTClientPhone,
+      vehicle: newLTVehicle,
+      plate: newLTPlate.toUpperCase(),
+      service: newLTService,
+      servicePrice: Number(newLTServicePrice),
+      feePrice: fee,
+      totalPrice: total,
+      address: {
+        cep: newLTCep || undefined,
+        street: newLTStreet,
+        number: newLTNumber || 'S/N',
+        neighborhood: newLTNeighborhood || '',
+        city: newLTCity || tenant.cidade || '',
+        state: tenant.estado || undefined
+      },
+      driverName: newLTDriver || undefined,
+      notes: newLTNotes || undefined,
+      statusHistory: [
+        {
+          status: 'solicitado',
+          timestamp: new Date().toISOString(),
+          note: 'Solicitação lançada manualmente pelo balcão'
+        }
+      ],
+      createdAt: new Date().toISOString()
+    };
+
+    const updated = [newReq, ...levaETrazRequests];
+    setLevaETrazRequests(updated);
+    localStorage.setItem(`saas_tenant_leva_e_traz_${tenant.id}`, JSON.stringify(updated));
+    await saveLevaETrazRequest(newReq);
+
+    setShowAddLevaModal(false);
+    setNewLTClientName('');
+    setNewLTClientPhone('');
+    setNewLTVehicle('');
+    setNewLTPlate('');
+    setNewLTStreet('');
+    setNewLTNumber('');
+    setNewLTNeighborhood('');
+    setNewLTNotes('');
+    setNewLTDriver('');
+    showToast('🚗 Solicitação de Leva e Traz criada com sucesso!');
+  };
+
+  useEffect(() => {
+    localStorage.setItem(`saas_tenant_leva_e_traz_${tenant.id}`, JSON.stringify(levaETrazRequests));
+  }, [levaETrazRequests, tenant.id]);
+
+  useEffect(() => {
+    const unsubLeva = subscribeToTenantLevaETraz(tenant.id, (remoteLeva) => {
+      if (remoteLeva) {
+        setLevaETrazRequests(prev => {
+          const newRequest = remoteLeva.find(r => !prev.some(p => p.id === r.id));
+          if (newRequest) {
+            showToast(`🚗 Nova solicitação de Leva e Traz: ${newRequest.clientName} (${newRequest.vehicle})`);
+            playTotemChime();
+          }
+          return remoteLeva;
+        });
+        localStorage.setItem(`saas_tenant_leva_e_traz_${tenant.id}`, JSON.stringify(remoteLeva));
+      }
+    });
+    return () => unsubLeva();
+  }, [tenant.id, playTotemChime]);
+
+  const activeLevaETrazCount = useMemo(() => {
+    return levaETrazRequests.filter(r => r.status !== 'entregue' && r.status !== 'cancelado').length;
+  }, [levaETrazRequests]);
+
   // ================= 1. SINCRONIZAÇÃO EM TEMPO REAL CELULAR ⇄ COMPUTADOR (FIRESTORE) =================
   useEffect(() => {
     // 1. Sincroniza dados locais pré-existentes para o Firestore na inicialização
@@ -858,8 +1057,11 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const [showNewAppointmentModal, setShowNewAppointmentModal] = useState(false);
   const [showAddHistoryModal, setShowAddHistoryModal] = useState(false);
   const [selectedWashReceipt, setSelectedWashReceipt] = useState<CompletedWashRecord | null>(null);
-
-  // Filtros do Histórico de Lavagem
+  const [selectedReminderApp, setSelectedReminderApp] = useState<CustomerAppointment | null>(null);
+  const [autoRemindersEnabled, setAutoRemindersEnabled] = useState<boolean>(() => {
+    return localStorage.getItem(`saas_auto_reminders_${tenant.id}`) !== 'false';
+  });
+  const [reminderFilter, setReminderFilter] = useState<'todos' | 'due' | 'sent' | 'scheduled'>('todos');
   const [historySearch, setHistorySearch] = useState('');
   const [historyPeriod, setHistoryPeriod] = useState<'todos' | 'hoje' | '7dias' | 'mes'>('todos');
   const [historyLavador, setHistoryLavador] = useState('todos');
@@ -1119,6 +1321,10 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       const now = new Date();
       const safeId = item.id.replace(/[^a-zA-Z0-9_-]/g, '_');
       const historyId = `wh-${safeId}`;
+      const dateIso = now.toISOString().split('T')[0];
+      const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const completedAtFormatted = `${now.toLocaleDateString('pt-BR')} às ${timeStr}`;
+
       const historyEntry: CompletedWashRecord = {
         id: historyId,
         plate: item.plate,
@@ -1131,8 +1337,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         lavadorName: item.lavadorName || 'Equipe do Pátio',
         commissionRate: item.commissionRate,
         commissionAmount: item.commissionAmount,
-        completedAt: `Hoje às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`,
-        date: now.toISOString().split('T')[0],
+        completedAt: completedAtFormatted,
+        date: dateIso,
         paymentMethod: item.price === 0 ? 'Cortesia' : 'PIX',
         durationMinutes: 45
       };
@@ -1161,7 +1367,21 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       }
     }
 
-    setWashItems(prev => deduplicateWashItems(prev.map(w => w.id === washId ? { ...w, status: nextStatus } : w)));
+    const currentIso = new Date().toISOString().split('T')[0];
+    const currentTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const fallbackCompleted = `${new Date().toLocaleDateString('pt-BR')} às ${currentTime}`;
+
+    setWashItems(prev => deduplicateWashItems(prev.map(w => {
+      if (w.id === washId) {
+        return {
+          ...w,
+          status: nextStatus,
+          completedAt: nextStatus === 'Concluído' ? (w.completedAt || fallbackCompleted) : w.completedAt,
+          completedDate: nextStatus === 'Concluído' ? (w.completedDate || currentIso) : w.completedDate
+        };
+      }
+      return w;
+    })));
     updateWashItemStatusInFirestore(tenant.id, washId, nextStatus).catch(console.error);
   };
 
@@ -1336,6 +1556,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     if (!appClientName || !appVehicle || !appPlate || !appDate || !appTime) return;
 
     const assignedStaff = staffList.find(s => s.id === appLavadorId);
+    const serviceDateObj = parseAppointmentDateTime({ date: appDate, time: appTime });
+    const reminderTarget = serviceDateObj ? calculateReminder24hTarget(serviceDateObj) : null;
+    const formattedDateDisplay = appDate.includes('-') ? appDate.split('-').reverse().join('/') : appDate;
 
     const newApp: CustomerAppointment = {
       id: `app-manual-${Date.now()}`,
@@ -1345,12 +1568,18 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       plate: appPlate.toUpperCase(),
       service: appService,
       price: Number(appPrice),
-      dateTime: `${appDate} ${appTime}`,
+      dateTime: `${formattedDateDisplay} ${appTime}`,
+      date: appDate,
+      time: appTime,
       lavadorId: assignedStaff?.id,
       lavadorName: assignedStaff?.name,
       status: 'Aprovado',
       notes: appNotes || 'Agendado diretamente no balcão da empresa',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      reminder24hEnabled: true,
+      reminder24hScheduledAt: reminderTarget ? reminderTarget.toISOString() : undefined,
+      reminder24hSent: false,
+      reminderChannel: appClientPhone ? 'whatsapp' : 'email'
     };
 
     const updatedApps = [newApp, ...appointments];
@@ -1365,8 +1594,129 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     setAppPlate('');
     setAppNotes('');
     setShowNewAppointmentModal(false);
-    showToast(`📅 Agendamento de ${newApp.clientName} registrado com sucesso!`);
+    showToast(`📅 Agendamento de ${newApp.clientName} registrado com lembrete 24h ativo!`);
   };
+
+  // ⏰ Disparo individual de lembrete (WhatsApp ou E-mail)
+  const handleSendReminder = async (app: CustomerAppointment, channel: 'whatsapp' | 'email') => {
+    const sentAt = new Date().toISOString();
+    const updatedApps = appointments.map(a => a.id === app.id ? {
+      ...a,
+      reminder24hSent: true,
+      reminder24hSentAt: sentAt,
+      reminderChannel: channel
+    } : a);
+    setAppointments(updatedApps);
+    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updatedApps));
+
+    await updateAppointmentReminderInFirestore(tenant.id, app.id, {
+      reminder24hSent: true,
+      reminder24hSentAt: sentAt,
+      reminderChannel: channel
+    });
+
+    if (channel === 'whatsapp') {
+      const text = buildReminderWhatsAppText(tenant.nomeFantasia || tenant.name, app, tenant.address?.street);
+      const url = buildReminderWhatsAppUrl(app.clientPhone, text);
+      window.open(url, '_blank');
+      showToast(`🔔 Lembrete 24h preparado no WhatsApp para ${app.clientName}!`);
+    } else {
+      const { mailtoUrl } = buildReminderEmailContent(tenant.nomeFantasia || tenant.name, app, tenant.address?.street);
+      window.location.href = mailtoUrl;
+      showToast(`✉️ Lembrete 24h preparado no E-mail para ${app.clientName}!`);
+    }
+  };
+
+  const handleToggleReminderSent = async (appId: string, sent: boolean) => {
+    const sentAt = sent ? new Date().toISOString() : undefined;
+    const updated = appointments.map(a => a.id === appId ? {
+      ...a,
+      reminder24hSent: sent,
+      reminder24hSentAt: sentAt
+    } : a);
+    setAppointments(updated);
+    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updated));
+    await updateAppointmentReminderInFirestore(tenant.id, appId, {
+      reminder24hSent: sent,
+      reminder24hSentAt: sentAt
+    });
+    showToast(sent ? 'Lembrete marcado como enviado!' : 'Lembrete desmarcado.');
+  };
+
+  // ⏰ Disparo em lote de todos os lembretes prontos (janela <= 24h)
+  const handleBatchSendReminders = async () => {
+    const now = new Date();
+    const dueApps = appointments.filter(a => {
+      if (a.status === 'Cancelado' || a.status === 'Concluído') return false;
+      if (a.reminder24hSent) return false;
+      const analysis = getAppointmentReminderAnalysis(a, now);
+      return analysis.canSendNow;
+    });
+
+    if (dueApps.length === 0) {
+      showToast('ℹ️ Não há agendamentos com lembrete pendente nas próximas 24h no momento.');
+      return;
+    }
+
+    const sentAt = new Date().toISOString();
+    const dueIds = new Set(dueApps.map(a => a.id));
+
+    const updatedApps = appointments.map(a => dueIds.has(a.id) ? {
+      ...a,
+      reminder24hSent: true,
+      reminder24hSentAt: sentAt,
+      reminderChannel: (a.clientPhone ? 'whatsapp' : 'email') as 'whatsapp' | 'email'
+    } : a);
+
+    setAppointments(updatedApps);
+    localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updatedApps));
+
+    for (const app of dueApps) {
+      await updateAppointmentReminderInFirestore(tenant.id, app.id, {
+        reminder24hSent: true,
+        reminder24hSentAt: sentAt,
+        reminderChannel: app.clientPhone ? 'whatsapp' : 'email'
+      });
+    }
+
+    // Abre o WhatsApp do primeiro para envio imediato
+    if (dueApps[0].clientPhone) {
+      const text = buildReminderWhatsAppText(tenant.nomeFantasia || tenant.name, dueApps[0], tenant.address?.street);
+      const url = buildReminderWhatsAppUrl(dueApps[0].clientPhone, text);
+      window.open(url, '_blank');
+    }
+
+    showToast(`🚀 ${dueApps.length} lembrete(s) 24h disparado(s) com sucesso para os clientes de amanhã!`);
+  };
+
+  // ⏰ Monitoramento de Lembretes 24h em Segundo Plano
+  useEffect(() => {
+    if (!autoRemindersEnabled) return;
+
+    const checkReminders = () => {
+      const now = new Date();
+      let dueCount = 0;
+
+      appointments.forEach((app) => {
+        if (app.status === 'Cancelado' || app.status === 'Concluído') return;
+        if (app.reminder24hSent) return;
+
+        const analysis = getAppointmentReminderAnalysis(app, now);
+        if (analysis.canSendNow && !app.reminder24hSent) {
+          dueCount++;
+        }
+      });
+
+      if (dueCount > 0) {
+        console.log(`⏰ [Auto Reminders 24h] ${dueCount} agendamento(s) com serviço nas próximas 24h prontos para lembrete.`);
+      }
+    };
+
+    checkReminders();
+    const timer = setInterval(checkReminders, 60000);
+    return () => clearInterval(timer);
+  }, [appointments, autoRemindersEnabled]);
+
 
   const handleAddManualHistory = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1458,6 +1808,174 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     showToast(`🗑️ Veículo ${item?.plate || ''} removido do pátio.`);
   };
 
+  // ================= FUNÇÕES DE OPERAÇÃO DO LEVA E TRAZ =================
+  const handleAdvanceLevaStatus = async (
+    req: LevaETrazRequest, 
+    nextStatus: LevaETrazStatus,
+    customNote?: string
+  ) => {
+    try {
+      const updatedList = levaETrazRequests.map(r => {
+        if (r.id === req.id) {
+          const hist = r.statusHistory || [];
+          return {
+            ...r,
+            status: nextStatus,
+            statusHistory: [
+              ...hist,
+              { status: nextStatus, timestamp: new Date().toISOString(), note: customNote }
+            ]
+          };
+        }
+        return r;
+      });
+
+      setLevaETrazRequests(updatedList);
+      localStorage.setItem(`saas_tenant_leva_e_traz_${tenant.id}`, JSON.stringify(updatedList));
+
+      await updateLevaETrazStatusInFirestore(tenant.id, req.id, nextStatus, { notes: customNote });
+
+      // Se o status for 'no_patio', envia automaticamente para a Fila de Lavagem se ainda não estiver
+      if (nextStatus === 'no_patio') {
+        const alreadyInYard = washItems.some(w => w.plate === req.plate && w.status !== 'Concluído');
+        if (!alreadyInYard) {
+          const newWash: WashItem = {
+            id: `wash-leva-${Date.now()}`,
+            plate: req.plate,
+            vehicle: req.vehicle,
+            service: `${req.service} (Leva e Traz)`,
+            price: req.servicePrice,
+            clientName: req.clientName,
+            clientPhone: req.clientPhone,
+            status: 'Aguardando',
+            commissionRate: 10,
+            commissionAmount: Number((req.servicePrice * 0.1).toFixed(2)),
+            createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          };
+          const newYard = [newWash, ...washItems];
+          setWashItems(newYard);
+          localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newYard));
+          await saveWashItemToFirestore(tenant.id, newWash);
+          showToast(`🚗 Veículo ${req.vehicle} (${req.plate}) inserido automaticamente na Fila do Pátio!`);
+        }
+      }
+
+      // Sincroniza agendamento correspondente se existir
+      if (req.appointmentId) {
+        const appStatus = nextStatus === 'no_patio' 
+          ? 'Em Lavagem' 
+          : nextStatus === 'entregue' 
+          ? 'Concluído' 
+          : 'Aprovado';
+        
+        await updateAppointmentStatusInFirestore(tenant.id, req.appointmentId, appStatus as any);
+        setAppointments(prev => prev.map(a => a.id === req.appointmentId ? {
+          ...a,
+          status: appStatus as any,
+          levaETrazStatus: nextStatus
+        } : a));
+      }
+
+      const statusLabels: Record<LevaETrazStatus, string> = {
+        solicitado: 'Solicitado',
+        motorista_a_caminho: 'Motorista a Caminho da Coleta',
+        coletado: 'Veículo Coletado',
+        no_patio: 'No Pátio / Em Lavagem',
+        concluido: 'Lavagem Concluída',
+        em_entrega: 'Motorista a Caminho da Entrega',
+        entregue: 'Entregue com Sucesso',
+        cancelado: 'Cancelado'
+      };
+
+      showToast(`✅ Leva e Traz atualizado para: "${statusLabels[nextStatus]}"`);
+    } catch (err) {
+      console.error('handleAdvanceLevaStatus error:', err);
+      showToast('⚠️ Erro ao atualizar status do Leva e Traz.');
+    }
+  };
+
+  const handleAssignLevaDriver = async (requestId: string, driverName: string) => {
+    try {
+      const staff = staffList.find(s => s.name === driverName);
+      const updatedList = levaETrazRequests.map(r => {
+        if (r.id === requestId) {
+          return {
+            ...r,
+            driverName,
+            driverId: staff?.id
+          };
+        }
+        return r;
+      });
+
+      setLevaETrazRequests(updatedList);
+      localStorage.setItem(`saas_tenant_leva_e_traz_${tenant.id}`, JSON.stringify(updatedList));
+
+      await updateLevaETrazStatusInFirestore(tenant.id, requestId, levaETrazRequests.find(r => r.id === requestId)?.status || 'solicitado', {
+        driverName,
+        driverId: staff?.id
+      });
+
+      showToast(`👤 Motorista "${driverName}" designado para o serviço!`);
+    } catch (err) {
+      console.error('handleAssignLevaDriver error:', err);
+    }
+  };
+
+  const handleOpenGoogleMapsRoute = (addr: LevaETrazAddress) => {
+    const query = [
+      addr.street,
+      addr.number,
+      addr.neighborhood,
+      addr.city,
+      addr.state
+    ].filter(Boolean).join(', ');
+
+    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+    window.open(url, '_blank');
+  };
+
+  const handleSendLevaStatusWhatsApp = (req: LevaETrazRequest) => {
+    if (!req.clientPhone) {
+      showToast('⚠️ Cliente sem telefone cadastrado.');
+      return;
+    }
+
+    const companyName = tenant.nomeFantasia || tenant.name;
+    const cleanPhone = req.clientPhone.replace(/\D/g, '');
+
+    let msg = '';
+    switch (req.status) {
+      case 'solicitado':
+        msg = `Olá ${req.clientName}! 👋 Recebemos sua solicitação de Leva e Traz para o veículo ${req.vehicle} (${req.plate}) aqui no ${companyName}. Já estamos organizando a rota de coleta.`;
+        break;
+      case 'motorista_a_caminho':
+        msg = `Olá ${req.clientName}! 🚗 Nosso motorista ${req.driverName ? `(${req.driverName}) ` : ''}do ${companyName} acabou de sair e está a caminho do seu endereço para buscar seu ${req.vehicle}.`;
+        break;
+      case 'coletado':
+        msg = `Olá ${req.clientName}! 🛣️ Seu veículo ${req.vehicle} foi coletado com segurança e já está a caminho do nosso lava-jato ${companyName}.`;
+        break;
+      case 'no_patio':
+        msg = `Olá ${req.clientName}! 🧼 Seu veículo ${req.vehicle} acabou de chegar no pátio do ${companyName} e já está em processo de lavagem e higienização!`;
+        break;
+      case 'concluido':
+        msg = `Olá ${req.clientName}! ✨ A lavagem do seu ${req.vehicle} foi CONCLUÍDA com sucesso e está impecável! Estamos preparando a saída para entrega.`;
+        break;
+      case 'em_entrega':
+        msg = `Olá ${req.clientName}! 🚚 O motorista ${req.driverName ? `(${req.driverName}) ` : ''}do ${companyName} está a caminho do seu endereço para entregar seu ${req.vehicle} limpinho e brilhando!`;
+        break;
+      case 'entregue':
+        msg = `Olá ${req.clientName}! 🏡 Seu veículo ${req.vehicle} foi entregue com sucesso pelo ${companyName}! Muito obrigado pela confiança e preferência.`;
+        break;
+      default:
+        msg = `Olá ${req.clientName}! Aqui é do lava-jato ${companyName} sobre o serviço de Leva e Traz do seu ${req.vehicle}.`;
+    }
+
+    const waUrl = `https://wa.me/55${cleanPhone}?text=${encodeURIComponent(msg)}`;
+    window.open(waUrl, '_blank');
+  };
+
+
   const handleSellProduct = (prod: ProductItem) => {
     if (prod.stock <= 0) {
       showToast(`Sem estoque disponível para ${prod.name}!`);
@@ -1505,6 +2023,27 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const totalCommissionsPending = staffList.reduce((acc, s) => acc + s.accumulatedCommission, 0);
   const pendingAppointmentsCount = deduplicateAppointments(appointments).filter(a => a.status === 'Pendente').length;
 
+  // Métricas de Lembretes 24h
+  const reminderMetrics = useMemo(() => {
+    const now = new Date();
+    let dueCount = 0;
+    let sentCount = 0;
+    let scheduledCount = 0;
+
+    deduplicateAppointments(appointments).forEach(app => {
+      if (app.status === 'Cancelado' || app.status === 'Concluído') return;
+      if (app.reminder24hSent) {
+        sentCount++;
+        return;
+      }
+      const analysis = getAppointmentReminderAnalysis(app, now);
+      if (analysis.status === 'due') dueCount++;
+      else if (analysis.status === 'scheduled') scheduledCount++;
+    });
+
+    return { dueCount, sentCount, scheduledCount };
+  }, [appointments]);
+
   const menuItems = [
     {
       id: 'fila' as const,
@@ -1523,6 +2062,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       badgeColor: pendingAppointmentsCount > 0
         ? 'bg-amber-500 text-slate-950 font-black animate-pulse'
         : 'bg-slate-800 text-slate-400'
+    },
+    {
+      id: 'lembretes-24h' as const,
+      label: 'Lembretes 24h & Notificações',
+      icon: BellRing,
+      badge: reminderMetrics.dueCount > 0 ? `${reminderMetrics.dueCount} disparo` : undefined,
+      badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold'
+    },
+    {
+      id: 'leva-e-traz' as const,
+      label: 'Leva e Traz',
+      icon: Truck,
+      badge: activeLevaETrazCount > 0 ? `${activeLevaETrazCount}` : undefined,
+      badgeColor: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
     },
     {
       id: 'caixa' as const,
@@ -1959,6 +2512,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 <h2 className="text-base sm:text-lg font-bold text-[#f8fafc] flex items-center gap-2">
                   {activeTab === 'fila' && <><Kanban className="w-5 h-5 text-blue-400" /> Fila de Lavagem & Operação de Pátio</>}
                   {activeTab === 'agendamentos' && <><CalendarCheck className="w-5 h-5 text-blue-400" /> Gestão de Agendamentos</>}
+                  {activeTab === 'lembretes-24h' && <><BellRing className="w-5 h-5 text-amber-400" /> Central de Notificações & Lembretes 24h</>}
+                  {activeTab === 'leva-e-traz' && <><Truck className="w-5 h-5 text-cyan-400" /> Gestão Operacional de Leva e Traz (Valet & Delivery)</>}
                   {activeTab === 'caixa' && <><Wallet className="w-5 h-5 text-emerald-400" /> Controle de Caixa & Fluxo Financeiro</>}
                   {activeTab === 'vendas' && <><ShoppingBag className="w-5 h-5 text-amber-400" /> Loja do Balcão & Vendas (PDV)</>}
                   {activeTab === 'clientes' && <><Users className="w-5 h-5 text-cyan-400" /> Clientes & Balcão</>}
@@ -2310,21 +2865,35 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedWashReceipt({
-                                id: item.id,
-                                plate: item.plate,
-                                vehicle: item.vehicle,
-                                service: item.service,
-                                price: item.price,
-                                clientName: item.clientName,
-                                clientPhone: item.clientPhone,
-                                lavadorName: item.lavadorName,
-                                commissionRate: item.commissionRate,
-                                commissionAmount: item.commissionAmount,
-                                completedAt: 'Hoje às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-                                date: new Date().toISOString().split('T')[0],
-                                paymentMethod: 'PIX'
-                              });
+                              // 🔍 Busca no histórico se já existe o registro de conclusão com a data e horário reais
+                              const histMatch = deduplicateWashHistory(washHistory).find(h => 
+                                h.id === item.id || 
+                                h.id === `wh-${item.id.replace(/[^a-zA-Z0-9_-]/g, '_')}` || 
+                                (h.plate && item.plate && h.plate.toUpperCase() === item.plate.toUpperCase() && h.service === item.service)
+                              );
+
+                              if (histMatch) {
+                                setSelectedWashReceipt(histMatch);
+                              } else {
+                                const realDate = item.completedDate || (item as any).date || (item.createdAt?.includes('/') ? item.createdAt.split(' ')[0] : new Date().toISOString().split('T')[0]);
+                                const realCompletedAt = formatReceiptCompletedAt(item.completedAt || item.createdAt, realDate);
+
+                                setSelectedWashReceipt({
+                                  id: item.id,
+                                  plate: item.plate,
+                                  vehicle: item.vehicle,
+                                  service: item.service,
+                                  price: item.price,
+                                  clientName: item.clientName,
+                                  clientPhone: item.clientPhone,
+                                  lavadorName: item.lavadorName,
+                                  commissionRate: item.commissionRate,
+                                  commissionAmount: item.commissionAmount,
+                                  completedAt: realCompletedAt,
+                                  date: realDate,
+                                  paymentMethod: item.price === 0 ? 'Cortesia' : 'PIX'
+                                });
+                              }
                             }}
                             className="p-1 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded transition cursor-pointer"
                             title="Visualizar e Imprimir Recibo"
@@ -2476,7 +3045,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     <button
                       key={statusKey}
                       onClick={() => setAppointmentStatusFilter(statusKey)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap ${
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
                         appointmentStatusFilter === statusKey
                           ? 'bg-blue-600 text-white shadow-sm'
                           : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
@@ -2487,6 +3056,16 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     </button>
                   );
                 })}
+
+                {reminderFilter !== 'todos' && (
+                  <button
+                    type="button"
+                    onClick={() => setReminderFilter('todos')}
+                    className="px-2.5 py-1 bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <X className="w-3 h-3" /> Limpar Filtro ({reminderFilter})
+                  </button>
+                )}
               </div>
 
               {/* Busca */}
@@ -2514,6 +3093,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                       <th className="py-3.5 px-4">Serviço & Valor</th>
                       <th className="py-3.5 px-4">Lavador Designado</th>
                       <th className="py-3.5 px-4 text-center">Status</th>
+                      <th className="py-3.5 px-4 text-center">Lembrete 24h</th>
                       <th className="py-3.5 px-4 text-right">Ações</th>
                     </tr>
                   </thead>
@@ -2527,6 +3107,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                             return false;
                           }
                         }
+                        if (reminderFilter !== 'todos') {
+                          const analysis = getAppointmentReminderAnalysis(app);
+                          if (reminderFilter === 'due' && analysis.status !== 'due') return false;
+                          if (reminderFilter === 'scheduled' && analysis.status !== 'scheduled') return false;
+                          if (reminderFilter === 'sent' && !app.reminder24hSent) return false;
+                        }
                         if (appointmentSearch.trim()) {
                           const q = appointmentSearch.toLowerCase();
                           const matchClient = (app.clientName || '').toLowerCase().includes(q);
@@ -2539,6 +3125,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                       })
                       .map(app => {
                         const cleanPhone = (app.clientPhone || '').replace(/\D/g, '');
+                        const reminderAnalysis = getAppointmentReminderAnalysis(app);
                         const waText = encodeURIComponent(
                           `Olá ${app.clientName}! Confirmamos o seu agendamento no ${tenant.name} para o veículo ${app.vehicle} (${app.plate}) no dia ${app.dateTime}. Serviço: ${app.service}. Qualquer dúvida estamos à disposição!`
                         );
@@ -2630,6 +3217,45 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                   <X className="w-3 h-3" /> Cancelado
                                 </span>
                               )}
+                            </td>
+
+                            {/* Coluna Lembrete 24h Antes */}
+                            <td className="py-4 px-4 text-center whitespace-nowrap">
+                              <div className="flex flex-col items-center gap-1.5">
+                                <span className={`inline-flex items-center gap-1 text-[10px] px-2.5 py-1 rounded-full font-bold border ${reminderAnalysis.badgeClass}`}>
+                                  {reminderAnalysis.label}
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  {app.clientPhone && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSendReminder(app, 'whatsapp')}
+                                      className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 transition text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                                      title="Disparar Lembrete via WhatsApp"
+                                    >
+                                      <MessageSquare className="w-3 h-3" /> WhatsApp
+                                    </button>
+                                  )}
+                                  {app.clientEmail && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSendReminder(app, 'email')}
+                                      className="px-2 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 transition text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                                      title="Disparar Lembrete via E-mail"
+                                    >
+                                      <Mail className="w-3 h-3" /> E-mail
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedReminderApp(app)}
+                                    className="p-1 rounded bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 transition text-[10px] font-semibold flex items-center gap-1 cursor-pointer"
+                                    title="Ver opções de notificação e calendário"
+                                  >
+                                    <Bell className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              </div>
                             </td>
 
                             <td className="py-4 px-4 text-right whitespace-nowrap">
@@ -2755,6 +3381,1007 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </table>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* ================= ABA: CENTRAL DE NOTIFICAÇÕES & LEMBRETES 24H ================= */}
+        {activeTab === 'lembretes-24h' && (
+          <div className="space-y-5 animate-fadeIn">
+            {/* Header & Ações */}
+            <div className="bg-gradient-to-r from-blue-950/40 via-[#0f172a] to-indigo-950/40 border border-blue-500/30 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1e293b] pb-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-2xl text-blue-400 shrink-0">
+                    <BellRing className="w-6 h-6 animate-pulse" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-bold text-white text-base">Central de Notificações & Lembretes 24h Antes</h3>
+                      <span className="text-[10px] bg-blue-500/20 text-blue-300 font-bold px-2 py-0.5 rounded-full border border-blue-500/30">
+                        Anti-No-Show
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300 mt-0.5">
+                      Dispare lembretes com antecedência para clientes agendados via WhatsApp e E-mail, reduzindo faltas e otimizando a fila do pátio.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  {/* Toggle Auto Reminders */}
+                  <div className="flex items-center gap-2 bg-[#020617] border border-[#1e293b] px-3.5 py-2 rounded-xl text-xs">
+                    <span className="text-slate-400 text-xs font-medium">Disparo Automático:</span>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={autoRemindersEnabled}
+                        onChange={(e) => {
+                          const val = e.target.checked;
+                          setAutoRemindersEnabled(val);
+                          localStorage.setItem(`saas_auto_reminders_${tenant.id}`, String(val));
+                          showToast(val ? '🔔 Disparo automático de lembretes ativado!' : 'Lembretes automáticos pausados.');
+                        }}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                    </label>
+                  </div>
+
+                  {/* Disparar Lote */}
+                  <button
+                    type="button"
+                    onClick={handleBatchSendReminders}
+                    className={`px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer shadow-md ${
+                      reminderMetrics.dueCount > 0
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30 animate-pulse'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}
+                    title="Dispara automaticamente os lembretes para todos os clientes de amanhã"
+                  >
+                    <Send className="w-4 h-4" />
+                    Disparar Lembretes de Amanhã ({reminderMetrics.dueCount})
+                  </button>
+                </div>
+              </div>
+
+              {/* 3 Metric Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div 
+                  onClick={() => setReminderFilter(reminderFilter === 'due' ? 'todos' : 'due')}
+                  className={`p-4 rounded-xl border transition cursor-pointer ${
+                    reminderFilter === 'due' 
+                      ? 'bg-amber-500/20 border-amber-500/60 shadow-md ring-2 ring-amber-500/50' 
+                      : 'bg-[#020617]/70 border-[#1e293b] hover:border-amber-500/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-amber-300 flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 text-amber-400" /> Prontos p/ Disparo (&le; 24h)
+                    </span>
+                    <span className="text-base font-black text-amber-400 bg-amber-500/10 px-2.5 py-0.5 rounded">
+                      {reminderMetrics.dueCount}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5">Serviços marcados para as próximas 24 horas aguardando envio do lembrete.</p>
+                </div>
+
+                <div 
+                  onClick={() => setReminderFilter(reminderFilter === 'scheduled' ? 'todos' : 'scheduled')}
+                  className={`p-4 rounded-xl border transition cursor-pointer ${
+                    reminderFilter === 'scheduled' 
+                      ? 'bg-blue-500/20 border-blue-500/60 shadow-md ring-2 ring-blue-500/50' 
+                      : 'bg-[#020617]/70 border-[#1e293b] hover:border-blue-500/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-blue-300 flex items-center gap-1.5">
+                      <Calendar className="w-4 h-4 text-blue-400" /> Agendados Futuros (&gt; 24h)
+                    </span>
+                    <span className="text-base font-black text-blue-400 bg-blue-500/10 px-2.5 py-0.5 rounded">
+                      {reminderMetrics.scheduledCount}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5">Aguardando a data correta para envio do lembrete com antecedência exata.</p>
+                </div>
+
+                <div 
+                  onClick={() => setReminderFilter(reminderFilter === 'sent' ? 'todos' : 'sent')}
+                  className={`p-4 rounded-xl border transition cursor-pointer ${
+                    reminderFilter === 'sent' 
+                      ? 'bg-emerald-500/20 border-emerald-500/60 shadow-md ring-2 ring-emerald-500/50' 
+                      : 'bg-[#020617]/70 border-[#1e293b] hover:border-emerald-500/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-emerald-300 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" /> Lembretes Já Enviados
+                    </span>
+                    <span className="text-base font-black text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded">
+                      {reminderMetrics.sentCount}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5">Clientes já notificados por WhatsApp ou E-mail com registro auditado.</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Barra de Filtros e Busca de Lembretes */}
+            <div className="bg-[#0f172a] border border-[#1e293b] p-4 rounded-xl flex flex-col md:flex-row gap-3 items-center justify-between">
+              <div className="flex items-center gap-1.5 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
+                {(['todos', 'due', 'scheduled', 'sent'] as const).map(filterKey => {
+                  const label = filterKey === 'todos' 
+                    ? 'Todos os Agendamentos' 
+                    : filterKey === 'due' 
+                    ? 'Prontos para Disparo (≤ 24h)' 
+                    : filterKey === 'scheduled' 
+                    ? 'Futuros (> 24h)' 
+                    : 'Já Enviados';
+
+                  const count = filterKey === 'todos' 
+                    ? appointments.filter(a => a.status !== 'Cancelado' && a.status !== 'Concluído').length 
+                    : filterKey === 'due' 
+                    ? reminderMetrics.dueCount 
+                    : filterKey === 'scheduled' 
+                    ? reminderMetrics.scheduledCount 
+                    : reminderMetrics.sentCount;
+
+                  return (
+                    <button
+                      key={filterKey}
+                      onClick={() => setReminderFilter(filterKey)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                        reminderFilter === filterKey
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
+                      }`}
+                    >
+                      {label}
+                      <span className="text-[10px] opacity-80">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="relative w-full md:w-64">
+                <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Buscar por cliente, carro, placa..."
+                  value={appointmentSearch}
+                  onChange={(e) => setAppointmentSearch(e.target.value)}
+                  className="w-full bg-[#020617] border border-[#1e293b] rounded-lg pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Tabela de Auditoria de Lembretes */}
+            <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl overflow-hidden shadow-xl">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[#1e293b] bg-[#020617] text-slate-400 uppercase font-bold text-[10px] tracking-wider">
+                      <th className="py-3 px-4">Horário do Atendimento</th>
+                      <th className="py-3 px-4">Cliente & Contato</th>
+                      <th className="py-3 px-4">Veículo & Placa</th>
+                      <th className="py-3 px-4">Serviço & Preço</th>
+                      <th className="py-3 px-4">Status do Lembrete 24h</th>
+                      <th className="py-3 px-4 text-right">Ações de Notificação</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#1e293b]/50">
+                    {appointments
+                      .filter(app => {
+                        if (app.status === 'Cancelado' || app.status === 'Concluído') return false;
+                        const analysis = getAppointmentReminderAnalysis(app, new Date());
+                        if (reminderFilter === 'due' && analysis.status !== 'due') return false;
+                        if (reminderFilter === 'scheduled' && analysis.status !== 'scheduled') return false;
+                        if (reminderFilter === 'sent' && !app.reminder24hSent) return false;
+
+                        if (appointmentSearch.trim()) {
+                          const q = appointmentSearch.toLowerCase();
+                          const matchClient = app.clientName.toLowerCase().includes(q);
+                          const matchPlate = app.plate?.toLowerCase().includes(q);
+                          const matchVehicle = app.vehicle?.toLowerCase().includes(q);
+                          const matchService = app.service?.toLowerCase().includes(q);
+                          if (!matchClient && !matchPlate && !matchVehicle && !matchService) return false;
+                        }
+                        return true;
+                      })
+                      .map((app) => {
+                        const analysis = getAppointmentReminderAnalysis(app, new Date());
+                        const waText = buildReminderWhatsAppText(tenant.nomeFantasia || tenant.name, app, tenant.address?.street);
+                        const waUrl = buildReminderWhatsAppUrl(app.clientPhone, waText);
+                        const gcalUrl = buildGoogleCalendarUrl(tenant.nomeFantasia || tenant.name, app);
+
+                        return (
+                          <tr key={app.id} className="hover:bg-slate-900/40 transition">
+                            <td className="py-3.5 px-4">
+                              <span className="font-bold text-slate-100 block">{app.time || app.dateTime?.split(' ')[1] || '08:00'}</span>
+                              <span className="text-[11px] text-slate-400 block">{app.date ? app.date.split('-').reverse().join('/') : app.dateTime?.split(' ')[0]}</span>
+                              <span className="text-[10px] text-blue-400 font-mono mt-0.5 block">
+                                {analysis.hoursUntilService > 0 ? `Em ~${Math.round(analysis.hoursUntilService)}h` : 'Hoje'}
+                              </span>
+                            </td>
+
+                            <td className="py-3.5 px-4">
+                              <span className="font-bold text-white block">{app.clientName}</span>
+                              <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                                {app.clientPhone && (
+                                  <span className="flex items-center gap-1 font-mono">
+                                    <Phone className="w-3 h-3 text-emerald-400" /> {app.clientPhone}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+
+                            <td className="py-3.5 px-4">
+                              <span className="font-bold text-slate-200 block">{app.vehicle}</span>
+                              <span className="font-mono text-blue-400 font-bold text-[11px] bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20 inline-block mt-0.5">
+                                {app.plate || 'S/ PLACA'}
+                              </span>
+                            </td>
+
+                            <td className="py-3.5 px-4">
+                              <span className="font-bold text-slate-200 block">{app.service}</span>
+                              <span className="text-emerald-400 font-bold font-mono text-[11px]">
+                                R$ {Number(app.price || 0).toFixed(2)}
+                              </span>
+                            </td>
+
+                            <td className="py-3.5 px-4">
+                              <div className="flex flex-col gap-1">
+                                <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border w-fit ${analysis.badgeClass}`}>
+                                  <Bell className="w-3 h-3" /> {analysis.label}
+                                </span>
+                                {app.reminder24hSent && (
+                                  <span className="text-[10px] text-emerald-400/80">
+                                    Disparado em {app.reminder24hSentAt ? new Date(app.reminder24hSentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : 'Sim'}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+
+                            <td className="py-3.5 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {app.clientPhone && (
+                                  <a
+                                    href={waUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={async () => {
+                                      await handleToggleReminderSent(app.id, true);
+                                    }}
+                                    className="p-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 rounded-lg text-xs font-bold transition flex items-center gap-1"
+                                    title="Disparar lembrete personalizado no WhatsApp"
+                                  >
+                                    <MessageSquare className="w-3.5 h-3.5 text-emerald-400" /> WhatsApp
+                                  </a>
+                                )}
+
+                                {app.clientEmail && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSendReminder(app, 'email')}
+                                    className="p-1.5 bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                                    title="Enviar lembrete por E-mail"
+                                  >
+                                    <Mail className="w-3.5 h-3.5 text-cyan-400" /> E-mail
+                                  </button>
+                                )}
+
+                                {gcalUrl && (
+                                  <a
+                                    href={gcalUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition border border-slate-700 flex items-center gap-1"
+                                    title="Adicionar à Google Agenda"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
+                                  </a>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleReminderSent(app.id, !app.reminder24hSent)}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition cursor-pointer ${
+                                    app.reminder24hSent
+                                      ? 'bg-slate-800 text-slate-400 border-slate-700'
+                                      : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                  }`}
+                                  title="Marcar manualmente se o lembrete já foi enviado"
+                                >
+                                  {app.reminder24hSent ? 'Desmarcar' : 'Marcar Enviado'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+
+                    {appointments.filter(app => {
+                      if (app.status === 'Cancelado' || app.status === 'Concluído') return false;
+                      const analysis = getAppointmentReminderAnalysis(app, new Date());
+                      if (reminderFilter === 'due' && analysis.status !== 'due') return false;
+                      if (reminderFilter === 'scheduled' && analysis.status !== 'scheduled') return false;
+                      if (reminderFilter === 'sent' && !app.reminder24hSent) return false;
+                      return true;
+                    }).length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-12 text-center text-slate-500 text-xs">
+                          Nenhum agendamento encontrado para o filtro de lembrete selecionado.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ================= ABA: GESTÃO OPERACIONAL DE LEVA E TRAZ ================= */}
+        {activeTab === 'leva-e-traz' && (
+          <div className="space-y-5 animate-fadeIn">
+            {/* Header & Ação de Novo Pedido */}
+            <div className="bg-gradient-to-r from-cyan-950/40 via-[#0f172a] to-blue-950/40 border border-cyan-500/30 rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="p-3 bg-cyan-500/15 border border-cyan-500/30 rounded-2xl text-cyan-400 shrink-0">
+                  <Truck className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-white text-base">Gestão Operacional de Leva e Traz (Valet & Delivery)</h3>
+                    <span className="text-[10px] bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded-full border border-cyan-500/30">
+                      Coletas & Entregas
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Despache motoristas, trace rotas no Google Maps, atualize o cliente via WhatsApp e transfira veículos com 1-clique para a fila do pátio.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowAddLevaModal(true)}
+                className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-black px-4 py-2.5 rounded-xl text-xs transition shadow-lg shadow-cyan-600/30 flex items-center gap-1.5 shrink-0 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" /> Nova Solicitação Leva e Traz
+              </button>
+            </div>
+
+            {/* KPIs Rápidos Operacionais */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Total Pedidos</span>
+                <span className="text-xl font-black text-cyan-400">{levaETrazRequests.length}</span>
+              </div>
+
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Aguardando Coleta</span>
+                <span className="text-xl font-black text-amber-400">
+                  {levaETrazRequests.filter(r => r.status === 'solicitado' || r.status === 'motorista_a_caminho').length}
+                </span>
+              </div>
+
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">No Pátio / Lavando</span>
+                <span className="text-xl font-black text-blue-400">
+                  {levaETrazRequests.filter(r => r.status === 'coletado' || r.status === 'no_patio').length}
+                </span>
+              </div>
+
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Em Entrega</span>
+                <span className="text-xl font-black text-indigo-400">
+                  {levaETrazRequests.filter(r => r.status === 'concluido' || r.status === 'em_entrega').length}
+                </span>
+              </div>
+
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl col-span-2 sm:col-span-1">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Entregues com Sucesso</span>
+                <span className="text-xl font-black text-emerald-400">
+                  {levaETrazRequests.filter(r => r.status === 'entregue').length}
+                </span>
+              </div>
+            </div>
+
+            {/* Filtros e Barra de Busca */}
+            <div className="bg-[#0f172a] border border-[#1e293b] p-4 rounded-xl flex flex-col md:flex-row gap-3 items-center justify-between">
+              <div className="flex items-center gap-1.5 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
+                {(['todos', 'solicitado', 'coleta', 'patio', 'entrega', 'entregue'] as const).map(filterKey => {
+                  const label = filterKey === 'todos' 
+                    ? 'Todos' 
+                    : filterKey === 'solicitado' 
+                    ? 'Solicitações Recebidas' 
+                    : filterKey === 'coleta' 
+                    ? 'Em Coleta' 
+                    : filterKey === 'patio' 
+                    ? 'No Pátio / Lavando' 
+                    : filterKey === 'entrega' 
+                    ? 'A Caminho da Entrega' 
+                    : 'Entregues';
+
+                  const count = filterKey === 'todos' 
+                    ? levaETrazRequests.length 
+                    : filterKey === 'solicitado'
+                    ? levaETrazRequests.filter(r => r.status === 'solicitado').length
+                    : filterKey === 'coleta'
+                    ? levaETrazRequests.filter(r => r.status === 'motorista_a_caminho' || r.status === 'coletado').length
+                    : filterKey === 'patio'
+                    ? levaETrazRequests.filter(r => r.status === 'no_patio').length
+                    : filterKey === 'entrega'
+                    ? levaETrazRequests.filter(r => r.status === 'concluido' || r.status === 'em_entrega').length
+                    : levaETrazRequests.filter(r => r.status === 'entregue').length;
+
+                  return (
+                    <button
+                      key={filterKey}
+                      onClick={() => setLevaFilter(filterKey)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                        levaFilter === filterKey
+                          ? 'bg-cyan-600 text-slate-950 font-black shadow-sm'
+                          : 'bg-[#020617] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
+                      }`}
+                    >
+                      {label}
+                      <span className="text-[10px] opacity-80">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="relative w-full md:w-64">
+                <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Buscar por cliente, carro, placa ou rua..."
+                  value={levaSearch}
+                  onChange={(e) => setLevaSearch(e.target.value)}
+                  className="w-full bg-[#020617] border border-[#1e293b] rounded-lg pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+
+            {/* Lista de Solicitações de Leva e Traz */}
+            {levaETrazRequests
+              .filter(req => {
+                if (levaFilter === 'solicitado' && req.status !== 'solicitado') return false;
+                if (levaFilter === 'coleta' && req.status !== 'motorista_a_caminho' && req.status !== 'coletado') return false;
+                if (levaFilter === 'patio' && req.status !== 'no_patio') return false;
+                if (levaFilter === 'entrega' && req.status !== 'concluido' && req.status !== 'em_entrega') return false;
+                if (levaFilter === 'entregue' && req.status !== 'entregue') return false;
+
+                if (levaSearch.trim()) {
+                  const q = levaSearch.toLowerCase();
+                  const matchClient = req.clientName.toLowerCase().includes(q);
+                  const matchPhone = req.clientPhone?.toLowerCase().includes(q);
+                  const matchVehicle = req.vehicle.toLowerCase().includes(q);
+                  const matchPlate = req.plate.toLowerCase().includes(q);
+                  const matchAddress = req.address?.street?.toLowerCase().includes(q) || req.address?.neighborhood?.toLowerCase().includes(q);
+                  if (!matchClient && !matchPhone && !matchVehicle && !matchPlate && !matchAddress) return false;
+                }
+                return true;
+              }).length === 0 ? (
+                <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-12 text-center text-slate-500 space-y-3">
+                  <Truck className="w-12 h-12 mx-auto opacity-30 text-cyan-400" />
+                  <p className="text-sm font-bold text-slate-300">Nenhuma solicitação de Leva e Traz encontrada.</p>
+                  <p className="text-xs text-slate-500">
+                    Quando os clientes solicitarem pelo aplicativo ou totem, ou quando você lançar manualmente, os pedidos aparecerão aqui com status em tempo real.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddLevaModal(true)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" /> Criar Solicitação Manual
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {levaETrazRequests
+                    .filter(req => {
+                      if (levaFilter === 'solicitado' && req.status !== 'solicitado') return false;
+                      if (levaFilter === 'coleta' && req.status !== 'motorista_a_caminho' && req.status !== 'coletado') return false;
+                      if (levaFilter === 'patio' && req.status !== 'no_patio') return false;
+                      if (levaFilter === 'entrega' && req.status !== 'concluido' && req.status !== 'em_entrega') return false;
+                      if (levaFilter === 'entregue' && req.status !== 'entregue') return false;
+
+                      if (levaSearch.trim()) {
+                        const q = levaSearch.toLowerCase();
+                        const matchClient = req.clientName.toLowerCase().includes(q);
+                        const matchPhone = req.clientPhone?.toLowerCase().includes(q);
+                        const matchVehicle = req.vehicle.toLowerCase().includes(q);
+                        const matchPlate = req.plate.toLowerCase().includes(q);
+                        const matchAddress = req.address?.street?.toLowerCase().includes(q) || req.address?.neighborhood?.toLowerCase().includes(q);
+                        if (!matchClient && !matchPhone && !matchVehicle && !matchPlate && !matchAddress) return false;
+                      }
+                      return true;
+                    })
+                    .map((req) => {
+                      const statusBadges: Record<LevaETrazStatus, { text: string; bg: string }> = {
+                        solicitado: { text: '1. Solicitação Recebida', bg: 'bg-amber-500/20 text-amber-300 border-amber-500/40' },
+                        motorista_a_caminho: { text: '2. Motorista a Caminho da Coleta', bg: 'bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse' },
+                        coletado: { text: '3. Veículo Coletado (Em trânsito)', bg: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' },
+                        no_patio: { text: '4. No Pátio / Em Lavagem', bg: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' },
+                        concluido: { text: '5. Lavagem Concluída / Inspecionado', bg: 'bg-purple-500/20 text-purple-300 border-purple-500/40' },
+                        em_entrega: { text: '6. Motorista a Caminho da Entrega', bg: 'bg-teal-500/20 text-teal-300 border-teal-500/40 animate-pulse' },
+                        entregue: { text: '7. Entregue com Sucesso', bg: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold' },
+                        cancelado: { text: 'Cancelado', bg: 'bg-rose-500/20 text-rose-300 border-rose-500/40' }
+                      };
+
+                      const currentBadge = statusBadges[req.status] || { text: req.status, bg: 'bg-slate-800 text-slate-400 border-slate-700' };
+
+                      return (
+                        <div
+                          key={req.id}
+                          className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-5 shadow-xl hover:border-slate-700 transition space-y-4"
+                        >
+                          {/* Top Row: Cliente, Veículo, Modalidade e Preço */}
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1e293b] pb-3">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-base text-white">{req.clientName}</span>
+                                {req.clientPhone && (
+                                  <a
+                                    href={`https://wa.me/55${req.clientPhone.replace(/\D/g, '')}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-emerald-400 font-mono flex items-center gap-1 hover:underline"
+                                  >
+                                    <Phone className="w-3 h-3" /> {req.clientPhone}
+                                  </a>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-2 text-xs text-slate-400">
+                                <span className="font-bold text-slate-200">🚗 {req.vehicle}</span>
+                                <span className="font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">
+                                  {req.plate}
+                                </span>
+                                <span>·</span>
+                                <span>{req.service}</span>
+                                <span>·</span>
+                                <span className="text-cyan-300 font-semibold">
+                                  {req.type === 'completo' ? 'Leva e Traz Completo' : req.type === 'buscar' ? 'Apenas Buscar' : 'Apenas Entregar'}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col sm:items-end gap-1">
+                              <span className={`text-xs font-bold px-3 py-1 rounded-full border ${currentBadge.bg}`}>
+                                {currentBadge.text}
+                              </span>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-xs text-slate-400">Total:</span>
+                                <span className="text-base font-black text-emerald-400">
+                                  R$ {Number(req.totalPrice || req.servicePrice + req.feePrice).toFixed(2)}
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  (Serviço R$ {req.servicePrice} + Taxa R$ {req.feePrice})
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Middle: Endereço, Motorista Designado e Observações */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                            {/* Card de Endereço */}
+                            <div className="bg-[#020617] border border-[#1e293b] p-3.5 rounded-xl space-y-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-bold uppercase text-slate-400 flex items-center gap-1.5">
+                                  <MapPin className="w-3.5 h-3.5 text-cyan-400" /> Endereço de Coleta / Entrega
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenGoogleMapsRoute(req.address)}
+                                  className="text-[11px] font-bold text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 px-2.5 py-1 rounded-lg border border-cyan-500/30 transition flex items-center gap-1 cursor-pointer"
+                                  title="Abrir rota no Google Maps"
+                                >
+                                  <Navigation className="w-3 h-3 text-cyan-400" /> Traçar Rota no Maps
+                                </button>
+                              </div>
+
+                              <p className="text-xs text-slate-200 font-medium">
+                                {req.address?.street} {req.address?.number ? `, nº ${req.address.number}` : ''}
+                                {req.address?.neighborhood ? ` - ${req.address.neighborhood}` : ''}
+                                {req.address?.city ? ` (${req.address.city})` : ''}
+                                {req.address?.cep ? ` · CEP ${req.address.cep}` : ''}
+                              </p>
+                              {req.address?.complement && (
+                                <p className="text-[11px] text-slate-400">
+                                  Compl: {req.address.complement}
+                                </p>
+                              )}
+                              {req.notes && (
+                                <p className="text-[11px] text-amber-300/90 italic bg-amber-500/5 p-1.5 rounded border border-amber-500/20">
+                                  Instruções: {req.notes}
+                                </p>
+                              )}
+                            </div>
+
+                            {/* Card de Motorista */}
+                            <div className="bg-[#020617] border border-[#1e293b] p-3.5 rounded-xl space-y-2 flex flex-col justify-between">
+                              <div>
+                                <span className="text-[10px] font-bold uppercase text-slate-400 flex items-center gap-1.5">
+                                  <User className="w-3.5 h-3.5 text-cyan-400" /> Motorista Designado
+                                </span>
+                                <div className="mt-2 flex items-center gap-2">
+                                  <select
+                                    value={req.driverName || selectedLevaDriver[req.id] || ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setSelectedLevaDriver(prev => ({ ...prev, [req.id]: val }));
+                                      if (val) {
+                                        handleAssignLevaDriver(req.id, val);
+                                      }
+                                    }}
+                                    className="bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 flex-1 cursor-pointer"
+                                  >
+                                    <option value="">Selecione o motorista...</option>
+                                    {staffList.map(s => (
+                                      <option key={s.id} value={s.name}>
+                                        {s.name} ({s.role})
+                                      </option>
+                                    ))}
+                                    <option value="Motorista Terceirizado">Motorista Terceirizado</option>
+                                  </select>
+                                </div>
+                              </div>
+
+                              <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between text-[11px] text-slate-400">
+                                <span>Criado em: {new Date(req.createdAt).toLocaleDateString('pt-BR')} às {new Date(req.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                                {req.scheduledTime && (
+                                  <span className="font-bold text-cyan-400 font-mono">Agendado: {req.scheduledTime}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons: Avançar Etapa + WhatsApp */}
+                          <div className="pt-2 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              {/* Botão de Disparo de WhatsApp com Mensagem da Etapa */}
+                              {req.clientPhone && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSendLevaStatusWhatsApp(req)}
+                                  className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                                  title="Enviar mensagem atualizada sobre o status do carro no WhatsApp do cliente"
+                                >
+                                  <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
+                                  Notificar Cliente no WhatsApp
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (confirm('Deseja realmente excluir este registro de Leva e Traz?')) {
+                                    setLevaETrazRequests(prev => prev.filter(r => r.id !== req.id));
+                                    await deleteLevaETrazRequestFromFirestore(tenant.id, req.id);
+                                    showToast('Registro de Leva e Traz excluído.');
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 text-slate-500 hover:text-rose-400 rounded-lg text-xs transition cursor-pointer"
+                                title="Excluir registro"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+
+                            {/* Botão de Avanço Rápido de Etapa */}
+                            <div className="flex items-center gap-2">
+                              {req.status === 'solicitado' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceLevaStatus(req, 'motorista_a_caminho')}
+                                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-blue-600/30 cursor-pointer"
+                                >
+                                  <Truck className="w-3.5 h-3.5" /> Despachar Motorista p/ Coleta &rarr;
+                                </button>
+                              )}
+
+                              {req.status === 'motorista_a_caminho' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceLevaStatus(req, 'coletado')}
+                                  className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 rounded-xl text-xs font-black transition flex items-center gap-1.5 shadow-md shadow-cyan-600/30 cursor-pointer"
+                                >
+                                  <Check className="w-3.5 h-3.5" /> Confirmar Veículo Coletado &rarr;
+                                </button>
+                              )}
+
+                              {req.status === 'coletado' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceLevaStatus(req, 'no_patio')}
+                                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-indigo-600/30 cursor-pointer animate-pulse"
+                                >
+                                  <Droplet className="w-3.5 h-3.5" /> Chegou no Pátio (Colocar na Fila) &rarr;
+                                </button>
+                              )}
+
+                              {req.status === 'no_patio' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceLevaStatus(req, 'concluido')}
+                                  className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-purple-600/30 cursor-pointer"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" /> Lavagem Pronta (Avançar p/ Entrega) &rarr;
+                                </button>
+                              )}
+
+                              {req.status === 'concluido' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceLevaStatus(req, 'em_entrega')}
+                                  className="px-3.5 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-teal-600/30 cursor-pointer"
+                                >
+                                  <Truck className="w-3.5 h-3.5" /> Despachar Motorista p/ Entrega &rarr;
+                                </button>
+                              )}
+
+                              {req.status === 'em_entrega' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceLevaStatus(req, 'entregue')}
+                                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-emerald-600/30 cursor-pointer"
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5" /> Confirmar Entrega Realizada &rarr;
+                                </button>
+                              )}
+
+                              {req.status === 'entregue' && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-bold">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Entrega Concluída com Sucesso!
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+
+            {/* Modal: Nova Solicitação Leva e Traz */}
+            {showAddLevaModal && (
+              <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fadeIn">
+                <div className="bg-[#0f172a] border border-cyan-500/50 rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[90vh]">
+                  <div className="flex items-center justify-between border-b border-[#1e293b] pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 bg-cyan-500/20 text-cyan-400 rounded-xl">
+                        <Truck className="w-5 h-5" />
+                      </div>
+                      <h3 className="font-bold text-white text-base">Nova Solicitação de Leva e Traz</h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddLevaModal(false)}
+                      className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleCreateManualLevaRequest} className="space-y-4 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Nome do Cliente *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="Ex: Carlos Oliveira"
+                          value={newLTClientName}
+                          onChange={(e) => setNewLTClientName(e.target.value)}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Telefone / WhatsApp *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="(11) 99999-9999"
+                          value={newLTClientPhone}
+                          onChange={(e) => setNewLTClientPhone(e.target.value)}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Veículo (Marca/Modelo) *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="Ex: Honda Civic"
+                          value={newLTVehicle}
+                          onChange={(e) => setNewLTVehicle(e.target.value)}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Placa *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="ABC1D23"
+                          value={newLTPlate}
+                          onChange={(e) => setNewLTPlate(e.target.value.toUpperCase())}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500 font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="col-span-1 sm:col-span-2">
+                        <label className="block text-slate-300 font-bold mb-1">Serviço de Lavagem</label>
+                        <input
+                          type="text"
+                          placeholder="Ex: Lavagem Detalhada + Cera"
+                          value={newLTService}
+                          onChange={(e) => setNewLTService(e.target.value)}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Valor do Serviço (R$)</label>
+                        <input
+                          type="number"
+                          placeholder="70"
+                          value={newLTServicePrice}
+                          onChange={(e) => setNewLTServicePrice(Number(e.target.value))}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Modalidade */}
+                    <div>
+                      <label className="block text-slate-300 font-bold mb-1">Modalidade do Leva e Traz</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setNewLTType('completo')}
+                          className={`p-2 rounded-lg border text-xs font-bold transition cursor-pointer ${
+                            newLTType === 'completo'
+                              ? 'bg-cyan-600/30 border-cyan-400 text-white'
+                              : 'bg-[#020617] border-[#1e293b] text-slate-400'
+                          }`}
+                        >
+                          Completo (+ R$ 25)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNewLTType('buscar')}
+                          className={`p-2 rounded-lg border text-xs font-bold transition cursor-pointer ${
+                            newLTType === 'buscar'
+                              ? 'bg-cyan-600/30 border-cyan-400 text-white'
+                              : 'bg-[#020617] border-[#1e293b] text-slate-400'
+                          }`}
+                        >
+                          Apenas Buscar (+ R$ 15)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNewLTType('entregar')}
+                          className={`p-2 rounded-lg border text-xs font-bold transition cursor-pointer ${
+                            newLTType === 'entregar'
+                              ? 'bg-cyan-600/30 border-cyan-400 text-white'
+                              : 'bg-[#020617] border-[#1e293b] text-slate-400'
+                          }`}
+                        >
+                          Apenas Entregar (+ R$ 15)
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Endereço */}
+                    <div className="bg-[#020617] p-3 rounded-xl border border-[#1e293b] space-y-2.5">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase">Endereço de Coleta / Retirada</span>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="col-span-2">
+                          <label className="block text-slate-400 text-[10px] mb-0.5">Rua / Avenida *</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Ex: Rua Central"
+                            value={newLTStreet}
+                            onChange={(e) => setNewLTStreet(e.target.value)}
+                            className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-0.5">Número</label>
+                          <input
+                            type="text"
+                            placeholder="100"
+                            value={newLTNumber}
+                            onChange={(e) => setNewLTNumber(e.target.value)}
+                            className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-0.5">Bairro</label>
+                          <input
+                            type="text"
+                            placeholder="Centro"
+                            value={newLTNeighborhood}
+                            onChange={(e) => setNewLTNeighborhood(e.target.value)}
+                            className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-0.5">Cidade</label>
+                          <input
+                            type="text"
+                            placeholder="Cidade"
+                            value={newLTCity}
+                            onChange={(e) => setNewLTCity(e.target.value)}
+                            className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Designar Motorista</label>
+                        <select
+                          value={newLTDriver}
+                          onChange={(e) => setNewLTDriver(e.target.value)}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
+                        >
+                          <option value="">Selecione...</option>
+                          {staffList.map(s => (
+                            <option key={s.id} value={s.name}>{s.name} ({s.role})</option>
+                          ))}
+                          <option value="Motorista Terceirizado">Motorista Terceirizado</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-300 font-bold mb-1">Instruções / Portaria</label>
+                        <input
+                          type="text"
+                          placeholder="Ex: Interfone 101"
+                          value={newLTNotes}
+                          onChange={(e) => setNewLTNotes(e.target.value)}
+                          className="w-full bg-[#020617] border border-[#1e293b] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between">
+                      <span className="text-xs text-slate-400">
+                        Total Estimado: <strong className="text-emerald-400 font-mono text-sm">R$ {(Number(newLTServicePrice) + (newLTType === 'completo' ? 25 : 15)).toFixed(2)}</strong>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowAddLevaModal(false)}
+                          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer shadow-lg shadow-cyan-600/30"
+                        >
+                          Salvar e Iniciar Coleta
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -4658,6 +6285,14 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 />
               </div>
 
+              {/* Notificação 24h Antes */}
+              <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-[11px] text-blue-300 flex items-center gap-2">
+                <BellRing className="w-4 h-4 text-blue-400 shrink-0" />
+                <span>
+                  ⏰ Este agendamento terá um lembrete automático programado para <strong>24 horas antes</strong> do horário selecionado para disparo via WhatsApp / E-mail.
+                </span>
+              </div>
+
               <div className="pt-3 flex justify-end gap-2 border-t border-[#1e293b]">
                 <button
                   type="button"
@@ -4940,7 +6575,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             <div className="space-y-2.5 text-xs bg-[#020617] p-4 rounded-xl border border-[#1e293b]">
               <div className="flex justify-between items-center py-1 border-b border-[#1e293b]">
                 <span className="text-slate-400">Data / Horário:</span>
-                <span className="font-semibold text-slate-200">{selectedWashReceipt.completedAt}</span>
+                <span className="font-semibold text-slate-200">
+                  {formatReceiptCompletedAt(selectedWashReceipt.completedAt, selectedWashReceipt.date)}
+                </span>
               </div>
 
               <div className="flex justify-between items-center py-1 border-b border-[#1e293b]">
@@ -5011,8 +6648,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 {/* Enviar no WhatsApp */}
                 {(() => {
                   const phoneDigits = (selectedWashReceipt.clientPhone || '').replace(/\D/g, '');
+                  const formattedDateTime = formatReceiptCompletedAt(selectedWashReceipt.completedAt, selectedWashReceipt.date);
                   const receiptText = `*COMPROVANTE DE ATENDIMENTO - ${tenant.nomeFantasia || tenant.name}*\n` +
-                    `📅 Data: ${selectedWashReceipt.completedAt}\n` +
+                    `📅 Data: ${formattedDateTime}\n` +
                     `👤 Cliente: ${selectedWashReceipt.clientName}\n` +
                     `🚗 Veículo: ${selectedWashReceipt.vehicle} (${selectedWashReceipt.plate})\n` +
                     `🧼 Serviço: ${selectedWashReceipt.service}\n` +
@@ -5049,6 +6687,153 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL: DETALHES E DISPARO DE LEMBRETE 24H */}
+      {selectedReminderApp && (() => {
+        const analysis = getAppointmentReminderAnalysis(selectedReminderApp);
+        const waText = buildReminderWhatsAppText(tenant.nomeFantasia || tenant.name, selectedReminderApp, tenant.address?.street);
+        const { subject: emailSubject, body: emailBody, mailtoUrl } = buildReminderEmailContent(tenant.nomeFantasia || tenant.name, selectedReminderApp, tenant.address?.street);
+        const gcalUrl = buildGoogleCalendarUrl(tenant.nomeFantasia || tenant.name, selectedReminderApp);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-[#020617]/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+            <div className="bg-[#0f172a] border border-blue-500/40 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl relative my-auto">
+              <button
+                type="button"
+                onClick={() => setSelectedReminderApp(null)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-3 border-b border-[#1e293b] pb-3">
+                <div className="p-2.5 bg-blue-500/10 border border-blue-500/30 rounded-xl text-blue-400">
+                  <BellRing className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    Lembrete de Agendamento 24h
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${analysis.badgeClass}`}>
+                      {analysis.label}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Notificação programada com antecedência para evitar no-show do cliente.
+                  </p>
+                </div>
+              </div>
+
+              {/* Informações do Agendamento */}
+              <div className="bg-[#020617] p-3.5 rounded-xl border border-[#1e293b] text-xs space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <span className="text-[10px] text-slate-500 font-bold block uppercase">Cliente</span>
+                    <span className="font-semibold text-slate-200">{selectedReminderApp.clientName}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 font-bold block uppercase">Horário Marcado</span>
+                    <span className="font-semibold text-blue-400">{selectedReminderApp.dateTime}</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[#1e293b]">
+                  <div>
+                    <span className="text-[10px] text-slate-500 font-bold block uppercase">Veículo / Placa</span>
+                    <span className="text-slate-300">{selectedReminderApp.vehicle} ({selectedReminderApp.plate})</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 font-bold block uppercase">Serviço / Valor</span>
+                    <span className="text-emerald-400 font-semibold">{selectedReminderApp.service} - R$ {selectedReminderApp.price.toFixed(2)}</span>
+                  </div>
+                </div>
+                {analysis.reminderTargetDate && (
+                  <div className="pt-1.5 border-t border-[#1e293b] flex items-center gap-1.5 text-[11px] text-blue-300">
+                    <Clock className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Disparo calculado: <strong>{formatDateTimeDisplay(analysis.reminderTargetDate)}</strong> (exatamente 24h antes).</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Pré-visualização da Mensagem */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-300">Mensagem Personalizada de Lembrete:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(waText);
+                      showToast('📋 Mensagem de lembrete copiada para a área de transferência!');
+                    }}
+                    className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" /> Copiar Texto
+                  </button>
+                </div>
+                <div className="p-3 bg-[#020617] rounded-xl border border-slate-800 text-[11px] text-slate-300 whitespace-pre-line font-mono max-h-44 overflow-y-auto">
+                  {waText}
+                </div>
+              </div>
+
+              {/* Ações de Disparo */}
+              <div className="space-y-2 pt-2 border-t border-[#1e293b]">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleSendReminder(selectedReminderApp, 'whatsapp');
+                      setSelectedReminderApp(null);
+                    }}
+                    className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-sm shadow-emerald-600/30"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" /> Enviar WhatsApp
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleSendReminder(selectedReminderApp, 'email');
+                      setSelectedReminderApp(null);
+                    }}
+                    className="w-full py-2.5 px-3 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-sm shadow-cyan-600/30"
+                  >
+                    <Mail className="w-3.5 h-3.5" /> Enviar E-mail
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  {gcalUrl && (
+                    <a
+                      href={gcalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 transition"
+                    >
+                      <ExternalLink className="w-3 h-3" /> Adicionar à Google Agenda
+                    </a>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const icsData = generateIcsFileContent(tenant.nomeFantasia || tenant.name, selectedReminderApp);
+                      const blob = new Blob([icsData], { type: 'text/calendar;charset=utf-8' });
+                      const link = document.createElement('a');
+                      link.href = window.URL.createObjectURL(blob);
+                      link.setAttribute('download', `lembrete-${selectedReminderApp.id}.ics`);
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      showToast('📥 Arquivo .ics de calendário baixado com alarme 24h!');
+                    }}
+                    className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <Download className="w-3 h-3" /> Baixar .ICS (iCal)
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

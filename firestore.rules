@@ -81,6 +81,11 @@ service cloud.firestore {
         allow read, write: if true;
       }
 
+      // Subcoleção: Leva e Traz (Valet & Delivery)
+      match /leva_e_traz/{levaETrazId} {
+        allow read, write: if true;
+      }
+
       // Subcoleções adicionais e aninhadas da empresa
       match /{allSubcollections=**} {
         allow read, write: if true;
@@ -89,6 +94,11 @@ service cloud.firestore {
 
     // 2. Raiz: Agendamentos Gerais
     match /appointments/{appointmentId} {
+      allow read, write: if true;
+    }
+
+    // 2.1 Raiz: Leva e Traz Geral
+    match /leva_e_traz/{levaETrazId} {
       allow read, write: if true;
     }
 

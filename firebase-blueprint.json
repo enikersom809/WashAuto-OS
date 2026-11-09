@@ -32,6 +32,14 @@
         "addressSummary": { "type": "string" },
         "status": { "type": "string" },
         "assignedWasher": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "reminder24hEnabled": { "type": "boolean" },
+        "reminder24hScheduledAt": { "type": "string" },
+        "reminder24hSent": { "type": "boolean" },
+        "reminder24hSentAt": { "type": "string" },
+        "reminderChannel": { "type": "string" },
+        "reminderNotes": { "type": "string" },
         "createdAt": { "type": "string" }
       },
       "required": ["tenantId", "clientName", "vehicle", "plate", "service", "dateTime"]
@@ -121,6 +129,26 @@
         "createdAt": { "type": "string" }
       },
       "required": ["tenantId", "vehiclePlate", "currentKm", "nextChangeKm", "totalPrice"]
+    },
+    "levaETraz": {
+      "title": "Leva e Traz",
+      "description": "Valet pick-up and delivery requests with live vehicle tracking",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "vehicle": { "type": "string" },
+        "plate": { "type": "string" },
+        "service": { "type": "string" },
+        "type": { "type": "string" },
+        "status": { "type": "string" },
+        "feePrice": { "type": "number" },
+        "totalPrice": { "type": "number" },
+        "driverName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tenantId", "clientName", "vehicle", "plate", "status"]
     }
   },
   "firestore": {
@@ -167,6 +195,10 @@
     "/empresas/{empresaId}": {
       "schema": "tenants",
       "description": "Public company profile for PWA and QR Code lookup"
+    },
+    "/tenants/{tenantId}/leva_e_traz/{levaETrazId}": {
+      "schema": "levaETraz",
+      "description": "Valet pick-up and delivery requests for tenant"
     }
   }
 }
