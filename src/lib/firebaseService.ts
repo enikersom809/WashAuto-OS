@@ -3119,6 +3119,7 @@ export function subscribeToTenantPromoBanners(
 
 export async function saveLevaETrazRequest(request: LevaETrazRequest): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(request.tenantId);
     const cleanRId = cleanDocId(request.id);
     const docRef = doc(db, 'tenants', cleanTId, 'leva_e_traz', cleanRId);
@@ -3173,13 +3174,14 @@ export async function updateLevaETrazStatusInFirestore(
   updateData?: Partial<LevaETrazRequest>
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const cleanRId = cleanDocId(requestId);
     const docRef = doc(db, 'tenants', cleanTId, 'leva_e_traz', cleanRId);
 
     const docSnap = await getDoc(docRef);
     const existingData = docSnap.exists() ? (docSnap.data() as LevaETrazRequest) : null;
-    const history = existingData?.statusHistory || [];
+    const history = Array.isArray(existingData?.statusHistory) ? [...existingData.statusHistory] : [];
     history.push({
       status,
       timestamp: new Date().toISOString(),
@@ -3194,7 +3196,11 @@ export async function updateLevaETrazStatusInFirestore(
     };
 
     const cleanedPayload = removeUndefinedFields(payload);
-    await updateDoc(docRef, cleanedPayload);
+    if (docSnap.exists()) {
+      await updateDoc(docRef, cleanedPayload);
+    } else {
+      await setDoc(docRef, cleanedPayload, { merge: true });
+    }
 
     // Sync localStorage
     try {
@@ -3221,6 +3227,7 @@ export async function deleteLevaETrazRequestFromFirestore(
   requestId: string
 ): Promise<boolean> {
   try {
+    await ensureFirebaseAuthSession();
     const cleanTId = cleanDocId(tenantId);
     const cleanRId = cleanDocId(requestId);
     const docRef = doc(db, 'tenants', cleanTId, 'leva_e_traz', cleanRId);

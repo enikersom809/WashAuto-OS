@@ -38,7 +38,9 @@ import {
   MessageSquare,
   Truck,
   Navigation,
-  CheckCircle2
+  CheckCircle2,
+  Plus,
+  X
 } from 'lucide-react';
 import { Tenant, PromoBanner, LevaETrazRequest, LevaETrazStatus, LevaETrazType, LevaETrazAddress } from '../types';
 import { 
@@ -54,6 +56,7 @@ import {
   sendUserPasswordResetEmail,
   subscribeToTenantPromoBanners,
   saveLevaETrazRequest,
+  updateLevaETrazStatusInFirestore,
   subscribeToTenantLevaETraz,
   subscribeToTenantClients
 } from '../lib/firebaseService';
@@ -69,6 +72,17 @@ import {
   generateIcsFileContent
 } from '../utils/reminderService';
 import { PWAInstallButton } from './PWAInstallButton';
+import {
+  isPushNotificationSupported,
+  getPushNotificationPermission,
+  requestClientPushPermissionAndSubscribe,
+  syncClientPushMetadata,
+  disableClientPushNotifications,
+  listenForegroundClientPushMessages,
+  subscribeToClientStatusNotifications,
+  sendClientTestPushNotification,
+  ClientStatusNotificationRecord
+} from '../lib/pushNotificationService';
 
 interface Vehicle {
   id: string;
@@ -570,6 +584,17 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   }, [selectedDate, selectedTimeSlot]);
 
   // ================= 4. SISTEMA DE LEVA E TRAZ NO PORTAL DO CLIENTE =================
+  const levaConfig = useMemo(() => ({
+    enabled: tenant.levaETrazConfig?.enabled !== false,
+    feeCompleto: Number(tenant.levaETrazConfig?.feeCompleto ?? 25),
+    feeBuscar: Number(tenant.levaETrazConfig?.feeBuscar ?? 15),
+    feeEntregar: Number(tenant.levaETrazConfig?.feeEntregar ?? 15),
+    freeAboveOrderValue: Number(tenant.levaETrazConfig?.freeAboveOrderValue ?? 0),
+    estimatedPickupMinutes: Number(tenant.levaETrazConfig?.estimatedPickupMinutes ?? 30),
+    coverageArea: tenant.levaETrazConfig?.coverageArea || '',
+    workingHours: tenant.levaETrazConfig?.workingHours || ''
+  }), [tenant.levaETrazConfig]);
+
   const [hasLevaETraz, setHasLevaETraz] = useState(false);
   const [levaETrazType, setLevaETrazType] = useState<LevaETrazType>('completo');
   const [levaETrazStreet, setLevaETrazStreet] = useState('');
@@ -580,16 +605,64 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   const [levaETrazCep, setLevaETrazCep] = useState('');
   const [levaETrazReference, setLevaETrazReference] = useState('');
   const [levaETrazDriverNotes, setLevaETrazDriverNotes] = useState('');
+  const [isSearchingLevaCep, setIsSearchingLevaCep] = useState(false);
+  const [selectedLevaId, setSelectedLevaId] = useState<string>('');
+  const [showQuickLevaModal, setShowQuickLevaModal] = useState(false);
+  const [quickLevaImmediate, setQuickLevaImmediate] = useState(true);
+  const [isSubmittingQuickLeva, setIsSubmittingQuickLeva] = useState(false);
 
-  // Taxa do Leva e Traz: R$ 25 p/ completo (buscar + entregar), R$ 15 p/ apenas buscar ou apenas entregar
+  const getLevaETrazFeeForOrder = useCallback((type: LevaETrazType, servicePrice: number) => {
+    if (!levaConfig.enabled) return 0;
+    const baseFee = type === 'completo'
+      ? levaConfig.feeCompleto
+      : type === 'buscar'
+      ? levaConfig.feeBuscar
+      : levaConfig.feeEntregar;
+    if (levaConfig.freeAboveOrderValue > 0 && servicePrice >= levaConfig.freeAboveOrderValue) {
+      return 0;
+    }
+    return baseFee;
+  }, [levaConfig]);
+
   const levaETrazFee = useMemo(() => {
-    if (!hasLevaETraz) return 0;
-    return levaETrazType === 'completo' ? 25 : 15;
-  }, [hasLevaETraz, levaETrazType]);
+    if (!hasLevaETraz || !levaConfig.enabled) return 0;
+    return getLevaETrazFeeForOrder(levaETrazType, selectedPrice);
+  }, [hasLevaETraz, levaConfig.enabled, getLevaETrazFeeForOrder, levaETrazType, selectedPrice]);
+
+  useEffect(() => {
+    if (!levaConfig.enabled) {
+      if (hasLevaETraz) setHasLevaETraz(false);
+      if (showQuickLevaModal) setShowQuickLevaModal(false);
+    }
+  }, [levaConfig.enabled, hasLevaETraz, showQuickLevaModal]);
 
   const totalBookingPrice = useMemo(() => {
     return selectedPrice + levaETrazFee;
   }, [selectedPrice, levaETrazFee]);
+
+  const buscarCepLevaETraz = async (valorCep: string) => {
+    const cleanCep = valorCep.replace(/\D/g, '');
+    if (cleanCep.length !== 8) return;
+    try {
+      setIsSearchingLevaCep(true);
+      const res = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`);
+      const data = await res.json();
+      if (!data.erro) {
+        if (data.logradouro) setLevaETrazStreet(data.logradouro);
+        if (data.bairro) setLevaETrazNeighborhood(data.bairro);
+        if (data.localidade) setLevaETrazCity(data.localidade);
+        if (data.uf && !stateUf) setStateUf(data.uf);
+        setLevaETrazCep(cleanCep.replace(/^(\d{5})(\d{3})/, '$1-$2'));
+        showToast('📍 Endereço do Leva e Traz preenchido via CEP!');
+      } else {
+        showToast('⚠️ CEP não encontrado.');
+      }
+    } catch (err) {
+      console.error('Erro ao buscar CEP Leva e Traz:', err);
+    } finally {
+      setIsSearchingLevaCep(false);
+    }
+  };
 
   // Lista de solicitações de Leva e Traz em tempo real (Nuvem)
   const [tenantLevaETraz, setTenantLevaETraz] = useState<LevaETrazRequest[]>(() => {
@@ -757,7 +830,183 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   };
 
   // Modo de visualização: Agendamento, Ficha de Cadastro (Via QR) ou Status em Tempo Real
-  const [portalTab, setPortalTab] = useState<'agendar' | 'cadastro' | 'status'>('agendar');
+  const [portalTab, setPortalTab] = useState<'agendar' | 'cadastro' | 'status'>(() => {
+    if (typeof window !== 'undefined') {
+      const aba = new URLSearchParams(window.location.search).get('aba');
+      if (aba === 'status' || aba === 'cadastro' || aba === 'agendar') return aba;
+    }
+    return 'agendar';
+  });
+
+  // 🔔 Notificações Push FCM para Alteração de Status do Veículo
+  const cleanTenantPushId = useMemo(() => tenant.id.replace(/[^a-zA-Z0-9_-]/g, '_'), [tenant.id]);
+  const [clientPushPermission, setClientPushPermission] = useState<NotificationPermission>(() =>
+    getPushNotificationPermission()
+  );
+  const [isClientPushSubscribed, setIsClientPushSubscribed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      getPushNotificationPermission() === 'granted' &&
+      localStorage.getItem(`saas_client_push_enabled_${tenant.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`) === 'true'
+    );
+  });
+  const [isRequestingClientPush, setIsRequestingClientPush] = useState(false);
+  const [isTestingClientPush, setIsTestingClientPush] = useState(false);
+  const [recentStatusNotifications, setRecentStatusNotifications] = useState<ClientStatusNotificationRecord[]>([]);
+  const pushSessionStartRef = useRef<number>(Date.now());
+  const seenPushIdsRef = useRef<Set<string>>(new Set());
+
+  const clientPlatesList = useMemo(
+    () => vehicles.map(v => v.plate).filter(Boolean),
+    [vehicles]
+  );
+
+  // Navegação automática para aba Status ao clicar em notificação Push
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    const handleSwMsg = (event: MessageEvent) => {
+      if (event.data?.type === 'NAVIGATE_TO_TAB' && event.data?.tab === 'status') {
+        setPortalTab('status');
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handleSwMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', handleSwMsg);
+  }, []);
+
+  // Sincroniza placas, telefone e e-mail vinculados ao Push FCM sempre que o perfil atualizar
+  useEffect(() => {
+    if (!isClientPushSubscribed || clientPushPermission !== 'granted') return;
+    syncClientPushMetadata({
+      tenantId: tenant.id,
+      tenantName: tenant.nomeFantasia || tenant.name,
+      clientName: editName || clientProfile.name || clientInfo?.name,
+      clientPhone: editPhone || clientProfile.phone || clientInfo?.phone,
+      clientEmail: editEmail || clientProfile.email || clientInfo?.email,
+      plates: clientPlatesList
+    });
+  }, [
+    isClientPushSubscribed,
+    clientPushPermission,
+    tenant.id,
+    tenant.nomeFantasia,
+    tenant.name,
+    editName,
+    editPhone,
+    editEmail,
+    clientProfile.name,
+    clientProfile.phone,
+    clientProfile.email,
+    clientInfo,
+    clientPlatesList
+  ]);
+
+  // Escuta mensagens FCM em Foreground (com o portal aberto)
+  useEffect(() => {
+    const unsubFg = listenForegroundClientPushMessages((payload) => {
+      showToast(`${payload.title} — ${payload.body}`);
+    });
+    return () => unsubFg();
+  }, []);
+
+  // Escuta notificações de mudança de status do veículo no Firestore para o cliente conectado
+  useEffect(() => {
+    const phone = editPhone || clientProfile.phone || clientInfo?.phone || '';
+    const email = editEmail || clientProfile.email || clientInfo?.email || '';
+    if (!phone && !email && clientPlatesList.length === 0) return;
+
+    const unsubStatusNotif = subscribeToClientStatusNotifications(
+      tenant.id,
+      { phone, email, plates: clientPlatesList },
+      (items) => {
+        setRecentStatusNotifications(items);
+        items.forEach((item) => {
+          const ts = new Date(item.createdAt).getTime();
+          if (ts >= pushSessionStartRef.current - 5000 && !seenPushIdsRef.current.has(item.id)) {
+            seenPushIdsRef.current.add(item.id);
+            showToast(`${item.title} — ${item.body}`);
+
+            if (
+              typeof document !== 'undefined' &&
+              document.visibilityState === 'hidden' &&
+              isClientPushSubscribed &&
+              typeof Notification !== 'undefined' &&
+              Notification.permission === 'granted' &&
+              'serviceWorker' in navigator
+            ) {
+              navigator.serviceWorker
+                .getRegistration('/firebase-messaging-sw.js')
+                .then((reg) => {
+                  if (reg) {
+                    reg.showNotification(item.title, {
+                      body: item.body,
+                      icon: '/pwa-192x192.png',
+                      badge: '/pwa-192x192.png',
+                      vibrate: [200, 100, 200],
+                      tag: `status-${item.id}`,
+                      data: { url: item.url, tab: 'status', targetRole: 'cliente', tenantId: cleanTenantPushId }
+                    } as any);
+                  }
+                })
+                .catch(() => {});
+            }
+          } else {
+            seenPushIdsRef.current.add(item.id);
+          }
+        });
+      }
+    );
+
+    return () => unsubStatusNotif();
+  }, [tenant.id, cleanTenantPushId, editPhone, editEmail, clientProfile.phone, clientProfile.email, clientInfo, clientPlatesList, isClientPushSubscribed]);
+
+  const handleToggleClientPush = async () => {
+    if (isRequestingClientPush) return;
+    setIsRequestingClientPush(true);
+    try {
+      if (isClientPushSubscribed) {
+        await disableClientPushNotifications(tenant.id);
+        setIsClientPushSubscribed(false);
+        showToast('🔕 Alertas Push pausados neste dispositivo.');
+      } else {
+        const res = await requestClientPushPermissionAndSubscribe({
+          tenantId: tenant.id,
+          tenantName: tenant.nomeFantasia || tenant.name,
+          clientName: editName || clientProfile.name || clientInfo?.name || 'Cliente',
+          clientPhone: editPhone || clientProfile.phone || clientInfo?.phone || '',
+          clientEmail: editEmail || clientProfile.email || clientInfo?.email || '',
+          plates: clientPlatesList
+        });
+        setClientPushPermission(res.permission);
+        if (res.success) {
+          setIsClientPushSubscribed(true);
+          showToast('🔔 Notificações Push FCM ativadas! Avisaremos quando o status do veículo mudar.');
+        } else {
+          showToast(`⚠️ ${res.errorMessage || 'Não foi possível ativar as notificações Push.'}`);
+        }
+      }
+    } finally {
+      setIsRequestingClientPush(false);
+    }
+  };
+
+  const handleTestClientPush = async () => {
+    if (isTestingClientPush) return;
+    setIsTestingClientPush(true);
+    try {
+      const res = await sendClientTestPushNotification({
+        tenantId: tenant.id,
+        tenantName: tenant.nomeFantasia || tenant.name,
+        clientName: editName || clientProfile.name || clientInfo?.name || 'Cliente',
+        clientPhone: editPhone || clientProfile.phone || clientInfo?.phone || '',
+        clientEmail: editEmail || clientProfile.email || clientInfo?.email || '',
+        plates: clientPlatesList
+      });
+      showToast(res.success ? `✅ ${res.message}` : `⚠️ ${res.message}`);
+    } finally {
+      setIsTestingClientPush(false);
+    }
+  };
+
   const [isSearchingCep, setIsSearchingCep] = useState(false);
 
   // Busca Automática de Endereço via CEP (ViaCEP)
@@ -1142,7 +1391,9 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       return;
     }
 
-    if (hasLevaETraz) {
+    const effectiveHasLeva = hasLevaETraz && levaConfig.enabled;
+
+    if (effectiveHasLeva) {
       if (!levaETrazStreet.trim() && !address.trim()) {
         showToast('⚠️ Por favor, informe a Rua/Avenida para o serviço de Leva e Traz.');
         return;
@@ -1176,7 +1427,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       reference: levaETrazReference.trim() || undefined
     };
 
-    const addressSummary = hasLevaETraz
+    const addressSummary = effectiveHasLeva
       ? `[Leva e Traz: ${levaETrazType === 'completo' ? 'Buscar & Entregar' : levaETrazType === 'buscar' ? 'Apenas Buscar' : 'Apenas Entregar'}] ${finalStreet}, ${finalNumber} - ${finalNeighborhood}`
       : address 
       ? `${address}, ${neighborhood || ''} - ${city || ''}/${stateUf || ''}`.replace(/^,\s*|,\s*$/g, '')
@@ -1208,7 +1459,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       vehicle: `${veh.brand} ${veh.model}`,
       plate: veh.plate,
       service: finalServiceName,
-      price: hasLevaETraz ? totalBookingPrice : selectedPrice,
+      price: effectiveHasLeva ? totalBookingPrice : selectedPrice,
       dateTime: `${formattedDateDisplay} ${selectedTimeSlot}`,
       date: selectedDate,
       time: selectedTimeSlot,
@@ -1219,15 +1470,15 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
       reminder24hScheduledAt: calculatedReminderSchedule?.reminderTarget ? calculatedReminderSchedule.reminderTarget.toISOString() : undefined,
       reminder24hSent: false,
       reminderChannel,
-      hasLevaETraz,
-      levaETrazType: hasLevaETraz ? levaETrazType : undefined,
-      levaETrazFee: hasLevaETraz ? levaETrazFee : undefined,
-      levaETrazAddress: hasLevaETraz ? levaAddress : undefined,
-      levaETrazStatus: hasLevaETraz ? ('solicitado' as LevaETrazStatus) : undefined
+      hasLevaETraz: effectiveHasLeva,
+      levaETrazType: effectiveHasLeva ? levaETrazType : undefined,
+      levaETrazFee: effectiveHasLeva ? levaETrazFee : undefined,
+      levaETrazAddress: effectiveHasLeva ? levaAddress : undefined,
+      levaETrazStatus: effectiveHasLeva ? ('solicitado' as LevaETrazStatus) : undefined
     };
 
     // 🚀 Se solicitou Leva e Traz, registra no Firestore
-    if (hasLevaETraz) {
+    if (effectiveHasLeva) {
       const newLevaPayload: LevaETrazRequest = {
         id: levaRequestId,
         tenantId: tenant.id,
@@ -1259,6 +1510,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
       await saveLevaETrazRequest(newLevaPayload);
       setTenantLevaETraz(prev => [newLevaPayload, ...prev]);
+      setSelectedLevaId(levaRequestId);
     }
 
     // 🚀 Salva no Firestore instantaneamente para sincronizar com o computador do Lava-Jato
@@ -1266,13 +1518,114 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
     onNewAppointmentCreated(newAppPayload);
     showToast(
-      hasLevaETraz
+      effectiveHasLeva
         ? `✅ Solicitação de Leva e Traz confirmada! Horário: ${selectedTimeSlot} dia ${formattedDateDisplay}. Acompanhe em tempo real!`
         : `✅ Agendamento de ${selectedTimeSlot} no dia ${formattedDateDisplay} enviado! Lembrete 24h ativado.`
     );
 
     // Abre a aba de acompanhamento em tempo real para o cliente visualizar
     setPortalTab('status');
+  };
+
+  const handleSubmitQuickLevaRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!levaConfig.enabled) {
+      showToast('⚠️ O serviço de Leva e Traz está temporariamente pausado por esta empresa.');
+      return;
+    }
+    if (vehicles.length === 0) {
+      showToast('⚠️ Cadastre um veículo primeiro antes de chamar o Leva e Traz.');
+      setShowQuickLevaModal(false);
+      setShowAddVehicle(true);
+      setPortalTab('cadastro');
+      return;
+    }
+    if (!levaETrazStreet.trim() || !levaETrazNumber.trim()) {
+      showToast('⚠️ Informe Rua/Avenida e Número para coleta ou entrega.');
+      return;
+    }
+
+    setIsSubmittingQuickLeva(true);
+    try {
+      const veh = vehicles.find(v => v.id === selectedVehicleId) || vehicles[0];
+      const fee = getLevaETrazFeeForOrder(levaETrazType, selectedPrice);
+      const total = selectedPrice + fee;
+      const levaRequestId = `leva-${Date.now()}`;
+      const scheduleDateVal = quickLevaImmediate ? todayStr : selectedDate;
+      const scheduleTimeVal = quickLevaImmediate ? 'O quanto antes' : selectedTimeSlot;
+      const formattedDateDisplay = scheduleDateVal.includes('-')
+        ? scheduleDateVal.split('-').reverse().join('/')
+        : scheduleDateVal;
+
+      const levaAddress: LevaETrazAddress = {
+        cep: (levaETrazCep || cep || '').trim() || undefined,
+        street: levaETrazStreet.trim(),
+        number: levaETrazNumber.trim(),
+        neighborhood: (levaETrazNeighborhood || neighborhood || '').trim(),
+        complement: levaETrazComplement.trim() || undefined,
+        city: (levaETrazCity || city || tenant.cidade || '').trim(),
+        state: stateUf.trim() || tenant.estado || undefined,
+        reference: levaETrazReference.trim() || undefined
+      };
+
+      const newLevaPayload: LevaETrazRequest = {
+        id: levaRequestId,
+        tenantId: tenant.id,
+        type: levaETrazType,
+        status: 'solicitado',
+        clientName: clientProfile.name,
+        clientPhone: clientProfile.phone,
+        clientEmail: clientProfile.email,
+        vehicle: `${veh.brand} ${veh.model}`,
+        plate: veh.plate,
+        service: selectedService,
+        servicePrice: selectedPrice,
+        feePrice: fee,
+        totalPrice: total,
+        address: levaAddress,
+        scheduledDate: scheduleDateVal,
+        scheduledTime: scheduleTimeVal,
+        notes: levaETrazDriverNotes.trim() || (quickLevaImmediate ? 'Solicitação imediata pelo App' : undefined),
+        statusHistory: [
+          {
+            status: 'solicitado',
+            timestamp: new Date().toISOString(),
+            note: quickLevaImmediate
+              ? 'Solicitado busca imediata pelo Portal do Cliente'
+              : `Agendado para ${formattedDateDisplay} às ${scheduleTimeVal}`
+          }
+        ],
+        createdAt: new Date().toISOString()
+      };
+
+      await saveLevaETrazRequest(newLevaPayload);
+      setTenantLevaETraz(prev => [newLevaPayload, ...prev]);
+      setSelectedLevaId(levaRequestId);
+      setShowQuickLevaModal(false);
+      setPortalTab('status');
+      showToast('🚚 Solicitação de Leva e Traz enviada! Acompanhe o motorista ao vivo aqui.');
+    } catch (err) {
+      console.error('handleSubmitQuickLevaRequest error:', err);
+      showToast('⚠️ Erro ao enviar solicitação de Leva e Traz.');
+    } finally {
+      setIsSubmittingQuickLeva(false);
+    }
+  };
+
+  const handleClientCancelLeva = async (req: LevaETrazRequest) => {
+    if (req.status !== 'solicitado') {
+      showToast('⚠️ Só é possível cancelar enquanto o pedido ainda aguarda despacho do motorista.');
+      return;
+    }
+    if (!confirm(`Deseja cancelar a solicitação de Leva e Traz do veículo ${req.vehicle}?`)) return;
+    const cancelNote = 'Cancelado pelo cliente no Portal';
+    await updateLevaETrazStatusInFirestore(tenant.id, req.id, 'cancelado', { notes: cancelNote });
+    setTenantLevaETraz(prev => prev.map(r => r.id === req.id ? {
+      ...r,
+      status: 'cancelado',
+      statusHistory: [...(r.statusHistory || []), { status: 'cancelado', timestamp: new Date().toISOString(), note: cancelNote }]
+    } : r));
+    showToast('Solicitação de Leva e Traz cancelada.');
   };
 
   // ================= CALENDÁRIO DIAS MATRIX =================
@@ -1432,7 +1785,33 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Botão Rápido de Notificações Push FCM */}
+            {isPushNotificationSupported() && (
+              <button
+                type="button"
+                onClick={handleToggleClientPush}
+                disabled={isRequestingClientPush}
+                className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 cursor-pointer ${
+                  isClientPushSubscribed
+                    ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                    : 'bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 border-blue-500/40'
+                }`}
+                title={isClientPushSubscribed ? 'Alertas Push FCM ativos neste aparelho (clique para pausar)' : 'Ativar alertas Push FCM de mudança de status do veículo'}
+              >
+                {isRequestingClientPush ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : isClientPushSubscribed ? (
+                  <BellRing className="w-3.5 h-3.5 text-emerald-400" />
+                ) : (
+                  <Bell className="w-3.5 h-3.5 text-blue-400" />
+                )}
+                <span className="hidden md:inline">
+                  {isClientPushSubscribed ? 'Push Ativo' : 'Ativar Push'}
+                </span>
+              </button>
+            )}
+
             {/* PWA App Install Button */}
             <PWAInstallButton compact variant="outline" className="hidden sm:inline-flex" />
 
@@ -1818,6 +2197,115 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
               </button>
             </div>
 
+            {/* ================= ALERTAS PUSH FCM DE MUDANÇA DE STATUS ================= */}
+            {isPushNotificationSupported() && (
+              <div className={`rounded-2xl p-4 sm:p-5 border transition shadow-xl space-y-3 ${
+                isClientPushSubscribed
+                  ? 'bg-gradient-to-r from-[#0f172a] via-[#111827] to-emerald-950/30 border-emerald-500/40'
+                  : 'bg-[#0f172a] border-blue-500/30'
+              }`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-start sm:items-center gap-3.5">
+                    <div className={`w-11 h-11 rounded-xl border flex items-center justify-center shrink-0 ${
+                      isClientPushSubscribed
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                        : 'bg-blue-500/15 border-blue-500/40 text-blue-400'
+                    }`}>
+                      {isClientPushSubscribed ? (
+                        <BellRing className="w-5 h-5 animate-pulse" />
+                      ) : (
+                        <Bell className="w-5 h-5" />
+                      )}
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-sm font-bold text-white">
+                          Alertas Push em Tempo Real (Firebase FCM)
+                        </h3>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                          isClientPushSubscribed
+                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                            : clientPushPermission === 'denied'
+                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                            : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                        }`}>
+                          {isClientPushSubscribed
+                            ? 'Ativado neste aparelho'
+                            : clientPushPermission === 'denied'
+                            ? 'Bloqueado no navegador'
+                            : 'Desativado'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Receba uma notificação instantânea mesmo com o aplicativo fechado sempre que seu veículo entrar em lavagem, ficar pronto ou o motorista sair para entrega.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isClientPushSubscribed && (
+                      <button
+                        type="button"
+                        onClick={handleTestClientPush}
+                        disabled={isTestingClientPush}
+                        className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        {isTestingClientPush ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
+                        Testar Alerta
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleToggleClientPush}
+                      disabled={isRequestingClientPush}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                        isClientPushSubscribed
+                          ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30'
+                          : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/25'
+                      }`}
+                    >
+                      {isRequestingClientPush ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Configurando...
+                        </>
+                      ) : isClientPushSubscribed ? (
+                        <>Pausar Alertas</>
+                      ) : (
+                        <>
+                          <BellRing className="w-3.5 h-3.5" /> Ativar Notificações Push
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {recentStatusNotifications.length > 0 && (
+                  <div className="pt-3 border-t border-[#1e293b] space-y-2">
+                    <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
+                      Últimos Alertas de Status Recebidos
+                    </span>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {recentStatusNotifications.slice(0, 4).map((notif) => (
+                        <div
+                          key={notif.id}
+                          className="bg-[#020617] border border-[#1e293b] rounded-xl p-3 flex items-start justify-between gap-3"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-slate-100 truncate">{notif.title}</p>
+                            <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-2">{notif.body}</p>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                            {new Date(notif.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ================= ACOMPANHAMENTO ONLINE: STATUS DO VEÍCULO & LEVA E TRAZ ================= */}
             {(() => {
               const cleanClientPhone = (clientProfile.phone || clientInfo?.phone || editPhone || '').replace(/\D/g, '');
@@ -1840,7 +2328,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
               });
 
               const fallbackFromAppointments = myAppointments
-                .filter(a => a.hasLevaETraz)
+                .filter(a => a.hasLevaETraz && a.status !== 'Cancelado')
+                .filter(a => !clientLevaList.some(c => c.appointmentId === a.id))
                 .map(a => {
                   const req: LevaETrazRequest = {
                     id: a.id,
@@ -1853,7 +2342,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                     plate: a.plate || '',
                     service: a.service,
                     servicePrice: a.price,
-                    feePrice: a.levaETrazFee || 25,
+                    feePrice: a.levaETrazFee ?? (levaConfig.enabled ? levaConfig.feeCompleto : 0),
                     totalPrice: a.price,
                     address: a.levaETrazAddress || { street: a.addressSummary || '', number: '', neighborhood: '', city: '' },
                     driverName: a.levaETrazDriverName,
@@ -1862,8 +2351,12 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                   return req;
                 });
 
-              const relevantLeva = clientLevaList.length > 0 ? clientLevaList : fallbackFromAppointments;
-              const activeLeva = relevantLeva.find(r => r.status !== 'cancelado') || relevantLeva[0];
+              const relevantLeva = [...clientLevaList, ...fallbackFromAppointments];
+              const activeLeva =
+                (selectedLevaId && relevantLeva.find(r => r.id === selectedLevaId)) ||
+                relevantLeva.find(r => r.status !== 'cancelado' && r.status !== 'entregue') ||
+                relevantLeva.find(r => r.status !== 'cancelado') ||
+                relevantLeva[0];
 
               const getStageNumber = (status: LevaETrazStatus) => {
                 switch (status) {
@@ -1890,6 +2383,22 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
               ];
 
               if (!activeLeva) {
+                if (!levaConfig.enabled) {
+                  return (
+                    <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-5 flex items-center gap-3.5 text-slate-400">
+                      <div className="w-11 h-11 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0">
+                        <Truck className="w-5 h-5 text-slate-500" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-300 text-sm">Serviço de Leva e Traz indisponível no momento</h4>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          O lava-jato está operando apenas com atendimento presencial no pátio neste período.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                }
+
                 return (
                   <div className="bg-gradient-to-r from-[#0f172a] via-[#111827] to-cyan-950/30 border border-cyan-500/30 rounded-2xl p-5 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
                     <div className="flex items-center gap-3.5">
@@ -1897,34 +2406,49 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                         <Truck className="w-6 h-6" />
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <h4 className="font-bold text-white text-sm">Serviço de Leva e Traz Disponível!</h4>
                           <span className="text-[10px] bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded-full border border-cyan-500/30">
-                            Praticidade Total
+                            A partir de R$ {Math.min(levaConfig.feeBuscar, levaConfig.feeEntregar).toFixed(0)} · ~{levaConfig.estimatedPickupMinutes} min
                           </span>
                         </div>
                         <p className="text-xs text-slate-400 mt-0.5">
-                          Não precisa sair de casa ou do trabalho. Nós buscamos seu veículo, lavamos e entregamos limpo!
+                          Não precisa sair de casa ou do trabalho. Buscamos seu veículo, lavamos e devolvemos limpo!
+                          {levaConfig.freeAboveOrderValue > 0 && (
+                            <span className="text-emerald-400 font-bold ml-1">
+                              (Grátis em pedidos acima de R$ {levaConfig.freeAboveOrderValue.toFixed(0)})
+                            </span>
+                          )}
                         </p>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHasLevaETraz(true);
-                        setPortalTab('agendar');
-                        const el = document.getElementById('agendamento-section');
-                        if (el) el.scrollIntoView({ behavior: 'smooth' });
-                      }}
-                      className="bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-lg shadow-cyan-600/25 shrink-0 flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Truck className="w-4 h-4" /> Solicitar Leva e Traz Agora
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setShowQuickLevaModal(true)}
+                        className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl transition shadow-lg shadow-cyan-600/25 flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Truck className="w-4 h-4" /> Chamar Leva e Traz Agora
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHasLevaETraz(true);
+                          setPortalTab('agendar');
+                          const el = document.getElementById('agendamento-section');
+                          if (el) el.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                        className="bg-[#020617] hover:bg-slate-800 border border-[#1e293b] text-slate-200 font-bold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer"
+                      >
+                        Agendar c/ Data
+                      </button>
+                    </div>
                   </div>
                 );
               }
 
               const currentStageNum = getStageNumber(activeLeva.status);
+              const contactPhoneDigits = (tenant.contactPhone || activeLeva.clientPhone || '').replace(/\D/g, '');
 
               return (
                 <div className="bg-[#0f172a] border border-cyan-500/40 rounded-2xl p-5 sm:p-6 shadow-2xl space-y-5">
@@ -1934,7 +2458,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                         <Truck className="w-6 h-6 animate-pulse" />
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <h3 className="text-base font-bold text-white">Acompanhamento do Leva e Traz em Tempo Real</h3>
                           <span className="inline-flex items-center gap-1 text-[10px] bg-cyan-500/20 text-cyan-300 font-black px-2 py-0.5 rounded-full border border-cyan-500/30">
                             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
@@ -1954,10 +2478,28 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 self-end sm:self-auto">
-                      {activeLeva.clientPhone && (
+                    <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
+                      {levaConfig.enabled && (
+                        <button
+                          type="button"
+                          onClick={() => setShowQuickLevaModal(true)}
+                          className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 rounded-xl text-xs font-black transition flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Novo Leva e Traz
+                        </button>
+                      )}
+                      {activeLeva.status === 'solicitado' && (
+                        <button
+                          type="button"
+                          onClick={() => handleClientCancelLeva(activeLeva)}
+                          className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" /> Cancelar
+                        </button>
+                      )}
+                      {contactPhoneDigits && (
                         <a
-                          href={`https://wa.me/55${activeLeva.clientPhone.replace(/\D/g, '')}?text=${encodeURIComponent(`Olá! Gostaria de uma informação sobre o meu pedido de Leva e Traz do veículo ${activeLeva.vehicle}.`)}`}
+                          href={`https://wa.me/55${contactPhoneDigits}?text=${encodeURIComponent(`Olá! Gostaria de uma informação sobre o meu pedido de Leva e Traz do veículo ${activeLeva.vehicle} (${activeLeva.plate}).`)}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
@@ -1967,6 +2509,27 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {/* Seletor quando cliente possui mais de um pedido de Leva e Traz */}
+                  {relevantLeva.length > 1 && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      <span className="text-[10px] font-bold uppercase text-slate-400 shrink-0">Seus pedidos:</span>
+                      {relevantLeva.slice(0, 6).map(r => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setSelectedLevaId(r.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition whitespace-nowrap cursor-pointer ${
+                            activeLeva.id === r.id
+                              ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300'
+                              : 'bg-[#020617] border-[#1e293b] text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {r.vehicle} ({r.plate}) · {r.status === 'entregue' ? 'Entregue' : r.status === 'cancelado' ? 'Cancelado' : 'Ativo'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Visual Stepper de 7 Estágios */}
                   <div className="space-y-3">
@@ -2077,7 +2640,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                         </div>
                       ) : (
                         <p className="text-xs text-slate-400">
-                          Aguardando despacho de motorista pela equipe da recepção.
+                          Aguardando despacho pela recepção (tempo médio de coleta: ~{levaConfig.estimatedPickupMinutes} min).
                         </p>
                       )}
                     </div>
@@ -2091,6 +2654,11 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                         {activeLeva.address?.neighborhood ? ` - ${activeLeva.address.neighborhood}` : ''}
                         {activeLeva.address?.city ? ` (${activeLeva.address.city})` : ''}
                       </p>
+                      {activeLeva.scheduledTime && (
+                        <p className="text-[11px] text-cyan-300 font-mono">
+                          Horário: {activeLeva.scheduledDate ? `${activeLeva.scheduledDate.split('-').reverse().join('/')} · ` : ''}{activeLeva.scheduledTime}
+                        </p>
+                      )}
                       {activeLeva.notes && (
                         <p className="text-[10px] text-amber-300/90 italic">
                           Obs: {activeLeva.notes}
@@ -2098,6 +2666,21 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {/* Histórico de Atualizações */}
+                  {Array.isArray(activeLeva.statusHistory) && activeLeva.statusHistory.length > 0 && (
+                    <div className="pt-2 border-t border-[#1e293b] flex flex-wrap items-center gap-1.5 text-[10px]">
+                      <span className="text-slate-500 font-bold uppercase mr-1">Atualizações:</span>
+                      {activeLeva.statusHistory.slice(-4).map((h, idx) => (
+                        <span
+                          key={`${activeLeva.id}-hist-${idx}`}
+                          className="px-2 py-0.5 rounded bg-[#020617] border border-[#1e293b] text-slate-300 font-mono"
+                        >
+                          {h.status.replace(/_/g, ' ')} · {new Date(h.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -3393,6 +3976,17 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                 </div>
 
                 {/* ================= 4. SERVIÇO DE LEVA E TRAZ (VALET & DELIVERY) ================= */}
+                {!levaConfig.enabled ? (
+                  <div className="border border-[#1e293b] bg-[#020617] rounded-xl p-4 flex items-center gap-3 text-slate-400">
+                    <div className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-500">
+                      <Truck className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-300">Serviço de Leva e Traz indisponível no momento</h4>
+                      <p className="text-[11px] text-slate-500">Atendimento exclusivo no estabelecimento para o período selecionado.</p>
+                    </div>
+                  </div>
+                ) : (
                 <div className={`border rounded-xl p-4 space-y-3 transition ${
                   hasLevaETraz 
                     ? 'bg-gradient-to-br from-cyan-950/40 via-slate-900 to-blue-950/40 border-cyan-500/50 shadow-lg shadow-cyan-950/50' 
@@ -3408,14 +4002,22 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                         <Truck className="w-4 h-4" />
                       </div>
                       <div>
-                        <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <h4 className="text-xs font-bold text-white flex flex-wrap items-center gap-1.5">
                           Serviço de Leva e Traz
                           <span className="text-[10px] bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-500/30 font-semibold">
-                            Buscamos seu Carro
+                            Buscamos seu Carro (~{levaConfig.estimatedPickupMinutes} min)
                           </span>
+                          {levaConfig.freeAboveOrderValue > 0 && (
+                            <span className="text-[10px] bg-emerald-500/15 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30 font-semibold">
+                              {selectedPrice >= levaConfig.freeAboveOrderValue
+                                ? 'Taxa GRÁTIS neste serviço!'
+                                : `Grátis acima de R$ ${levaConfig.freeAboveOrderValue.toFixed(0)}`}
+                            </span>
+                          )}
                         </h4>
                         <p className="text-[11px] text-slate-400">
-                          Buscamos e/ou entregamos o veículo no seu endereço. Acompanhe em tempo real pelo app!
+                          Buscamos e/ou entregamos o veículo no seu endereço.
+                          {levaConfig.coverageArea ? ` Área: ${levaConfig.coverageArea}.` : ' Acompanhe em tempo real pelo app!'}
                         </p>
                       </div>
                     </div>
@@ -3450,7 +4052,9 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                           >
                             <div className="flex items-center justify-between text-xs font-bold">
                               <span>Completo</span>
-                              <span className="text-cyan-400">+ R$ 25</span>
+                              <span className="text-cyan-400">
+                                {getLevaETrazFeeForOrder('completo', selectedPrice) === 0 ? 'Grátis' : `+ R$ ${levaConfig.feeCompleto.toFixed(0)}`}
+                              </span>
                             </div>
                             <p className="text-[10px] text-slate-400 mt-0.5">Buscar & Devolver no local</p>
                           </button>
@@ -3466,7 +4070,9 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                           >
                             <div className="flex items-center justify-between text-xs font-bold">
                               <span>Apenas Buscar</span>
-                              <span className="text-cyan-400">+ R$ 15</span>
+                              <span className="text-cyan-400">
+                                {getLevaETrazFeeForOrder('buscar', selectedPrice) === 0 ? 'Grátis' : `+ R$ ${levaConfig.feeBuscar.toFixed(0)}`}
+                              </span>
                             </div>
                             <p className="text-[10px] text-slate-400 mt-0.5">Retirada na sua casa/empresa</p>
                           </button>
@@ -3482,7 +4088,9 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                           >
                             <div className="flex items-center justify-between text-xs font-bold">
                               <span>Apenas Entregar</span>
-                              <span className="text-cyan-400">+ R$ 15</span>
+                              <span className="text-cyan-400">
+                                {getLevaETrazFeeForOrder('entregar', selectedPrice) === 0 ? 'Grátis' : `+ R$ ${levaConfig.feeEntregar.toFixed(0)}`}
+                              </span>
                             </div>
                             <p className="text-[10px] text-slate-400 mt-0.5">Entrega após término do serviço</p>
                           </button>
@@ -3510,12 +4118,12 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                                   const val = e.target.value;
                                   setLevaETrazCep(val);
                                   if (val.replace(/\D/g, '').length === 8) {
-                                    buscarCEP(val);
+                                    buscarCepLevaETraz(val);
                                   }
                                 }}
                                 className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
                               />
-                              {isSearchingCep && (
+                              {isSearchingLevaCep && (
                                 <Loader2 className="w-3 h-3 text-cyan-400 animate-spin absolute right-2 top-2" />
                               )}
                             </div>
@@ -3610,6 +4218,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                     </div>
                   )}
                 </div>
+                )}
 
                 {/* Resumo & Botão Finalizar */}
                 <div className="pt-4 border-t border-[#1e293b] space-y-4">
@@ -3656,6 +4265,269 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         )}
 
       </div>
+
+      {/* Modal Independente: Solicitar Leva & Traz Agora */}
+      {showQuickLevaModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#0f172a] border border-cyan-500/50 rounded-2xl max-w-lg w-full p-5 sm:p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-[#1e293b] pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-cyan-500/20 text-cyan-400 rounded-xl">
+                  <Truck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Chamar Leva e Traz</h3>
+                  <p className="text-[11px] text-slate-400">Coleta e entrega no seu endereço com rastreio ao vivo</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowQuickLevaModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitQuickLevaRequest} className="space-y-3.5 text-xs">
+              {/* Veículo */}
+              <div>
+                <label className="block text-slate-300 font-bold mb-1">Veículo *</label>
+                {vehicles.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowQuickLevaModal(false);
+                      setShowAddVehicle(true);
+                      setPortalTab('cadastro');
+                    }}
+                    className="w-full py-2.5 px-3 bg-amber-500/15 border border-amber-500/40 text-amber-300 rounded-xl font-bold text-left cursor-pointer"
+                  >
+                    + Cadastre seu veículo primeiro para solicitar coleta
+                  </button>
+                ) : (
+                  <select
+                    value={selectedVehicleId || vehicles[0]?.id}
+                    onChange={(e) => setSelectedVehicleId(e.target.value)}
+                    className="w-full bg-[#020617] border border-[#1e293b] rounded-xl px-3 py-2 text-white font-bold focus:outline-none focus:border-cyan-500"
+                  >
+                    {vehicles.map(v => (
+                      <option key={v.id} value={v.id}>
+                        {v.type === 'carro' ? '🚗' : '🏍️'} {v.brand} {v.model} ({v.plate})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {/* Serviço */}
+              <div>
+                <label className="block text-slate-300 font-bold mb-1">Serviço Desejado *</label>
+                <select
+                  value={selectedService}
+                  onChange={(e) => {
+                    const svc = servicesList.find(s => s.name === e.target.value);
+                    if (svc) {
+                      setSelectedService(svc.name);
+                      setSelectedPrice(svc.price);
+                    }
+                  }}
+                  className="w-full bg-[#020617] border border-[#1e293b] rounded-xl px-3 py-2 text-white font-bold focus:outline-none focus:border-cyan-500"
+                >
+                  {servicesList.map(s => (
+                    <option key={s.name} value={s.name}>
+                      {s.name} - R$ {s.price.toFixed(2)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Quando buscar */}
+              <div>
+                <label className="block text-slate-300 font-bold mb-1">Quando buscar?</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setQuickLevaImmediate(true)}
+                    className={`p-2 rounded-xl border font-bold text-left transition cursor-pointer ${
+                      quickLevaImmediate
+                        ? 'bg-cyan-600/25 border-cyan-400 text-white'
+                        : 'bg-[#020617] border-[#1e293b] text-slate-400'
+                    }`}
+                  >
+                    <span className="block text-xs">⚡ O quanto antes</span>
+                    <span className="text-[10px] text-slate-400">~{levaConfig.estimatedPickupMinutes} min</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickLevaImmediate(false)}
+                    className={`p-2 rounded-xl border font-bold text-left transition cursor-pointer ${
+                      !quickLevaImmediate
+                        ? 'bg-cyan-600/25 border-cyan-400 text-white'
+                        : 'bg-[#020617] border-[#1e293b] text-slate-400'
+                    }`}
+                  >
+                    <span className="block text-xs">📅 Escolher horário</span>
+                    <span className="text-[10px] text-slate-400">Data e hora específicas</span>
+                  </button>
+                </div>
+
+                {!quickLevaImmediate && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <input
+                      type="date"
+                      min={todayStr}
+                      value={selectedDate}
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                      className="bg-[#020617] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    />
+                    <input
+                      type="time"
+                      value={selectedTimeSlot}
+                      onChange={(e) => setSelectedTimeSlot(e.target.value)}
+                      className="bg-[#020617] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Modalidade */}
+              <div>
+                <label className="block text-slate-300 font-bold mb-1">Modalidade</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    { id: 'completo' as const, label: 'Completo', fee: levaConfig.feeCompleto },
+                    { id: 'buscar' as const, label: 'Só Buscar', fee: levaConfig.feeBuscar },
+                    { id: 'entregar' as const, label: 'Só Entregar', fee: levaConfig.feeEntregar }
+                  ]).map(opt => {
+                    const effectiveOptFee = getLevaETrazFeeForOrder(opt.id, selectedPrice);
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setLevaETrazType(opt.id)}
+                        className={`p-2 rounded-xl border text-center transition cursor-pointer ${
+                          levaETrazType === opt.id
+                            ? 'bg-cyan-600/30 border-cyan-400 text-white font-bold'
+                            : 'bg-[#020617] border-[#1e293b] text-slate-400'
+                        }`}
+                      >
+                        <span className="block">{opt.label}</span>
+                        <span className="text-[11px] text-cyan-400 font-bold">
+                          {effectiveOptFee === 0 ? 'Grátis' : `+ R$ ${opt.fee.toFixed(0)}`}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Endereço */}
+              <div className="bg-[#020617] border border-[#1e293b] p-3 rounded-xl space-y-2">
+                <span className="text-[10px] font-bold uppercase text-slate-400 block">Endereço de Coleta / Entrega</span>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] mb-0.5">CEP</label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        placeholder="00000-000"
+                        value={levaETrazCep}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setLevaETrazCep(val);
+                          if (val.replace(/\D/g, '').length === 8) buscarCepLevaETraz(val);
+                        }}
+                        className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2 py-1.5 text-white font-mono"
+                      />
+                      {isSearchingLevaCep && <Loader2 className="w-3 h-3 text-cyan-400 animate-spin absolute right-1.5 top-2" />}
+                    </div>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-slate-400 text-[10px] mb-0.5">Rua / Avenida *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Ex: Rua das Flores"
+                      value={levaETrazStreet}
+                      onChange={(e) => setLevaETrazStreet(e.target.value)}
+                      className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2 py-1.5 text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] mb-0.5">Número *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="123"
+                      value={levaETrazNumber}
+                      onChange={(e) => setLevaETrazNumber(e.target.value)}
+                      className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2 py-1.5 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] mb-0.5">Bairro</label>
+                    <input
+                      type="text"
+                      placeholder="Centro"
+                      value={levaETrazNeighborhood}
+                      onChange={(e) => setLevaETrazNeighborhood(e.target.value)}
+                      className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2 py-1.5 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] mb-0.5">Cidade</label>
+                    <input
+                      type="text"
+                      placeholder="Cidade"
+                      value={levaETrazCity}
+                      onChange={(e) => setLevaETrazCity(e.target.value)}
+                      className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2 py-1.5 text-white"
+                    />
+                  </div>
+                </div>
+
+                <input
+                  type="text"
+                  placeholder="Complemento / Instruções para o motorista (Ex: Interfone 12)"
+                  value={levaETrazDriverNotes}
+                  onChange={(e) => setLevaETrazDriverNotes(e.target.value)}
+                  className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-white"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-slate-400 block font-bold">TOTAL ESTIMADO</span>
+                  <span className="text-lg font-black text-emerald-400 font-mono">
+                    R$ {(selectedPrice + getLevaETrazFeeForOrder(levaETrazType, selectedPrice)).toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowQuickLevaModal(false)}
+                    className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold cursor-pointer"
+                  >
+                    Fechar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingQuickLeva || vehicles.length === 0}
+                    className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 rounded-xl font-black flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-600/30"
+                  >
+                    {isSubmittingQuickLeva ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Truck className="w-3.5 h-3.5" />}
+                    Confirmar Leva e Traz
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
     </div>
   );

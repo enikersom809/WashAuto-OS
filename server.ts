@@ -29,6 +29,21 @@ interface PushSubRecord {
 }
 const tenantSubscriptions = new Map<string, PushSubRecord[]>();
 
+interface ClientPushSubRecord {
+  tenantId: string;
+  subscription: any;
+  fcmToken?: string;
+  tokenDocId?: string;
+  clientName?: string;
+  clientPhone?: string;
+  phoneDigits?: string;
+  clientEmail?: string;
+  plates?: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+const clientSubscriptions = new Map<string, ClientPushSubRecord[]>();
+
 async function startServer() {
   const app = express();
   
@@ -76,6 +91,164 @@ async function startServer() {
     tenantSubscriptions.set(cleanTId, filtered);
     console.log(`[Push Server] Inscrição registrada para ${cleanTId}. Total de dispositivos ativos: ${filtered.length}`);
     res.json({ success: true, count: filtered.length });
+  });
+
+  // Registra / atualiza assinatura push (FCM + Web Push) de um CLIENTE para alertas de status do veículo
+  app.post('/api/register-client-push', (req, res) => {
+    const {
+      tenantId,
+      subscription,
+      fcmToken,
+      tokenDocId,
+      clientName,
+      clientPhone,
+      clientEmail,
+      plates
+    } = req.body;
+
+    if (!tenantId || (!subscription && !fcmToken)) {
+      return res.status(400).json({ success: false, error: 'Dados de inscrição do cliente insuficientes' });
+    }
+
+    const cleanTId = String(tenantId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const existing = clientSubscriptions.get(cleanTId) || [];
+
+    const filtered = existing.filter(s => {
+      if (subscription?.endpoint && s.subscription?.endpoint) {
+        return s.subscription.endpoint !== subscription.endpoint;
+      }
+      if (tokenDocId && s.tokenDocId) {
+        return s.tokenDocId !== tokenDocId;
+      }
+      return true;
+    });
+
+    const normalizedPlates = Array.isArray(plates)
+      ? plates.map((p: any) => String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean)
+      : [];
+
+    filtered.push({
+      tenantId: cleanTId,
+      subscription,
+      fcmToken,
+      tokenDocId,
+      clientName: clientName || '',
+      clientPhone: clientPhone || '',
+      phoneDigits: String(clientPhone || '').replace(/\D/g, ''),
+      clientEmail: String(clientEmail || '').trim().toLowerCase(),
+      plates: normalizedPlates,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    clientSubscriptions.set(cleanTId, filtered);
+    console.log(`[Push Server] Cliente registrado para push em ${cleanTId}. Dispositivos de clientes: ${filtered.length}`);
+    res.json({ success: true, count: filtered.length });
+  });
+
+  // Dispara notificação Push em segundo plano para o CLIENTE quando o status do veículo é alterado
+  app.post('/api/send-client-status-push', async (req, res) => {
+    try {
+      const {
+        tenantId,
+        title,
+        body,
+        url,
+        clientName,
+        clientPhone,
+        clientEmail,
+        plate,
+        vehicle,
+        newStatus,
+        targetSubscriptions
+      } = req.body;
+
+      if (!tenantId) {
+        return res.status(400).json({ success: false, error: 'tenantId obrigatório' });
+      }
+
+      const cleanTId = String(tenantId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const targetPhoneDigits = String(clientPhone || '').replace(/\D/g, '');
+      const targetEmail = String(clientEmail || '').trim().toLowerCase();
+      const targetPlate = String(plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+      const memRecords = clientSubscriptions.get(cleanTId) || [];
+      const matchedMem = memRecords.filter(rec => {
+        if (!rec.subscription || !rec.subscription.endpoint) return false;
+        const matchPhone =
+          targetPhoneDigits.length >= 8 &&
+          rec.phoneDigits &&
+          rec.phoneDigits.length >= 8 &&
+          (rec.phoneDigits.includes(targetPhoneDigits) || targetPhoneDigits.includes(rec.phoneDigits));
+        const matchEmail = targetEmail.includes('@') && rec.clientEmail === targetEmail;
+        const matchPlate = targetPlate && Array.isArray(rec.plates) && rec.plates.includes(targetPlate);
+        return matchPhone || matchEmail || matchPlate;
+      });
+
+      // Combina assinaturas da memória do servidor + assinaturas obtidas diretamente do Firestore
+      const endpointMap = new Map<string, any>();
+      for (const rec of matchedMem) {
+        if (rec.subscription?.endpoint) {
+          endpointMap.set(rec.subscription.endpoint, rec.subscription);
+        }
+      }
+      if (Array.isArray(targetSubscriptions)) {
+        for (const sub of targetSubscriptions) {
+          if (sub?.endpoint && !endpointMap.has(sub.endpoint)) {
+            endpointMap.set(sub.endpoint, sub);
+          }
+        }
+      }
+
+      const payload = JSON.stringify({
+        targetRole: 'cliente',
+        type: 'vehicle_status',
+        tab: 'status',
+        title: title || '🚗 Atualização do Seu Veículo!',
+        body: body || `O status do seu veículo ${vehicle || ''} foi atualizado para: ${newStatus || 'Em andamento'}.`,
+        url: url || `/?empresa=${encodeURIComponent(cleanTId)}&aba=status`,
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        tenantId: cleanTId,
+        clientName: clientName || '',
+        vehicle: vehicle || '',
+        plate: plate || '',
+        newStatus: newStatus || '',
+        tag: `client-status-${targetPlate || Date.now()}`,
+        timestamp: Date.now()
+      });
+
+      let sentCount = 0;
+      const expiredEndpoints = new Set<string>();
+
+      await Promise.allSettled(
+        Array.from(endpointMap.values()).map(async (subscription) => {
+          try {
+            await webPush.sendNotification(subscription, payload, {
+              TTL: 86400,
+              urgency: 'high'
+            });
+            sentCount++;
+          } catch (err: any) {
+            console.warn('[Push Server] Erro ao entregar push de status ao cliente:', err?.statusCode, err?.message);
+            if (err?.statusCode === 410 || err?.statusCode === 404) {
+              expiredEndpoints.add(subscription.endpoint);
+            }
+          }
+        })
+      );
+
+      if (expiredEndpoints.size > 0) {
+        const remaining = memRecords.filter(r => !r.subscription?.endpoint || !expiredEndpoints.has(r.subscription.endpoint));
+        clientSubscriptions.set(cleanTId, remaining);
+      }
+
+      console.log(`[Push Server] Status Push despachado ao cliente (${plate || clientName || 'N/A'}) no tenant ${cleanTId}: ${sentCount} enviados.`);
+      res.json({ success: true, sentCount, matchedDevices: endpointMap.size });
+    } catch (err: any) {
+      console.error('[Push Server] Falha em /api/send-client-status-push:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   // Dispara notificação Push em segundo plano para todos os dispositivos inscritos do tenant

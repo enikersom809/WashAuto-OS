@@ -31,7 +31,9 @@ import {
   Printer,
   Receipt,
   Copy,
-  Check
+  Check,
+  Truck,
+  Clock
 } from 'lucide-react';
 import { Tenant } from '../types';
 import { TenantQRCode } from './TenantQRCode';
@@ -67,6 +69,7 @@ interface TenantConfigSettingsProps {
   products: ProductItem[];
   onUpdateProducts: (newProducts: ProductItem[]) => void;
   onUpdateTenantDetails: (updatedTenant: Tenant) => void;
+  initialSubTab?: 'empresa' | 'qrcode' | 'funcionarios' | 'produtos' | 'comissoes' | 'senha' | 'logo' | 'leva-e-traz';
 }
 
 export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
@@ -75,10 +78,40 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
   onUpdateStaffList,
   products,
   onUpdateProducts,
-  onUpdateTenantDetails
+  onUpdateTenantDetails,
+  initialSubTab
 }) => {
-  const [subTab, setSubTab] = useState<'empresa' | 'qrcode' | 'funcionarios' | 'produtos' | 'comissoes' | 'senha' | 'logo'>('empresa');
+  const [subTab, setSubTab] = useState<'empresa' | 'qrcode' | 'funcionarios' | 'produtos' | 'comissoes' | 'senha' | 'logo' | 'leva-e-traz'>(initialSubTab || 'empresa');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialSubTab) {
+      setSubTab(initialSubTab);
+    }
+  }, [initialSubTab]);
+
+  // Leva & Traz Configuration states
+  const [ltEnabled, setLtEnabled] = useState<boolean>(tenant.levaETrazConfig?.enabled ?? true);
+  const [ltFeeCompleto, setLtFeeCompleto] = useState<number>(tenant.levaETrazConfig?.feeCompleto ?? 25);
+  const [ltFeeBuscar, setLtFeeBuscar] = useState<number>(tenant.levaETrazConfig?.feeBuscar ?? 15);
+  const [ltFeeEntregar, setLtFeeEntregar] = useState<number>(tenant.levaETrazConfig?.feeEntregar ?? 15);
+  const [ltFreeAbove, setLtFreeAbove] = useState<number>(tenant.levaETrazConfig?.freeAboveOrderValue ?? 0);
+  const [ltPickupMinutes, setLtPickupMinutes] = useState<number>(tenant.levaETrazConfig?.estimatedPickupMinutes ?? 30);
+  const [ltCoverageArea, setLtCoverageArea] = useState<string>(tenant.levaETrazConfig?.coverageArea || 'Centro e bairros vizinhos (até 8 km)');
+  const [ltWorkingHours, setLtWorkingHours] = useState<string>(tenant.levaETrazConfig?.workingHours || 'Seg a Sáb, 08:00 às 17:00');
+
+  useEffect(() => {
+    if (tenant?.levaETrazConfig) {
+      setLtEnabled(tenant.levaETrazConfig.enabled ?? true);
+      setLtFeeCompleto(Number(tenant.levaETrazConfig.feeCompleto ?? 25));
+      setLtFeeBuscar(Number(tenant.levaETrazConfig.feeBuscar ?? 15));
+      setLtFeeEntregar(Number(tenant.levaETrazConfig.feeEntregar ?? 15));
+      setLtFreeAbove(Number(tenant.levaETrazConfig.freeAboveOrderValue ?? 0));
+      setLtPickupMinutes(Number(tenant.levaETrazConfig.estimatedPickupMinutes ?? 30));
+      setLtCoverageArea(tenant.levaETrazConfig.coverageArea || 'Centro e bairros vizinhos (até 8 km)');
+      setLtWorkingHours(tenant.levaETrazConfig.workingHours || 'Seg a Sáb, 08:00 às 17:00');
+    }
+  }, [tenant?.levaETrazConfig]);
 
   // Form states for Company Data
   const [name, setName] = useState(tenant.name || '');
@@ -366,6 +399,60 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
     showNotification('✅ Dados cadastrais e senha da empresa salvos com sucesso!');
   };
 
+  // Toggle & Save Immediately when Pausing/Activating Leva & Traz
+  const handleToggleLevaEnabled = async (nextEnabled: boolean) => {
+    setLtEnabled(nextEnabled);
+    const updated: Tenant = {
+      ...tenant,
+      levaETrazConfig: {
+        enabled: nextEnabled,
+        feeCompleto: Math.max(0, Number(ltFeeCompleto) || 0),
+        feeBuscar: Math.max(0, Number(ltFeeBuscar) || 0),
+        feeEntregar: Math.max(0, Number(ltFeeEntregar) || 0),
+        freeAboveOrderValue: Math.max(0, Number(ltFreeAbove) || 0),
+        estimatedPickupMinutes: Math.max(5, Number(ltPickupMinutes) || 30),
+        coverageArea: ltCoverageArea.trim(),
+        workingHours: ltWorkingHours.trim()
+      }
+    };
+    onUpdateTenantDetails(updated);
+    try {
+      await saveTenantToFirestore(updated);
+    } catch (err) {
+      console.warn('Erro ao sincronizar pausa do Leva e Traz no Firestore:', err);
+    }
+    showNotification(
+      nextEnabled
+        ? '✅ Serviço e cobranças de Leva & Traz reativados!'
+        : '🔒 Taxas e cobranças de Leva & Traz pausadas e travadas em R$ 0,00!'
+    );
+  };
+
+  // Save Leva & Traz Configuration
+  const handleSaveLevaConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const updated: Tenant = {
+      ...tenant,
+      levaETrazConfig: {
+        enabled: ltEnabled,
+        feeCompleto: Math.max(0, Number(ltFeeCompleto) || 0),
+        feeBuscar: Math.max(0, Number(ltFeeBuscar) || 0),
+        feeEntregar: Math.max(0, Number(ltFeeEntregar) || 0),
+        freeAboveOrderValue: Math.max(0, Number(ltFreeAbove) || 0),
+        estimatedPickupMinutes: Math.max(5, Number(ltPickupMinutes) || 30),
+        coverageArea: ltCoverageArea.trim(),
+        workingHours: ltWorkingHours.trim()
+      }
+    };
+    onUpdateTenantDetails(updated);
+    try {
+      await saveTenantToFirestore(updated);
+    } catch (err) {
+      console.warn('Erro ao sincronizar configurações do Leva e Traz no Firestore:', err);
+    }
+    showNotification('🚚 Configurações e taxas do Leva & Traz salvas e aplicadas ao App do Cliente!');
+  };
+
   // Save Logo
   const handleSaveLogo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -533,11 +620,11 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
       </div>
 
       {/* Navegação Sub-Abas de Configurações */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none">
+      <div className="flex flex-wrap items-center gap-2 pb-2">
         <button
           type="button"
           onClick={() => setSubTab('empresa')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'empresa'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
@@ -549,7 +636,7 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
         <button
           type="button"
           onClick={() => setSubTab('qrcode')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'qrcode'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
@@ -561,7 +648,7 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
         <button
           type="button"
           onClick={() => setSubTab('funcionarios')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'funcionarios'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
@@ -573,49 +660,61 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
         <button
           type="button"
           onClick={() => setSubTab('produtos')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'produtos'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
           }`}
         >
-          <Package className="w-4 h-4" /> 3. Produtos & Estoque ({products.length})
+          <Package className="w-4 h-4" /> 4. Produtos & Estoque ({products.length})
         </button>
 
         <button
           type="button"
           onClick={() => setSubTab('comissoes')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'comissoes'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
           }`}
         >
-          <Percent className="w-4 h-4" /> 4. Cadastro de Comissões
+          <Percent className="w-4 h-4" /> 5. Comissões
         </button>
 
         <button
           type="button"
           onClick={() => setSubTab('logo')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'logo'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
           }`}
         >
-          <ImageIcon className="w-4 h-4" /> 5. Logo da Empresa
+          <ImageIcon className="w-4 h-4" /> 6. Logo da Empresa
         </button>
 
         <button
           type="button"
           onClick={() => setSubTab('senha')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
             subTab === 'senha'
               ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
               : 'bg-[#0f172a] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
           }`}
         >
-          <Key className="w-4 h-4" /> 6. Troca de Senha
+          <Key className="w-4 h-4" /> 7. Troca de Senha
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSubTab('leva-e-traz')}
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
+            subTab === 'leva-e-traz'
+              ? 'bg-cyan-600 text-slate-950 font-black shadow-lg shadow-cyan-600/30'
+              : 'bg-[#0f172a] text-cyan-400 hover:text-cyan-300 border border-cyan-500/30'
+          }`}
+        >
+          <Truck className="w-4 h-4" /> 8. Taxas Leva & Traz
         </button>
       </div>
 
@@ -1627,6 +1726,210 @@ export const TenantConfigSettings: React.FC<TenantConfigSettingsProps> = ({
             >
               <Lock className="w-4 h-4" /> Alterar Senha de Acesso
             </button>
+          </div>
+        </form>
+      )}
+
+      {/* ================= ABA 7: CONFIGURAÇÕES DE LEVA & TRAZ ================= */}
+      {subTab === 'leva-e-traz' && (
+        <form onSubmit={handleSaveLevaConfig} className="bg-[#0f172a] border border-cyan-500/30 rounded-2xl p-6 space-y-6">
+          <div className="border-b border-[#1e293b] pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <Truck className="w-5 h-5 text-cyan-400" />
+                Regras, Taxas e Disponibilidade do Leva & Traz
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Configure as tarifas de coleta e entrega, área de cobertura e benefícios exibidos automaticamente no Portal do Cliente.
+              </p>
+            </div>
+
+            <button
+              type="submit"
+              className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 px-5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2 transition shadow-lg shadow-cyan-600/25 cursor-pointer shrink-0"
+            >
+              <Save className="w-4 h-4" /> Salvar Taxas do Leva & Traz
+            </button>
+          </div>
+
+          <div className="bg-[#020617] border border-[#1e293b] rounded-xl p-4 flex items-center justify-between gap-4">
+            <div>
+              <h4 className="text-xs font-bold text-white flex flex-wrap items-center gap-2">
+                Disponibilidade no Portal do Cliente
+                <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold inline-flex items-center gap-1 ${
+                  ltEnabled ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                }`}>
+                  {!ltEnabled && <Lock className="w-2.5 h-2.5" />}
+                  {ltEnabled ? 'Ativo para Clientes' : 'Pausado · Cobranças Travadas'}
+                </span>
+              </h4>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                {ltEnabled
+                  ? 'Quando ativo, os clientes podem solicitar coleta e entrega pelo aplicativo com aplicação automática das taxas.'
+                  : 'Cobranças bloqueadas! Enquanto pausado, os valores de taxa ficam travados e nenhuma taxa Leva & Traz será cobrada.'}
+              </p>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={ltEnabled}
+                onChange={(e) => handleToggleLevaEnabled(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+            </label>
+          </div>
+
+          {!ltEnabled && (
+            <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-4 flex items-start gap-3 text-xs text-rose-200">
+              <Lock className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-rose-300">Cobranças e Tarifas Travadas (Serviço Pausado)</p>
+                <p className="text-[11px] text-rose-200/80 mt-0.5">
+                  Com o valor da taxa pausado, nenhuma cobrança adicional de Leva &amp; Traz é aplicada no Painel da Empresa ou no App do Cliente (taxa travada em R$ 0,00) e os campos de tarifa ficam bloqueados até a reativação.
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            <div className={`bg-[#020617] border p-4 rounded-xl space-y-2 transition ${!ltEnabled ? 'border-rose-500/25 opacity-60' : 'border-[#1e293b]'}`}>
+              <label className="text-cyan-300 font-bold flex items-center justify-between gap-2">
+                <span>Taxa Completo (Buscar + Entregar)</span>
+                {!ltEnabled && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-rose-300 bg-rose-500/15 px-1.5 py-0.5 rounded border border-rose-500/30">
+                    <Lock className="w-2.5 h-2.5" /> Travado
+                  </span>
+                )}
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-2.5 text-slate-500 font-bold">R$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  disabled={!ltEnabled}
+                  value={ltFeeCompleto}
+                  onChange={(e) => setLtFeeCompleto(Number(e.target.value))}
+                  className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg pl-9 pr-3 py-2 text-white font-bold focus:outline-none focus:border-cyan-500 disabled:cursor-not-allowed disabled:text-slate-500"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500">Ida e volta do veículo até o endereço do cliente.</p>
+            </div>
+
+            <div className={`bg-[#020617] border p-4 rounded-xl space-y-2 transition ${!ltEnabled ? 'border-rose-500/25 opacity-60' : 'border-[#1e293b]'}`}>
+              <label className="text-slate-200 font-bold flex items-center justify-between gap-2">
+                <span>Taxa Apenas Buscar (Coleta)</span>
+                {!ltEnabled && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-rose-300 bg-rose-500/15 px-1.5 py-0.5 rounded border border-rose-500/30">
+                    <Lock className="w-2.5 h-2.5" /> Travado
+                  </span>
+                )}
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-2.5 text-slate-500 font-bold">R$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  disabled={!ltEnabled}
+                  value={ltFeeBuscar}
+                  onChange={(e) => setLtFeeBuscar(Number(e.target.value))}
+                  className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg pl-9 pr-3 py-2 text-white font-bold focus:outline-none focus:border-cyan-500 disabled:cursor-not-allowed disabled:text-slate-500"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500">Motorista busca o carro e cliente retira no pátio.</p>
+            </div>
+
+            <div className={`bg-[#020617] border p-4 rounded-xl space-y-2 transition ${!ltEnabled ? 'border-rose-500/25 opacity-60' : 'border-[#1e293b]'}`}>
+              <label className="text-slate-200 font-bold flex items-center justify-between gap-2">
+                <span>Taxa Apenas Entregar (Delivery)</span>
+                {!ltEnabled && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-rose-300 bg-rose-500/15 px-1.5 py-0.5 rounded border border-rose-500/30">
+                    <Lock className="w-2.5 h-2.5" /> Travado
+                  </span>
+                )}
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-2.5 text-slate-500 font-bold">R$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  disabled={!ltEnabled}
+                  value={ltFeeEntregar}
+                  onChange={(e) => setLtFeeEntregar(Number(e.target.value))}
+                  className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg pl-9 pr-3 py-2 text-white font-bold focus:outline-none focus:border-cyan-500 disabled:cursor-not-allowed disabled:text-slate-500"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500">Cliente traz o carro e entregamos pronto em casa.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            <div className={`bg-[#020617] border p-4 rounded-xl space-y-2 transition ${!ltEnabled ? 'border-rose-500/25 opacity-60' : 'border-[#1e293b]'}`}>
+              <label className="text-emerald-400 font-bold flex items-center justify-between gap-1.5">
+                <span className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" /> Leva & Traz Grátis em serviços a partir de (R$)
+                </span>
+                {!ltEnabled && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-rose-300 bg-rose-500/15 px-1.5 py-0.5 rounded border border-rose-500/30">
+                    <Lock className="w-2.5 h-2.5" /> Travado
+                  </span>
+                )}
+              </label>
+              <input
+                type="number"
+                min={0}
+                step="10"
+                disabled={!ltEnabled}
+                value={ltFreeAbove}
+                onChange={(e) => setLtFreeAbove(Number(e.target.value))}
+                placeholder="0 = sempre cobrar taxa"
+                className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-3 py-2 text-white font-bold focus:outline-none focus:border-emerald-500 disabled:cursor-not-allowed disabled:text-slate-500"
+              />
+              <p className="text-[10px] text-slate-500">
+                Deixe <strong>0</strong> para cobrar sempre a taxa normal, ou defina ex: <strong>200</strong> para isentar a taxa em serviços premium.
+              </p>
+            </div>
+
+            <div className="bg-[#020617] border border-[#1e293b] p-4 rounded-xl space-y-2">
+              <label className="block text-slate-200 font-bold flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-cyan-400" /> Tempo Médio de Chegada do Motorista (min)
+              </label>
+              <input
+                type="number"
+                min={5}
+                max={180}
+                value={ltPickupMinutes}
+                onChange={(e) => setLtPickupMinutes(Number(e.target.value))}
+                className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-3 py-2 text-white font-bold focus:outline-none focus:border-cyan-500"
+              />
+              <p className="text-[10px] text-slate-500">Estimativa exibida ao cliente ao solicitar coleta imediata.</p>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-bold mb-1">Área / Bairros Atendidos</label>
+              <input
+                type="text"
+                value={ltCoverageArea}
+                onChange={(e) => setLtCoverageArea(e.target.value)}
+                placeholder="Ex: Centro, Vila Nova e região (até 8 km)"
+                className="w-full bg-[#020617] border border-[#1e293b] rounded-xl p-3 text-slate-200 focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-bold mb-1">Horário de Atendimento Leva & Traz</label>
+              <input
+                type="text"
+                value={ltWorkingHours}
+                onChange={(e) => setLtWorkingHours(e.target.value)}
+                placeholder="Ex: Seg a Sáb, 08:00 às 17:00"
+                className="w-full bg-[#020617] border border-[#1e293b] rounded-xl p-3 text-slate-200 focus:outline-none focus:border-cyan-500"
+              />
+            </div>
           </div>
         </form>
       )}

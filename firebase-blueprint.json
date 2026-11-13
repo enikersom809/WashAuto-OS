@@ -11,6 +11,7 @@
         "domain": { "type": "string" },
         "ownerEmail": { "type": "string" },
         "mrr": { "type": "number" },
+        "levaETrazConfig": { "type": "object" },
         "createdAt": { "type": "string" }
       },
       "required": ["name", "plan", "status"]
@@ -138,6 +139,7 @@
         "tenantId": { "type": "string" },
         "clientName": { "type": "string" },
         "clientPhone": { "type": "string" },
+        "clientEmail": { "type": "string" },
         "vehicle": { "type": "string" },
         "plate": { "type": "string" },
         "service": { "type": "string" },
@@ -146,9 +148,56 @@
         "feePrice": { "type": "number" },
         "totalPrice": { "type": "number" },
         "driverName": { "type": "string" },
-        "createdAt": { "type": "string" }
+        "appointmentId": { "type": "string" },
+        "washItemId": { "type": "string" },
+        "scheduledDate": { "type": "string" },
+        "scheduledTime": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
       },
       "required": ["tenantId", "clientName", "vehicle", "plate", "status"]
+    },
+    "clientFcmTokens": {
+      "title": "Client FCM Tokens",
+      "description": "FCM tokens and Web Push subscriptions registered by clients for vehicle status alerts",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "phoneDigits": { "type": "string" },
+        "clientEmail": { "type": "string" },
+        "plates": { "type": "array", "items": { "type": "string" } },
+        "fcmToken": { "type": "string" },
+        "endpoint": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["tenantId", "active"]
+    },
+    "clientNotifications": {
+      "title": "Client Status Notifications",
+      "description": "Real-time vehicle status change push notifications dispatched to clients",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "phoneDigits": { "type": "string" },
+        "clientEmail": { "type": "string" },
+        "vehicle": { "type": "string" },
+        "plate": { "type": "string" },
+        "newStatus": { "type": "string" },
+        "source": { "type": "string" },
+        "url": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tenantId", "title", "body", "newStatus", "createdAt"]
     }
   },
   "firestore": {
@@ -199,6 +248,14 @@
     "/tenants/{tenantId}/leva_e_traz/{levaETrazId}": {
       "schema": "levaETraz",
       "description": "Valet pick-up and delivery requests for tenant"
+    },
+    "/tenants/{tenantId}/client_fcm_tokens/{tokenId}": {
+      "schema": "clientFcmTokens",
+      "description": "FCM tokens and Web Push subscriptions for client devices"
+    },
+    "/tenants/{tenantId}/client_notifications/{notificationId}": {
+      "schema": "clientNotifications",
+      "description": "Client vehicle status update notifications"
     }
   }
 }

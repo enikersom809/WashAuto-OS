@@ -60,10 +60,11 @@ import {
   Copy,
   Truck,
   MapPin,
-  Navigation
+  Navigation,
+  Lock
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Tenant, LevaETrazRequest, LevaETrazStatus, LevaETrazType, LevaETrazAddress } from '../types';
+import { Tenant, LevaETrazRequest, LevaETrazStatus, LevaETrazType, LevaETrazAddress, CashTransaction } from '../types';
 import { TenantConfigSettings } from './TenantConfigSettings';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ClientesWorkspace } from './ClientesWorkspace';
@@ -76,7 +77,8 @@ import {
   getPushNotificationPermission,
   requestPushPermissionAndSubscribe,
   disablePushNotifications,
-  sendTestPushNotification
+  sendTestPushNotification,
+  sendClientVehicleStatusPushNotification
 } from '../lib/pushNotificationService';
 
 import { 
@@ -107,7 +109,8 @@ import {
   saveLevaETrazRequest,
   updateLevaETrazStatusInFirestore,
   deleteLevaETrazRequestFromFirestore,
-  subscribeToTenantLevaETraz
+  subscribeToTenantLevaETraz,
+  saveCashTransactionToFirestore
 } from '../lib/firebaseService';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -168,6 +171,13 @@ export interface CustomerAppointment {
   reminder24hSentAt?: string;
   reminderChannel?: 'whatsapp' | 'email' | 'ambos';
   reminderNotes?: string;
+  // Leva e Traz
+  hasLevaETraz?: boolean;
+  levaETrazType?: LevaETrazType;
+  levaETrazFee?: number;
+  levaETrazAddress?: LevaETrazAddress;
+  levaETrazStatus?: LevaETrazStatus;
+  levaETrazDriverName?: string;
 }
 
 export interface CompletedWashRecord {
@@ -363,7 +373,19 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, [initialTenant?.id]);
 
 
+  const levaConfig = useMemo(() => ({
+    enabled: currentTenant.levaETrazConfig?.enabled !== false,
+    feeCompleto: Number(currentTenant.levaETrazConfig?.feeCompleto ?? 25),
+    feeBuscar: Number(currentTenant.levaETrazConfig?.feeBuscar ?? 15),
+    feeEntregar: Number(currentTenant.levaETrazConfig?.feeEntregar ?? 15),
+    freeAboveOrderValue: Number(currentTenant.levaETrazConfig?.freeAboveOrderValue ?? 0),
+    estimatedPickupMinutes: Number(currentTenant.levaETrazConfig?.estimatedPickupMinutes ?? 30),
+    coverageArea: currentTenant.levaETrazConfig?.coverageArea || '',
+    workingHours: currentTenant.levaETrazConfig?.workingHours || ''
+  }), [currentTenant.levaETrazConfig]);
+
   const [activeTab, setActiveTab] = useState<'fila' | 'agendamentos' | 'lembretes-24h' | 'leva-e-traz' | 'caixa' | 'vendas' | 'clientes' | 'troca-oleo' | 'historico-lavagem' | 'produtos' | 'comissoes' | 'configuracoes-empresa' | 'saas-config' | 'comprar-vitalicio' | 'totem' | 'banners-app'>('fila');
+  const [configInitialSubTab, setConfigInitialSubTab] = useState<'empresa' | 'qrcode' | 'funcionarios' | 'produtos' | 'comissoes' | 'senha' | 'logo' | 'leva-e-traz'>('empresa');
 
   // Notificação Toast Visual para Novo Cadastro no Totem
   const [totemToast, setTotemToast] = useState<{
@@ -777,10 +799,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     return [];
   });
 
-  const [levaFilter, setLevaFilter] = useState<'todos' | 'solicitado' | 'coleta' | 'patio' | 'entrega' | 'entregue'>('todos');
+  const [levaFilter, setLevaFilter] = useState<'todos' | 'solicitado' | 'coleta' | 'patio' | 'entrega' | 'entregue' | 'cancelado'>('todos');
   const [levaSearch, setLevaSearch] = useState('');
   const [showAddLevaModal, setShowAddLevaModal] = useState(false);
   const [selectedLevaDriver, setSelectedLevaDriver] = useState<Record<string, string>>({});
+  const [tenantClients, setTenantClients] = useState<any[]>([]);
+  const [isSearchingLTCep, setIsSearchingLTCep] = useState(false);
 
   // Formulário Manual de Leva e Traz
   const [newLTClientName, setNewLTClientName] = useState('');
@@ -798,6 +822,42 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const [newLTNotes, setNewLTNotes] = useState('');
   const [newLTDriver, setNewLTDriver] = useState('');
 
+  const buscarCepManualLT = async (valorCep: string) => {
+    const cleanCep = valorCep.replace(/\D/g, '');
+    if (cleanCep.length !== 8) return;
+    try {
+      setIsSearchingLTCep(true);
+      const res = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`);
+      const data = await res.json();
+      if (!data.erro) {
+        if (data.logradouro) setNewLTStreet(data.logradouro);
+        if (data.bairro) setNewLTNeighborhood(data.bairro);
+        if (data.localidade) setNewLTCity(data.localidade);
+        setNewLTCep(cleanCep.replace(/^(\d{5})(\d{3})/, '$1-$2'));
+        showToast('📍 Endereço preenchido automaticamente via CEP!');
+      } else {
+        showToast('⚠️ CEP não encontrado.');
+      }
+    } catch (err) {
+      console.error('Erro ao buscar CEP Leva e Traz:', err);
+    } finally {
+      setIsSearchingLTCep(false);
+    }
+  };
+
+  const calculateManualLTFee = useCallback((type: LevaETrazType, servicePrice: number) => {
+    if (!levaConfig.enabled) return 0;
+    const baseFee = type === 'completo'
+      ? levaConfig.feeCompleto
+      : type === 'buscar'
+      ? levaConfig.feeBuscar
+      : levaConfig.feeEntregar;
+    if (levaConfig.freeAboveOrderValue > 0 && servicePrice >= levaConfig.freeAboveOrderValue) {
+      return 0;
+    }
+    return baseFee;
+  }, [levaConfig]);
+
   const handleCreateManualLevaRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newLTClientName || !newLTVehicle || !newLTPlate || !newLTStreet) {
@@ -805,8 +865,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       return;
     }
 
-    const fee = newLTType === 'completo' ? 25 : 15;
-    const total = Number(newLTServicePrice) + fee;
+    const numericServicePrice = Number(newLTServicePrice) || 0;
+    const fee = calculateManualLTFee(newLTType, numericServicePrice);
+    const total = numericServicePrice + fee;
 
     const newReq: LevaETrazRequest = {
       id: `leva-manual-${Date.now()}`,
@@ -818,7 +879,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       vehicle: newLTVehicle,
       plate: newLTPlate.toUpperCase(),
       service: newLTService,
-      servicePrice: Number(newLTServicePrice),
+      servicePrice: numericServicePrice,
       feePrice: fee,
       totalPrice: total,
       address: {
@@ -835,7 +896,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         {
           status: 'solicitado',
           timestamp: new Date().toISOString(),
-          note: 'Solicitação lançada manualmente pelo balcão'
+          note: !levaConfig.enabled
+            ? 'Solicitação lançada manualmente pelo balcão (taxa travada em R$ 0,00 - serviço pausado)'
+            : 'Solicitação lançada manualmente pelo balcão'
         }
       ],
       createdAt: new Date().toISOString()
@@ -851,12 +914,17 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     setNewLTClientPhone('');
     setNewLTVehicle('');
     setNewLTPlate('');
+    setNewLTCep('');
     setNewLTStreet('');
     setNewLTNumber('');
     setNewLTNeighborhood('');
     setNewLTNotes('');
     setNewLTDriver('');
-    showToast('🚗 Solicitação de Leva e Traz criada com sucesso!');
+    showToast(
+      !levaConfig.enabled
+        ? '🚗 Solicitação criada com cobrança de taxa travada em R$ 0,00 (Pausado).'
+        : '🚗 Solicitação de Leva e Traz criada com sucesso!'
+    );
   };
 
   useEffect(() => {
@@ -976,6 +1044,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     let isInitialClientLoad = true;
 
     const unsubTotemClients = subscribeToTenantClients(tenant.id, (remoteClients) => {
+      setTenantClients(remoteClients || []);
       if (isInitialClientLoad) {
         remoteClients.forEach(c => {
           const id = c.id || c.uid;
@@ -1365,6 +1434,34 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         updateAppointmentStatusInFirestore(tenant.id, matchingApp.id, 'Concluído').catch(console.error);
         setAppointments(prev => prev.map(a => a.id === matchingApp.id ? { ...a, status: 'Concluído' } : a));
       }
+
+      // Sincroniza pedido de Leva & Traz vinculado ao pátio para 'concluido' (pronto para entrega)
+      const cleanWashPlate = (item.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const matchingLeva = levaETrazRequests.find(r =>
+        r.status !== 'entregue' &&
+        r.status !== 'cancelado' &&
+        r.status !== 'concluido' &&
+        r.status !== 'em_entrega' &&
+        (r.washItemId === washId || (cleanWashPlate && (r.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '') === cleanWashPlate))
+      );
+      if (matchingLeva) {
+        const autoNote = 'Lavagem finalizada no pátio automaticamente';
+        const nowIso = new Date().toISOString();
+        setLevaETrazRequests(prev => prev.map(r => r.id === matchingLeva.id ? {
+          ...r,
+          status: 'concluido',
+          washItemId: washId,
+          statusHistory: [...(r.statusHistory || []), { status: 'concluido', timestamp: nowIso, note: autoNote }]
+        } : r));
+        updateLevaETrazStatusInFirestore(tenant.id, matchingLeva.id, 'concluido', {
+          washItemId: washId,
+          notes: autoNote
+        }).catch(console.error);
+        if (matchingLeva.appointmentId && (!matchingApp || matchingApp.id !== matchingLeva.appointmentId)) {
+          updateAppointmentStatusInFirestore(tenant.id, matchingLeva.appointmentId, 'Concluído').catch(console.error);
+        }
+        showToast(`🚚 Leva & Traz de ${matchingLeva.clientName} atualizado para: Lavagem Pronta / Entrega!`);
+      }
     }
 
     const currentIso = new Date().toISOString().split('T')[0];
@@ -1383,6 +1480,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       return w;
     })));
     updateWashItemStatusInFirestore(tenant.id, washId, nextStatus).catch(console.error);
+
+    if (item.status !== nextStatus) {
+      sendClientVehicleStatusPushNotification({
+        tenantId: tenant.id,
+        tenantName: tenant.nomeFantasia || tenant.name,
+        clientName: item.clientName,
+        clientPhone: item.clientPhone,
+        vehicle: item.vehicle,
+        plate: item.plate,
+        service: item.service,
+        newStatus: nextStatus,
+        source: 'patio'
+      }).catch(console.error);
+    }
   };
 
   const handleAddWash = (e: React.FormEvent) => {
@@ -1410,6 +1521,16 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
     setWashItems(prev => [newWash, ...prev]);
     saveWashItemToFirestore(tenant.id, newWash).catch(console.error);
+    sendClientVehicleStatusPushNotification({
+      tenantId: tenant.id,
+      tenantName: tenant.nomeFantasia || tenant.name,
+      clientName: newWash.clientName,
+      vehicle: newWash.vehicle,
+      plate: newWash.plate,
+      service: newWash.service,
+      newStatus: 'Aguardando',
+      source: 'patio'
+    }).catch(console.error);
     setShowNewWashModal(false);
     setNewPlate('');
     setNewVehicle('');
@@ -1453,6 +1574,18 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     setAppointments(newAppList);
     saveWashItemToFirestore(tenant.id, washFromApp).catch(console.error);
     updateAppointmentStatusInFirestore(tenant.id, app.id, 'Em Lavagem').catch(console.error);
+    sendClientVehicleStatusPushNotification({
+      tenantId: tenant.id,
+      tenantName: tenant.nomeFantasia || tenant.name,
+      clientName: app.clientName,
+      clientPhone: app.clientPhone,
+      clientEmail: (app as any).clientEmail,
+      vehicle: app.vehicle,
+      plate: app.plate,
+      service: app.service,
+      newStatus: 'Em Lavagem',
+      source: 'agendamento'
+    }).catch(console.error);
     localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
@@ -1508,6 +1641,18 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     }
     for (const a of pendingApps) {
       updateAppointmentStatusInFirestore(tenant.id, a.id, 'Em Lavagem').catch(console.error);
+      sendClientVehicleStatusPushNotification({
+        tenantId: tenant.id,
+        tenantName: tenant.nomeFantasia || tenant.name,
+        clientName: a.clientName,
+        clientPhone: a.clientPhone,
+        clientEmail: (a as any).clientEmail,
+        vehicle: a.vehicle,
+        plate: a.plate,
+        service: a.service,
+        newStatus: 'Em Lavagem',
+        source: 'agendamento'
+      }).catch(console.error);
     }
     localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newWashList));
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(updatedApps));
@@ -1516,9 +1661,39 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   };
 
   const handleCancelAppointment = (appId: string) => {
+    const targetApp = appointments.find(a => a.id === appId);
     const newAppList = appointments.map(a => a.id === appId ? { ...a, status: 'Cancelado' as const } : a);
     setAppointments(newAppList);
     updateAppointmentStatusInFirestore(tenant.id, appId, 'Cancelado').catch(console.error);
+
+    // Cancela também eventual solicitação de Leva & Traz vinculada a este agendamento
+    const linkedLeva = levaETrazRequests.find(
+      r => r.appointmentId === appId && r.status !== 'entregue' && r.status !== 'cancelado'
+    );
+    if (linkedLeva) {
+      const cancelNote = 'Cancelado junto ao agendamento';
+      setLevaETrazRequests(prev => prev.map(r => r.id === linkedLeva.id ? {
+        ...r,
+        status: 'cancelado',
+        statusHistory: [...(r.statusHistory || []), { status: 'cancelado', timestamp: new Date().toISOString(), note: cancelNote }]
+      } : r));
+      updateLevaETrazStatusInFirestore(tenant.id, linkedLeva.id, 'cancelado', { notes: cancelNote }).catch(console.error);
+    }
+
+    if (targetApp) {
+      sendClientVehicleStatusPushNotification({
+        tenantId: tenant.id,
+        tenantName: tenant.nomeFantasia || tenant.name,
+        clientName: targetApp.clientName,
+        clientPhone: targetApp.clientPhone,
+        clientEmail: (targetApp as any).clientEmail,
+        vehicle: targetApp.vehicle,
+        plate: targetApp.plate,
+        service: targetApp.service,
+        newStatus: 'Cancelado',
+        source: 'agendamento'
+      }).catch(console.error);
+    }
     localStorage.setItem(`saas_tenant_appointments_${tenant.id}`, JSON.stringify(newAppList));
     window.dispatchEvent(new Event('storage'));
     showToast(`Agendamento marcado como cancelado.`);
@@ -1815,12 +1990,97 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     customNote?: string
   ) => {
     try {
+      let linkedWashId = req.washItemId;
+      const cleanReqPlate = (req.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+      // Se o status for 'no_patio', envia automaticamente para a Fila de Lavagem se ainda não estiver
+      if (nextStatus === 'no_patio') {
+        const existingYard = washItems.find(
+          w => (w.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '') === cleanReqPlate && w.status !== 'Concluído'
+        );
+        if (existingYard) {
+          linkedWashId = existingYard.id;
+        } else {
+          const washId = `wash-leva-${req.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+          linkedWashId = washId;
+          const assignedStaff = staffList.find(s => s.id === req.driverId || s.name === req.driverName) || staffList[0];
+          const commRate = assignedStaff ? assignedStaff.defaultCommission : 10;
+          const newWash: WashItem = {
+            id: washId,
+            plate: req.plate,
+            vehicle: req.vehicle,
+            service: `${req.service} (Leva e Traz)`,
+            price: req.servicePrice,
+            clientName: req.clientName,
+            clientPhone: req.clientPhone,
+            status: 'Aguardando',
+            lavadorId: assignedStaff?.id,
+            lavadorName: assignedStaff?.name,
+            commissionRate: commRate,
+            commissionAmount: Number(((req.servicePrice * commRate) / 100).toFixed(2)),
+            createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          };
+          const newYard = deduplicateWashItems([newWash, ...washItems]);
+          setWashItems(newYard);
+          localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newYard));
+          await saveWashItemToFirestore(tenant.id, newWash);
+          showToast(`🚗 Veículo ${req.vehicle} (${req.plate}) inserido automaticamente na Fila do Pátio!`);
+        }
+      }
+
+      // Se avançar para 'concluido' no painel Leva & Traz, atualiza também o item no pátio caso ainda esteja aberto
+      if (nextStatus === 'concluido') {
+        const yardMatch = washItems.find(
+          w => w.status !== 'Concluído' && (w.id === req.washItemId || (cleanReqPlate && (w.plate || '').toUpperCase().replace(/[^A-Z0-9]/g, '') === cleanReqPlate))
+        );
+        if (yardMatch) {
+          linkedWashId = yardMatch.id;
+          const now = new Date();
+          const dateIso = now.toISOString().split('T')[0];
+          const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+          const completedFormatted = `${now.toLocaleDateString('pt-BR')} às ${timeStr}`;
+          setWashItems(prev => prev.map(w => w.id === yardMatch.id ? {
+            ...w,
+            status: 'Concluído',
+            completedAt: w.completedAt || completedFormatted,
+            completedDate: w.completedDate || dateIso
+          } : w));
+          updateWashItemStatusInFirestore(tenant.id, yardMatch.id, 'Concluído').catch(console.error);
+        }
+      }
+
+      // Se entregue, registra automaticamente a entrada no Fluxo de Caixa (ID determinístico para evitar duplicidade)
+      if (nextStatus === 'entregue') {
+        const totalVal = Number(req.totalPrice || (Number(req.servicePrice || 0) + Number(req.feePrice || 0)));
+        if (totalVal > 0) {
+          const now = new Date();
+          const cashEntry: CashTransaction = {
+            id: `cash-leva-${req.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+            tenantId: tenant.id,
+            type: 'entrada',
+            category: 'venda_lavagem',
+            categoryLabel: 'Leva & Traz + Lavagem',
+            description: `Leva & Traz (${req.type === 'completo' ? 'Completo' : req.type === 'buscar' ? 'Coleta' : 'Entrega'}) - ${req.vehicle} (${req.plate})`,
+            amount: totalVal,
+            paymentMethod: 'PIX',
+            date: now.toISOString().split('T')[0],
+            time: now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+            operator: req.driverName || currentTenant.ownerName || 'Operação Leva & Traz',
+            referenceId: req.id,
+            recipientOrClient: req.clientName,
+            createdAt: now.toISOString()
+          };
+          saveCashTransactionToFirestore(tenant.id, cashEntry).catch(console.error);
+        }
+      }
+
       const updatedList = levaETrazRequests.map(r => {
         if (r.id === req.id) {
           const hist = r.statusHistory || [];
           return {
             ...r,
             status: nextStatus,
+            washItemId: linkedWashId || r.washItemId,
             statusHistory: [
               ...hist,
               { status: nextStatus, timestamp: new Date().toISOString(), note: customNote }
@@ -1833,39 +2093,19 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
       setLevaETrazRequests(updatedList);
       localStorage.setItem(`saas_tenant_leva_e_traz_${tenant.id}`, JSON.stringify(updatedList));
 
-      await updateLevaETrazStatusInFirestore(tenant.id, req.id, nextStatus, { notes: customNote });
-
-      // Se o status for 'no_patio', envia automaticamente para a Fila de Lavagem se ainda não estiver
-      if (nextStatus === 'no_patio') {
-        const alreadyInYard = washItems.some(w => w.plate === req.plate && w.status !== 'Concluído');
-        if (!alreadyInYard) {
-          const newWash: WashItem = {
-            id: `wash-leva-${Date.now()}`,
-            plate: req.plate,
-            vehicle: req.vehicle,
-            service: `${req.service} (Leva e Traz)`,
-            price: req.servicePrice,
-            clientName: req.clientName,
-            clientPhone: req.clientPhone,
-            status: 'Aguardando',
-            commissionRate: 10,
-            commissionAmount: Number((req.servicePrice * 0.1).toFixed(2)),
-            createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-          };
-          const newYard = [newWash, ...washItems];
-          setWashItems(newYard);
-          localStorage.setItem(`saas_tenant_washes_${tenant.id}`, JSON.stringify(newYard));
-          await saveWashItemToFirestore(tenant.id, newWash);
-          showToast(`🚗 Veículo ${req.vehicle} (${req.plate}) inserido automaticamente na Fila do Pátio!`);
-        }
-      }
+      await updateLevaETrazStatusInFirestore(tenant.id, req.id, nextStatus, {
+        washItemId: linkedWashId,
+        notes: customNote
+      });
 
       // Sincroniza agendamento correspondente se existir
       if (req.appointmentId) {
         const appStatus = nextStatus === 'no_patio' 
           ? 'Em Lavagem' 
-          : nextStatus === 'entregue' 
+          : nextStatus === 'entregue' || nextStatus === 'concluido'
           ? 'Concluído' 
+          : nextStatus === 'cancelado'
+          ? 'Cancelado'
           : 'Aprovado';
         
         await updateAppointmentStatusInFirestore(tenant.id, req.appointmentId, appStatus as any);
@@ -1887,7 +2127,24 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         cancelado: 'Cancelado'
       };
 
-      showToast(`✅ Leva e Traz atualizado para: "${statusLabels[nextStatus]}"`);
+      showToast(
+        nextStatus === 'entregue'
+          ? `✅ Leva e Traz entregue e lançado no Fluxo de Caixa!`
+          : `✅ Leva e Traz atualizado para: "${statusLabels[nextStatus]}"`
+      );
+
+      sendClientVehicleStatusPushNotification({
+        tenantId: tenant.id,
+        tenantName: tenant.nomeFantasia || tenant.name,
+        clientName: req.clientName,
+        clientPhone: req.clientPhone,
+        clientEmail: req.clientEmail,
+        vehicle: req.vehicle,
+        plate: req.plate,
+        service: req.service,
+        newStatus: nextStatus,
+        source: 'leva_e_traz'
+      }).catch(console.error);
     } catch (err) {
       console.error('handleAdvanceLevaStatus error:', err);
       showToast('⚠️ Erro ao atualizar status do Leva e Traz.');
@@ -3172,6 +3429,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                             <td className="py-4 px-4 text-xs">
                               <div className="font-medium text-slate-200">{app.service}</div>
                               <div className="text-emerald-400 font-bold">R$ {app.price.toFixed(2)}</div>
+                              {app.hasLevaETraz && (
+                                <span
+                                  className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+                                  title={app.addressSummary || 'Coleta / Entrega Leva & Traz'}
+                                >
+                                  <Truck className="w-3 h-3" />
+                                  Leva & Traz ({app.levaETrazType === 'completo' ? 'Completo' : app.levaETrazType === 'buscar' ? 'Buscar' : 'Entregar'})
+                                </span>
+                              )}
                             </td>
 
                             <td className="py-4 px-4">
@@ -3292,6 +3558,18 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                       onClick={() => {
                                         updateAppointmentStatusInFirestore(tenant.id, app.id, 'Concluído').catch(console.error);
                                         setAppointments(prev => prev.map(a => a.id === app.id ? { ...a, status: 'Concluído' } : a));
+                                        sendClientVehicleStatusPushNotification({
+                                          tenantId: tenant.id,
+                                          tenantName: tenant.nomeFantasia || tenant.name,
+                                          clientName: app.clientName,
+                                          clientPhone: app.clientPhone,
+                                          clientEmail: (app as any).clientEmail,
+                                          vehicle: app.vehicle,
+                                          plate: app.plate,
+                                          service: app.service,
+                                          newStatus: 'Concluído',
+                                          source: 'agendamento'
+                                        }).catch(console.error);
                                         showToast(`✅ Agendamento de ${app.clientName} marcado como Concluído!`);
                                       }}
                                       className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold px-2.5 py-1.5 rounded-lg transition inline-flex items-center gap-1 cursor-pointer"
@@ -3724,35 +4002,63 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         {activeTab === 'leva-e-traz' && (
           <div className="space-y-5 animate-fadeIn">
             {/* Header & Ação de Novo Pedido */}
-            <div className="bg-gradient-to-r from-cyan-950/40 via-[#0f172a] to-blue-950/40 border border-cyan-500/30 rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="bg-gradient-to-r from-cyan-950/40 via-[#0f172a] to-blue-950/40 border border-cyan-500/30 rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div className="flex items-center gap-3.5">
                 <div className="p-3 bg-cyan-500/15 border border-cyan-500/30 rounded-2xl text-cyan-400 shrink-0">
                   <Truck className="w-6 h-6 animate-pulse" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h3 className="font-bold text-white text-base">Gestão Operacional de Leva e Traz (Valet & Delivery)</h3>
-                    <span className="text-[10px] bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded-full border border-cyan-500/30">
-                      Coletas & Entregas
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      levaConfig.enabled
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                    }`}>
+                      {levaConfig.enabled ? 'Serviço Ativo no App' : 'Pausado no App'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 mt-0.5">
-                    Despache motoristas, trace rotas no Google Maps, atualize o cliente via WhatsApp e transfira veículos com 1-clique para a fila do pátio.
+                    Despache motoristas, trace rotas no Google Maps, atualize o cliente via WhatsApp/Push e transfira veículos com 1-clique para o pátio.
                   </p>
+                  {levaConfig.enabled ? (
+                    <p className="text-[11px] text-cyan-300/90 mt-1 font-medium">
+                      Taxas atuais: Completo <strong>R$ {levaConfig.feeCompleto.toFixed(2)}</strong> · Buscar <strong>R$ {levaConfig.feeBuscar.toFixed(2)}</strong> · Entregar <strong>R$ {levaConfig.feeEntregar.toFixed(2)}</strong>
+                      {levaConfig.freeAboveOrderValue > 0 ? ` · Grátis acima de R$ ${levaConfig.freeAboveOrderValue.toFixed(2)}` : ''}
+                      {levaConfig.coverageArea ? ` · Área: ${levaConfig.coverageArea}` : ''}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-rose-300 mt-1 font-bold flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 shrink-0" />
+                      Cobranças de taxa travadas em R$ 0,00 (Serviço Pausado nas Configurações)
+                    </p>
+                  )}
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setShowAddLevaModal(true)}
-                className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-black px-4 py-2.5 rounded-xl text-xs transition shadow-lg shadow-cyan-600/30 flex items-center gap-1.5 shrink-0 cursor-pointer"
-              >
-                <Plus className="w-4 h-4" /> Nova Solicitação Leva e Traz
-              </button>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfigInitialSubTab('leva-e-traz');
+                    setActiveTab('configuracoes-empresa');
+                  }}
+                  className="bg-[#020617] hover:bg-slate-800 border border-[#1e293b] text-slate-200 font-bold px-3.5 py-2.5 rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Settings className="w-4 h-4 text-cyan-400" /> Configurar Taxas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddLevaModal(true)}
+                  className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-black px-4 py-2.5 rounded-xl text-xs transition shadow-lg shadow-cyan-600/30 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" /> Nova Solicitação Leva e Traz
+                </button>
+              </div>
             </div>
 
             {/* KPIs Rápidos Operacionais */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
               <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
                 <span className="text-[10px] text-slate-500 block uppercase font-bold">Total Pedidos</span>
                 <span className="text-xl font-black text-cyan-400">{levaETrazRequests.length}</span>
@@ -3779,10 +4085,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                 </span>
               </div>
 
-              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl col-span-2 sm:col-span-1">
-                <span className="text-[10px] text-slate-500 block uppercase font-bold">Entregues com Sucesso</span>
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Entregues</span>
                 <span className="text-xl font-black text-emerald-400">
                   {levaETrazRequests.filter(r => r.status === 'entregue').length}
+                </span>
+              </div>
+
+              <div className="bg-[#0f172a] border border-[#1e293b] p-3.5 rounded-xl">
+                <span className="text-[10px] text-slate-500 block uppercase font-bold">Receita Entregue</span>
+                <span className="text-lg font-black text-emerald-400 font-mono">
+                  R$ {levaETrazRequests
+                    .filter(r => r.status === 'entregue')
+                    .reduce((acc, r) => acc + Number(r.totalPrice || (r.servicePrice + r.feePrice) || 0), 0)
+                    .toFixed(0)}
                 </span>
               </div>
             </div>
@@ -3790,18 +4106,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             {/* Filtros e Barra de Busca */}
             <div className="bg-[#0f172a] border border-[#1e293b] p-4 rounded-xl flex flex-col md:flex-row gap-3 items-center justify-between">
               <div className="flex items-center gap-1.5 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
-                {(['todos', 'solicitado', 'coleta', 'patio', 'entrega', 'entregue'] as const).map(filterKey => {
+                {(['todos', 'solicitado', 'coleta', 'patio', 'entrega', 'entregue', 'cancelado'] as const).map(filterKey => {
                   const label = filterKey === 'todos' 
                     ? 'Todos' 
                     : filterKey === 'solicitado' 
-                    ? 'Solicitações Recebidas' 
+                    ? 'Solicitações' 
                     : filterKey === 'coleta' 
                     ? 'Em Coleta' 
                     : filterKey === 'patio' 
-                    ? 'No Pátio / Lavando' 
+                    ? 'No Pátio' 
                     : filterKey === 'entrega' 
-                    ? 'A Caminho da Entrega' 
-                    : 'Entregues';
+                    ? 'Entrega' 
+                    : filterKey === 'entregue'
+                    ? 'Entregues'
+                    : 'Cancelados';
 
                   const count = filterKey === 'todos' 
                     ? levaETrazRequests.length 
@@ -3813,7 +4131,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     ? levaETrazRequests.filter(r => r.status === 'no_patio').length
                     : filterKey === 'entrega'
                     ? levaETrazRequests.filter(r => r.status === 'concluido' || r.status === 'em_entrega').length
-                    : levaETrazRequests.filter(r => r.status === 'entregue').length;
+                    : filterKey === 'entregue'
+                    ? levaETrazRequests.filter(r => r.status === 'entregue').length
+                    : levaETrazRequests.filter(r => r.status === 'cancelado').length;
 
                   return (
                     <button
@@ -3845,13 +4165,14 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             </div>
 
             {/* Lista de Solicitações de Leva e Traz */}
-            {levaETrazRequests
-              .filter(req => {
+            {(() => {
+              const filteredLevaRequests = levaETrazRequests.filter(req => {
                 if (levaFilter === 'solicitado' && req.status !== 'solicitado') return false;
                 if (levaFilter === 'coleta' && req.status !== 'motorista_a_caminho' && req.status !== 'coletado') return false;
                 if (levaFilter === 'patio' && req.status !== 'no_patio') return false;
                 if (levaFilter === 'entrega' && req.status !== 'concluido' && req.status !== 'em_entrega') return false;
                 if (levaFilter === 'entregue' && req.status !== 'entregue') return false;
+                if (levaFilter === 'cancelado' && req.status !== 'cancelado') return false;
 
                 if (levaSearch.trim()) {
                   const q = levaSearch.toLowerCase();
@@ -3863,43 +4184,30 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   if (!matchClient && !matchPhone && !matchVehicle && !matchPlate && !matchAddress) return false;
                 }
                 return true;
-              }).length === 0 ? (
-                <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-12 text-center text-slate-500 space-y-3">
-                  <Truck className="w-12 h-12 mx-auto opacity-30 text-cyan-400" />
-                  <p className="text-sm font-bold text-slate-300">Nenhuma solicitação de Leva e Traz encontrada.</p>
-                  <p className="text-xs text-slate-500">
-                    Quando os clientes solicitarem pelo aplicativo ou totem, ou quando você lançar manualmente, os pedidos aparecerão aqui com status em tempo real.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowAddLevaModal(true)}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4" /> Criar Solicitação Manual
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {levaETrazRequests
-                    .filter(req => {
-                      if (levaFilter === 'solicitado' && req.status !== 'solicitado') return false;
-                      if (levaFilter === 'coleta' && req.status !== 'motorista_a_caminho' && req.status !== 'coletado') return false;
-                      if (levaFilter === 'patio' && req.status !== 'no_patio') return false;
-                      if (levaFilter === 'entrega' && req.status !== 'concluido' && req.status !== 'em_entrega') return false;
-                      if (levaFilter === 'entregue' && req.status !== 'entregue') return false;
+              });
 
-                      if (levaSearch.trim()) {
-                        const q = levaSearch.toLowerCase();
-                        const matchClient = req.clientName.toLowerCase().includes(q);
-                        const matchPhone = req.clientPhone?.toLowerCase().includes(q);
-                        const matchVehicle = req.vehicle.toLowerCase().includes(q);
-                        const matchPlate = req.plate.toLowerCase().includes(q);
-                        const matchAddress = req.address?.street?.toLowerCase().includes(q) || req.address?.neighborhood?.toLowerCase().includes(q);
-                        if (!matchClient && !matchPhone && !matchVehicle && !matchPlate && !matchAddress) return false;
-                      }
-                      return true;
-                    })
-                    .map((req) => {
+              if (filteredLevaRequests.length === 0) {
+                return (
+                  <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-12 text-center text-slate-500 space-y-3">
+                    <Truck className="w-12 h-12 mx-auto opacity-30 text-cyan-400" />
+                    <p className="text-sm font-bold text-slate-300">Nenhuma solicitação de Leva e Traz encontrada.</p>
+                    <p className="text-xs text-slate-500">
+                      Quando os clientes solicitarem pelo aplicativo ou totem, ou quando você lançar manualmente, os pedidos aparecerão aqui com status em tempo real.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddLevaModal(true)}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" /> Criar Solicitação Manual
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-4">
+                  {filteredLevaRequests.map((req) => {
                       const statusBadges: Record<LevaETrazStatus, { text: string; bg: string }> = {
                         solicitado: { text: '1. Solicitação Recebida', bg: 'bg-amber-500/20 text-amber-300 border-amber-500/40' },
                         motorista_a_caminho: { text: '2. Motorista a Caminho da Coleta', bg: 'bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse' },
@@ -3958,7 +4266,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                   R$ {Number(req.totalPrice || req.servicePrice + req.feePrice).toFixed(2)}
                                 </span>
                                 <span className="text-[10px] text-slate-500">
-                                  (Serviço R$ {req.servicePrice} + Taxa R$ {req.feePrice})
+                                  (Serviço R$ {req.servicePrice} + {req.feePrice === 0 ? 'Taxa Grátis' : `Taxa R$ ${req.feePrice}`})
                                 </span>
                               </div>
                             </div>
@@ -3991,6 +4299,11 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                               {req.address?.complement && (
                                 <p className="text-[11px] text-slate-400">
                                   Compl: {req.address.complement}
+                                </p>
+                              )}
+                              {req.address?.reference && (
+                                <p className="text-[11px] text-slate-400">
+                                  Ref: {req.address.reference}
                                 </p>
                               )}
                               {req.notes && (
@@ -4032,16 +4345,33 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                               <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between text-[11px] text-slate-400">
                                 <span>Criado em: {new Date(req.createdAt).toLocaleDateString('pt-BR')} às {new Date(req.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
                                 {req.scheduledTime && (
-                                  <span className="font-bold text-cyan-400 font-mono">Agendado: {req.scheduledTime}</span>
+                                  <span className="font-bold text-cyan-400 font-mono">
+                                    Agendado: {req.scheduledDate ? `${req.scheduledDate.split('-').reverse().join('/')} ` : ''}{req.scheduledTime}
+                                  </span>
                                 )}
                               </div>
                             </div>
                           </div>
 
-                          {/* Action Buttons: Avançar Etapa + WhatsApp */}
+                          {/* Linha do Tempo Compacta das Etapas Concluídas */}
+                          {Array.isArray(req.statusHistory) && req.statusHistory.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[10px]">
+                              <span className="text-slate-500 font-bold uppercase mr-1">Histórico:</span>
+                              {req.statusHistory.slice(-5).map((h, hIdx) => (
+                                <span
+                                  key={`${req.id}-hist-${hIdx}`}
+                                  className="px-2 py-0.5 rounded bg-[#020617] border border-[#1e293b] text-slate-300 font-mono"
+                                  title={h.note || h.status}
+                                >
+                                  {h.status.replace(/_/g, ' ')} ({new Date(h.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Action Buttons: Avançar Etapa + WhatsApp + Cancelar */}
                           <div className="pt-2 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              {/* Botão de Disparo de WhatsApp com Mensagem da Etapa */}
+                            <div className="flex flex-wrap items-center gap-2">
                               {req.clientPhone && (
                                 <button
                                   type="button"
@@ -4051,6 +4381,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                 >
                                   <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
                                   Notificar Cliente no WhatsApp
+                                </button>
+                              )}
+
+                              {req.status !== 'entregue' && req.status !== 'cancelado' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (confirm(`Cancelar o serviço Leva & Traz de ${req.clientName} (${req.vehicle})?`)) {
+                                      handleAdvanceLevaStatus(req, 'cancelado', 'Cancelado pelo painel operacional');
+                                    }
+                                  }}
+                                  className="px-2.5 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" /> Cancelar
                                 </button>
                               )}
 
@@ -4137,13 +4481,20 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Entrega Concluída com Sucesso!
                                 </span>
                               )}
+
+                              {req.status === 'cancelado' && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/30 text-xs font-bold">
+                                  <X className="w-3.5 h-3.5" /> Pedido Cancelado
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
                       );
-                    })}
+                  })}
                 </div>
-              )}
+              );
+            })()}
 
             {/* Modal: Nova Solicitação Leva e Traz */}
             {showAddLevaModal && (
@@ -4166,6 +4517,52 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                   </div>
 
                   <form onSubmit={handleCreateManualLevaRequest} className="space-y-4 text-xs">
+                    {/* Preenchimento rápido com cliente já cadastrado */}
+                    {tenantClients.length > 0 && (
+                      <div className="bg-[#020617] border border-cyan-500/20 rounded-xl p-3">
+                        <label className="block text-[10px] font-bold text-cyan-400 uppercase mb-1">
+                          Preencher com Cliente Cadastrado (Opcional)
+                        </label>
+                        <select
+                          defaultValue=""
+                          onChange={(e) => {
+                            const selected = tenantClients.find(c => (c.id || c.uid) === e.target.value);
+                            if (!selected) return;
+                            setNewLTClientName(selected.nomeCompleto || selected.name || '');
+                            setNewLTClientPhone(selected.telefone || selected.phone || '');
+                            const vList = selected.veiculos || selected.vehicles || (selected.vehicle ? [selected.vehicle] : []);
+                            if (Array.isArray(vList) && vList.length > 0) {
+                              const firstV = vList[0];
+                              setNewLTVehicle(`${firstV.marca || firstV.brand || ''} ${firstV.modelo || firstV.model || ''}`.trim());
+                              setNewLTPlate((firstV.placa || firstV.plate || '').toUpperCase());
+                            }
+                            if (selected.endereco || selected.address) {
+                              const addr = selected.endereco || selected.address;
+                              if (typeof addr === 'object') {
+                                if (addr.cep) setNewLTCep(addr.cep);
+                                if (addr.rua || addr.street) setNewLTStreet(addr.rua || addr.street);
+                                if (addr.numero || addr.number) setNewLTNumber(addr.numero || addr.number);
+                                if (addr.bairro || addr.neighborhood) setNewLTNeighborhood(addr.bairro || addr.neighborhood);
+                                if (addr.cidade || addr.city) setNewLTCity(addr.cidade || addr.city);
+                              }
+                            }
+                          }}
+                          className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
+                        >
+                          <option value="">-- Selecionar cliente da base --</option>
+                          {tenantClients.map(c => {
+                            const cName = c.nomeCompleto || c.name || 'Cliente';
+                            const cPhone = c.telefone || c.phone || '';
+                            return (
+                              <option key={c.id || c.uid || cName} value={c.id || c.uid}>
+                                {cName} {cPhone ? `(${cPhone})` : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-slate-300 font-bold mb-1">Nome do Cliente *</label>
@@ -4242,6 +4639,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     {/* Modalidade */}
                     <div>
                       <label className="block text-slate-300 font-bold mb-1">Modalidade do Leva e Traz</label>
+                      {!levaConfig.enabled && (
+                        <div className="mb-2 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 text-[11px] text-rose-300 font-semibold flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          Taxa pausada nas configurações: cobrança de frete/deslocamento travada em R$ 0,00.
+                        </div>
+                      )}
                       <div className="grid grid-cols-3 gap-2">
                         <button
                           type="button"
@@ -4252,7 +4655,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                               : 'bg-[#020617] border-[#1e293b] text-slate-400'
                           }`}
                         >
-                          Completo (+ R$ 25)
+                          Completo ({!levaConfig.enabled ? 'Travado R$ 0' : calculateManualLTFee('completo', Number(newLTServicePrice) || 0) === 0 ? 'Grátis' : `+ R$ ${levaConfig.feeCompleto}`})
                         </button>
                         <button
                           type="button"
@@ -4263,7 +4666,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                               : 'bg-[#020617] border-[#1e293b] text-slate-400'
                           }`}
                         >
-                          Apenas Buscar (+ R$ 15)
+                          Apenas Buscar ({!levaConfig.enabled ? 'Travado R$ 0' : calculateManualLTFee('buscar', Number(newLTServicePrice) || 0) === 0 ? 'Grátis' : `+ R$ ${levaConfig.feeBuscar}`})
                         </button>
                         <button
                           type="button"
@@ -4274,7 +4677,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                               : 'bg-[#020617] border-[#1e293b] text-slate-400'
                           }`}
                         >
-                          Apenas Entregar (+ R$ 15)
+                          Apenas Entregar ({!levaConfig.enabled ? 'Travado R$ 0' : calculateManualLTFee('entregar', Number(newLTServicePrice) || 0) === 0 ? 'Grátis' : `+ R$ ${levaConfig.feeEntregar}`})
                         </button>
                       </div>
                     </div>
@@ -4283,7 +4686,28 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     <div className="bg-[#020617] p-3 rounded-xl border border-[#1e293b] space-y-2.5">
                       <span className="text-[10px] font-bold text-slate-400 uppercase">Endereço de Coleta / Retirada</span>
                       <div className="grid grid-cols-3 gap-2">
-                        <div className="col-span-2">
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-0.5">CEP</label>
+                          <div className="relative">
+                            <input
+                              type="text"
+                              placeholder="00000-000"
+                              value={newLTCep}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setNewLTCep(val);
+                                if (val.replace(/\D/g, '').length === 8) {
+                                  buscarCepManualLT(val);
+                                }
+                              }}
+                              className="w-full bg-[#0f172a] border border-[#1e293b] rounded-lg px-2.5 py-1.5 text-xs text-white font-mono"
+                            />
+                            {isSearchingLTCep && (
+                              <Loader2 className="w-3 h-3 text-cyan-400 animate-spin absolute right-2 top-2" />
+                            )}
+                          </div>
+                        </div>
+                        <div>
                           <label className="block text-slate-400 text-[10px] mb-0.5">Rua / Avenida *</label>
                           <input
                             type="text"
@@ -4360,7 +4784,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
 
                     <div className="pt-2 border-t border-[#1e293b] flex items-center justify-between">
                       <span className="text-xs text-slate-400">
-                        Total Estimado: <strong className="text-emerald-400 font-mono text-sm">R$ {(Number(newLTServicePrice) + (newLTType === 'completo' ? 25 : 15)).toFixed(2)}</strong>
+                        Total Estimado: <strong className="text-emerald-400 font-mono text-sm">
+                          R$ {(Number(newLTServicePrice || 0) + calculateManualLTFee(newLTType, Number(newLTServicePrice || 0))).toFixed(2)}
+                        </strong>
                       </span>
                       <div className="flex items-center gap-2">
                         <button
@@ -4817,6 +5243,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         {activeTab === 'configuracoes-empresa' && (
           <TenantConfigSettings
             tenant={currentTenant}
+            initialSubTab={configInitialSubTab}
             staffList={staffList}
             onUpdateStaffList={(newStaff) => {
               setStaffList(newStaff);

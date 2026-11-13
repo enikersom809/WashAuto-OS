@@ -1016,13 +1016,14 @@ export default function App() {
         {/* 2.2 MODO PORTAL DO CLIENTE */}
         {authSession?.role === 'cliente' && (
           <ClientPortal
-            tenant={authSession.tenant}
+            tenant={tenants.find(t => t.id === authSession.tenant.id) || authSession.tenant}
             clientInfo={authSession.clientInfo}
             onLogout={handleLogout}
             onNewAppointmentCreated={(newApp) => {
 
               const tenantId = authSession.tenant.id;
               const appointmentItem = {
+                ...(newApp as any),
                 id: (newApp as any).id || `app-${Date.now()}`,
                 dateTime: newApp.dateTime,
                 clientName: newApp.clientName,
@@ -1032,7 +1033,7 @@ export default function App() {
                 plate: newApp.plate,
                 service: newApp.service,
                 price: newApp.price,
-                status: 'Pendente',
+                status: (newApp as any).status || 'Pendente',
                 addressSummary: (newApp as any).addressSummary || ''
               };
 

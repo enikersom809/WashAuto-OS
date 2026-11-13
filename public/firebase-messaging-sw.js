@@ -1,7 +1,55 @@
 /**
  * Firebase Cloud Messaging & Web Push Service Worker
  * WashAuto OS - Notificações em Segundo Plano com Aba Fechada
+ * Suporta alertas para o Dono do Lava-Jato (Totem) e para o Cliente (Status do Veículo)
  */
+
+function resolveNotificationContext(payload) {
+  const data = (payload && payload.data) ? payload.data : {};
+  const notif = (payload && payload.notification) ? payload.notification : {};
+  const isClientStatus =
+    data.targetRole === 'cliente' ||
+    data.type === 'vehicle_status' ||
+    payload.targetRole === 'cliente' ||
+    payload.type === 'vehicle_status';
+
+  if (isClientStatus) {
+    const title = notif.title || payload.title || data.title || '🚗 Atualização do Seu Veículo!';
+    const body = notif.body || payload.body || data.body || 'O status do seu veículo no lava-jato foi atualizado.';
+    const tenantParam = data.tenantId || payload.tenantId ? `empresa=${encodeURIComponent(data.tenantId || payload.tenantId)}&` : '';
+    const targetUrl = data.url || payload.url || `/?${tenantParam}aba=status`;
+
+    return {
+      isClientStatus: true,
+      title,
+      body,
+      targetUrl,
+      tab: 'status',
+      tag: data.tag || payload.tag || ('client-status-' + (data.plate || Date.now())),
+      actions: [
+        { action: 'open_status', title: '🚗 Ver Status do Veículo' },
+        { action: 'dismiss', title: 'Fechar' }
+      ]
+    };
+  }
+
+  const title = notif.title || payload.title || data.title || '🚨 Novo Cliente Cadastrado no Totem!';
+  const body = notif.body || payload.body || data.body || 'Um novo cliente realizou cadastro no autoatendimento.';
+  const targetUrl = data.url || payload.url || '/?aba=clientes';
+
+  return {
+    isClientStatus: false,
+    title,
+    body,
+    targetUrl,
+    tab: 'clientes',
+    tag: data.tag || payload.tag || ('totem-fcm-' + Date.now()),
+    actions: [
+      { action: 'open_clients', title: '👥 Gestão de Clientes' },
+      { action: 'dismiss', title: 'Fechar' }
+    ]
+  };
+}
 
 // Importa scripts oficiais de compatibilidade do Firebase Messaging
 try {
@@ -21,29 +69,31 @@ try {
 
   messaging.onBackgroundMessage(function(payload) {
     console.log('[firebase-messaging-sw.js] onBackgroundMessage recebido:', payload);
-    const title = payload.notification?.title || payload.data?.title || '🚨 Novo Cliente Cadastrado no Totem!';
-    const body = payload.notification?.body || payload.data?.body || 'Novo cliente se cadastrou pelo totem de autoatendimento.';
+    const ctx = resolveNotificationContext(payload);
+    const data = (payload && payload.data) ? payload.data : {};
+
     const options = {
-      body: body,
+      body: ctx.body,
       icon: '/pwa-192x192.png',
       badge: '/pwa-192x192.png',
       vibrate: [250, 100, 250, 100, 400],
-      tag: payload.data?.tag || ('totem-fcm-' + Date.now()),
+      tag: ctx.tag,
       renotify: true,
       requireInteraction: true,
       data: {
-        url: payload.data?.url || '/?aba=clientes',
-        tenantId: payload.data?.tenantId,
-        clientName: payload.data?.clientName,
+        url: ctx.targetUrl,
+        tab: ctx.tab,
+        targetRole: ctx.isClientStatus ? 'cliente' : 'empresa',
+        tenantId: data.tenantId,
+        clientName: data.clientName,
+        plate: data.plate,
+        newStatus: data.newStatus,
         receivedAt: Date.now()
       },
-      actions: [
-        { action: 'open_clients', title: '👥 Ver Clientes' },
-        { action: 'dismiss', title: 'Dispensar' }
-      ]
+      actions: ctx.actions
     };
 
-    return self.registration.showNotification(title, options);
+    return self.registration.showNotification(ctx.title, options);
   });
 } catch (err) {
   console.warn('[firebase-messaging-sw.js] Falha ao carregar scripts FCM compat:', err);
@@ -67,38 +117,38 @@ self.addEventListener('push', function(event) {
     }
   }
 
-  const title = payload.title || (payload.notification && payload.notification.title) || '🚨 Novo Cliente Cadastrado no Totem!';
-  const body = payload.body || (payload.notification && payload.notification.body) || 'Um novo cliente realizou cadastro no autoatendimento.';
-  const targetUrl = payload.url || (payload.data && payload.data.url) || '/?aba=clientes';
+  const ctx = resolveNotificationContext(payload);
+  const data = payload.data || {};
 
   const notificationOptions = {
-    body: body,
+    body: ctx.body,
     icon: payload.icon || '/pwa-192x192.png',
     badge: '/pwa-192x192.png',
     vibrate: [250, 100, 250, 100, 400],
-    tag: payload.tag || ('push-alert-' + Date.now()),
+    tag: ctx.tag,
     renotify: true,
     requireInteraction: true,
     data: {
-      url: targetUrl,
-      tenantId: payload.tenantId || (payload.data && payload.data.tenantId),
-      clientName: payload.clientName || (payload.data && payload.data.clientName),
+      url: ctx.targetUrl,
+      tab: ctx.tab,
+      targetRole: ctx.isClientStatus ? 'cliente' : 'empresa',
+      tenantId: payload.tenantId || data.tenantId,
+      clientName: payload.clientName || data.clientName,
+      plate: payload.plate || data.plate,
+      newStatus: payload.newStatus || data.newStatus,
       timestamp: Date.now()
     },
-    actions: [
-      { action: 'open_clients', title: '👥 Gestão de Clientes' },
-      { action: 'dismiss', title: 'Fechar' }
-    ]
+    actions: ctx.actions
   };
 
   event.waitUntil(
-    self.registration.showNotification(title, notificationOptions)
+    self.registration.showNotification(ctx.title, notificationOptions)
   );
 });
 
 // 🖱️ Manipulador de clique na notificação Push:
 // Quando clicado (mesmo com navegador fechado ou em segundo plano),
-// foca a aba existente ou abre uma nova diretamente em 'Gestão de Clientes & Balcão'.
+// foca a aba existente ou abre uma nova diretamente na aba correta.
 self.addEventListener('notificationclick', function(event) {
   console.log('[SW] Clique na notificação push:', event.action, event.notification.data);
   event.notification.close();
@@ -107,9 +157,9 @@ self.addEventListener('notificationclick', function(event) {
     return;
   }
 
-  const targetUrl = (event.notification.data && event.notification.data.url)
-    ? event.notification.data.url
-    : '/?aba=clientes';
+  const notifData = event.notification.data || {};
+  const targetTab = notifData.tab || (notifData.targetRole === 'cliente' ? 'status' : 'clientes');
+  const targetUrl = notifData.url || (targetTab === 'status' ? '/?aba=status' : '/?aba=clientes');
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(windowClients) {
@@ -120,23 +170,24 @@ self.addEventListener('notificationclick', function(event) {
           try {
             client.postMessage({
               type: 'NAVIGATE_TO_TAB',
-              tab: 'clientes',
+              tab: targetTab,
               source: 'push_notification',
-              data: event.notification.data
+              data: notifData
             });
           } catch (_) {}
-          
+
           if ('navigate' in client && client.url) {
-            // Se já está na mesma origem, navega para a aba de clientes
-            const urlObj = new URL(client.url);
-            urlObj.searchParams.set('aba', 'clientes');
-            client.navigate(urlObj.href);
+            try {
+              const urlObj = new URL(client.url);
+              urlObj.searchParams.set('aba', targetTab);
+              client.navigate(urlObj.href);
+            } catch (_) {}
           }
           return client.focus();
         }
       }
 
-      // 2. Se o painel estiver completamente fechado, abre uma nova janela
+      // 2. Se o painel/app estiver completamente fechado, abre uma nova janela
       if (clients.openWindow) {
         return clients.openWindow(targetUrl);
       }

@@ -36,6 +36,16 @@ export interface Tenant {
   logoUrl?: string;
   isLifetime?: boolean;
   purchaseAmount?: number;
+  levaETrazConfig?: {
+    enabled: boolean;
+    feeCompleto: number;
+    feeBuscar: number;
+    feeEntregar: number;
+    freeAboveOrderValue?: number;
+    estimatedPickupMinutes?: number;
+    coverageArea?: string;
+    workingHours?: string;
+  };
 }
 
 export interface Plan {
