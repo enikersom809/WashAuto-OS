@@ -201,8 +201,19 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         badge: b.badge
       }));
     }
+    if (tenant.hideDefaultBanners) {
+      return [];
+    }
     return defaultSlides;
-  }, [promoBanners, defaultSlides]);
+  }, [promoBanners, defaultSlides, tenant.hideDefaultBanners]);
+
+  useEffect(() => {
+    if (activeSlide >= slides.length && slides.length > 0) {
+      setActiveSlide(0);
+    } else if (slides.length === 0 && activeSlide !== 0) {
+      setActiveSlide(0);
+    }
+  }, [slides.length, activeSlide]);
 
   // Auto-play banner carousel automatically every 4.5 seconds
   useEffect(() => {
@@ -2923,6 +2934,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         {/* ================= ABA 1: AGENDAMENTO & SERVIÇOS ================= */}
         {portalTab === 'agendar' && (
         <>
+        {slides.length > 0 && (
         <div className="relative rounded-2xl overflow-hidden border border-[#1e293b] shadow-2xl bg-[#0f172a]">
           <div className="relative h-64 sm:h-72 w-full overflow-hidden">
             {slides.map((slide, index) => (
@@ -2969,18 +2981,21 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
           </div>
 
           {/* Indicadores do Carrossel */}
-          <div className="absolute bottom-3 right-4 z-20 flex gap-1.5">
-            {slides.map((_, idx) => (
-              <button
-                key={idx}
-                onClick={() => setActiveSlide(idx)}
-                className={`h-1.5 rounded-full transition-all cursor-pointer ${
-                  idx === activeSlide ? 'w-6 bg-blue-500' : 'w-2 bg-slate-600/60'
-                }`}
-              />
-            ))}
-          </div>
+          {slides.length > 1 && (
+            <div className="absolute bottom-3 right-4 z-20 flex gap-1.5">
+              {slides.map((_, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => setActiveSlide(idx)}
+                  className={`h-1.5 rounded-full transition-all cursor-pointer ${
+                    idx === activeSlide ? 'w-6 bg-blue-500' : 'w-2 bg-slate-600/60'
+                  }`}
+                />
+              ))}
+            </div>
+          )}
         </div>
+        )}
 
         {/* ================= CARTÃO DE FIDELIDADE ================= */}
         <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl p-6 shadow-xl relative overflow-hidden">

@@ -12,6 +12,10 @@
         "ownerEmail": { "type": "string" },
         "mrr": { "type": "number" },
         "levaETrazConfig": { "type": "object" },
+        "hideDefaultBanners": { "type": "boolean" },
+        "trialStartedAt": { "type": "string" },
+        "trialEndsAt": { "type": "string" },
+        "trialDays": { "type": "number" },
         "createdAt": { "type": "string" }
       },
       "required": ["name", "plan", "status"]

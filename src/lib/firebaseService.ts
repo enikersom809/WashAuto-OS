@@ -152,6 +152,13 @@ export async function saveTenantToFirestore(tenant: Tenant): Promise<boolean> {
       logoUrl: tenant.logoUrl || '',
       notes: tenant.notes || '',
       tempPassword: tenant.tempPassword || '',
+      isLifetime: tenant.isLifetime || tenant.plan === 'Vitalicio' || false,
+      purchaseAmount: tenant.purchaseAmount,
+      levaETrazConfig: tenant.levaETrazConfig,
+      hideDefaultBanners: tenant.hideDefaultBanners,
+      trialStartedAt: tenant.trialStartedAt,
+      trialEndsAt: tenant.trialEndsAt,
+      trialDays: tenant.trialDays,
       syncedAt: new Date().toISOString()
     };
 
@@ -393,7 +400,12 @@ export async function loadTenantsFromFirestore(): Promise<Tenant[]> {
         logoUrl: data.logoUrl || undefined,
         tempPassword: data.tempPassword || undefined,
         isLifetime: data.isLifetime || data.plan === 'Vitalicio' || undefined,
-        purchaseAmount: data.purchaseAmount || (data.plan === 'Vitalicio' ? 4000 : undefined)
+        purchaseAmount: data.purchaseAmount || (data.plan === 'Vitalicio' ? 4000 : undefined),
+        levaETrazConfig: data.levaETrazConfig || undefined,
+        hideDefaultBanners: data.hideDefaultBanners || undefined,
+        trialStartedAt: data.trialStartedAt || undefined,
+        trialEndsAt: data.trialEndsAt || undefined,
+        trialDays: data.trialDays || undefined
       });
     });
     return loadedTenants;
@@ -452,7 +464,12 @@ export function subscribeToTenantsFirestore(callback: (tenants: Tenant[]) => voi
           logoUrl: data.logoUrl || undefined,
           tempPassword: data.tempPassword || undefined,
           isLifetime: data.isLifetime || data.plan === 'Vitalicio' || undefined,
-          purchaseAmount: data.purchaseAmount || (data.plan === 'Vitalicio' ? 4000 : undefined)
+          purchaseAmount: data.purchaseAmount || (data.plan === 'Vitalicio' ? 4000 : undefined),
+          levaETrazConfig: data.levaETrazConfig || undefined,
+          hideDefaultBanners: data.hideDefaultBanners || undefined,
+          trialStartedAt: data.trialStartedAt || undefined,
+          trialEndsAt: data.trialEndsAt || undefined,
+          trialDays: data.trialDays || undefined
         });
       });
       // Notifica sempre os ouvintes com a lista em tempo real atualizada
@@ -1697,7 +1714,14 @@ export async function findTenantByCompanyEmailFirestore(email: string): Promise<
         nomeFantasia: docData.nomeFantasia || undefined,
         razaoSocial: docData.razaoSocial || undefined,
         cnpj: docData.cnpj || undefined,
-        inscricaoEstadual: docData.inscricaoEstadual || undefined
+        inscricaoEstadual: docData.inscricaoEstadual || undefined,
+        isLifetime: docData.isLifetime || docData.plan === 'Vitalicio' || undefined,
+        purchaseAmount: docData.purchaseAmount || undefined,
+        levaETrazConfig: docData.levaETrazConfig || undefined,
+        hideDefaultBanners: docData.hideDefaultBanners || undefined,
+        trialStartedAt: docData.trialStartedAt || undefined,
+        trialEndsAt: docData.trialEndsAt || undefined,
+        trialDays: docData.trialDays || undefined
       };
     }
 
@@ -1731,7 +1755,14 @@ export async function findTenantByCompanyEmailFirestore(email: string): Promise<
             nomeFantasia: d.nomeFantasia || undefined,
             razaoSocial: d.razaoSocial || undefined,
             cnpj: d.cnpj || undefined,
-            inscricaoEstadual: d.inscricaoEstadual || undefined
+            inscricaoEstadual: d.inscricaoEstadual || undefined,
+            isLifetime: d.isLifetime || d.plan === 'Vitalicio' || undefined,
+            purchaseAmount: d.purchaseAmount || undefined,
+            levaETrazConfig: d.levaETrazConfig || undefined,
+            hideDefaultBanners: d.hideDefaultBanners || undefined,
+            trialStartedAt: d.trialStartedAt || undefined,
+            trialEndsAt: d.trialEndsAt || undefined,
+            trialDays: d.trialDays || undefined
           };
         }
       }
@@ -1855,7 +1886,13 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
           lastActive: data.lastActive || 'Agora mesmo',
           logoUrl: data.logoUrl || undefined,
           address: data.address || undefined,
-          tempPassword: data.tempPassword || undefined
+          tempPassword: data.tempPassword || undefined,
+          isLifetime: data.isLifetime || data.plan === 'Vitalicio' || undefined,
+          levaETrazConfig: data.levaETrazConfig || undefined,
+          hideDefaultBanners: data.hideDefaultBanners || undefined,
+          trialStartedAt: data.trialStartedAt || undefined,
+          trialEndsAt: data.trialEndsAt || undefined,
+          trialDays: data.trialDays || undefined
         };
       }
     } catch (_) {}
@@ -1891,7 +1928,13 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
             lastActive: fullData.lastActive || 'Agora mesmo',
             logoUrl: fullData.logoUrl || data.logoUrl || undefined,
             address: fullData.address || undefined,
-            tempPassword: fullData.tempPassword || data.tempPassword || undefined
+            tempPassword: fullData.tempPassword || data.tempPassword || undefined,
+            isLifetime: fullData.isLifetime || fullData.plan === 'Vitalicio' || undefined,
+            levaETrazConfig: fullData.levaETrazConfig || undefined,
+            hideDefaultBanners: fullData.hideDefaultBanners || undefined,
+            trialStartedAt: fullData.trialStartedAt || undefined,
+            trialEndsAt: fullData.trialEndsAt || undefined,
+            trialDays: fullData.trialDays || undefined
           };
         }
       } catch (_) {}
@@ -1920,7 +1963,13 @@ export async function getTenantByIdOrSlugFirestore(idOrSlug: string): Promise<Te
             lastActive: data.lastActive || 'Agora mesmo',
             logoUrl: data.logoUrl || undefined,
             address: data.address || undefined,
-            tempPassword: data.tempPassword || undefined
+            tempPassword: data.tempPassword || undefined,
+            isLifetime: data.isLifetime || data.plan === 'Vitalicio' || undefined,
+            levaETrazConfig: data.levaETrazConfig || undefined,
+            hideDefaultBanners: data.hideDefaultBanners || undefined,
+            trialStartedAt: data.trialStartedAt || undefined,
+            trialEndsAt: data.trialEndsAt || undefined,
+            trialDays: data.trialDays || undefined
           };
         }
       } catch (_) {}

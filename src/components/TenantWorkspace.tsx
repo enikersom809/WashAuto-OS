@@ -126,6 +126,7 @@ import {
   generateIcsFileContent,
   ReminderAnalysis
 } from '../utils/reminderService';
+import { getTenantTrialInfo } from '../utils/trialService';
 
 
 interface WashItem {
@@ -2301,6 +2302,8 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     return { dueCount, sentCount, scheduledCount };
   }, [appointments]);
 
+  const trialInfo = useMemo(() => getTenantTrialInfo(tenant), [tenant]);
+
   const menuItems = [
     {
       id: 'fila' as const,
@@ -2596,9 +2599,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
                       tenant.plan === 'Vitalicio'
                         ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-black'
+                        : tenant.plan === 'Trial20' || trialInfo.isTrial
+                        ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
                         : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                     }`}>
-                      {tenant.plan === 'Vitalicio' ? '👑 Vitalício' : tenant.plan}
+                      {tenant.plan === 'Vitalicio'
+                        ? '👑 Vitalício'
+                        : tenant.plan === 'Trial20'
+                        ? '⏱️ Teste 20 Dias'
+                        : tenant.plan}
                     </span>
                     <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.2 rounded font-mono truncate max-w-[100px]" title={tenant.domain}>
                       {tenant.domain}
@@ -2864,6 +2873,41 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
             </div>
           </div>
         </header>
+
+        {/* Faixa de Contagem Regressiva do Teste de 20 Dias */}
+        {trialInfo.isTrial && !trialInfo.isBlocked && (
+          <div className="px-4 sm:px-6 pt-4 max-w-7xl w-full mx-auto">
+            <div className={`rounded-xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+              trialInfo.daysRemaining <= 3
+                ? 'bg-rose-950/30 border-rose-500/40 text-rose-100'
+                : 'bg-cyan-950/30 border-cyan-500/30 text-cyan-100'
+            }`}>
+              <div className="flex items-center gap-3 text-xs">
+                <Clock className={`w-4 h-4 shrink-0 ${trialInfo.daysRemaining <= 3 ? 'text-rose-400' : 'text-cyan-400'}`} />
+                <div>
+                  <span className="font-bold">
+                    Período de Teste de 20 Dias
+                  </span>
+                  <span className="mx-1.5 text-slate-500" aria-hidden="true">·</span>
+                  <span className="font-semibold tabular-nums">
+                    Restam {trialInfo.daysRemaining} dia(s)
+                  </span>
+                  <span className="mx-1.5 text-slate-500" aria-hidden="true">·</span>
+                  <span className="text-slate-300 tabular-nums">
+                    Bloqueio automático em {trialInfo.trialEndsAtFormatted} se não houver contratação.
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('comprar-vitalicio')}
+                className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold whitespace-nowrap shrink-0 transition cursor-pointer"
+              >
+                Contratar Plano Agora
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Quick Operational KPI Bar */}
         <div className="px-4 sm:px-6 pt-4 max-w-7xl w-full mx-auto">
@@ -5663,6 +5707,12 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
           <PromoBannersWorkspace 
             tenant={tenant}
             onToast={showToast}
+            onUpdateTenant={(updated) => {
+              setCurrentTenant(updated);
+              if (onUpdateTenant) {
+                onUpdateTenant(updated);
+              }
+            }}
           />
         )}
 

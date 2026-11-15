@@ -28,6 +28,7 @@ import { Tenant, PlanType, TenantStatus } from '../types';
 import { saveTenantToFirestore, saveCompanyEmailMapping, registerEmpresaInFirebaseAuth } from '../lib/firebaseService';
 import { TenantQRCode } from './TenantQRCode';
 import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
+import { buildTrialDates } from '../utils/trialService';
 
 interface NewTenantModalProps {
   isOpen: boolean;
@@ -252,18 +253,26 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
 
   const handlePlanChange = (val: PlanType) => {
     setPlan(val);
-    if (val === 'Basic') {
+    if (val === 'Trial20') {
+      setMrrAmount(0);
+      setMaxUsers(500);
+      setStatus('Trial');
+    } else if (val === 'Basic') {
       setMrrAmount(199);
       setMaxUsers(50);
+      if (status === 'Trial') setStatus('Ativo');
     } else if (val === 'Pro') {
       setMrrAmount(499);
       setMaxUsers(500);
+      if (status === 'Trial') setStatus('Ativo');
     } else if (val === 'Enterprise') {
       setMrrAmount(1299);
       setMaxUsers(5000);
+      if (status === 'Trial') setStatus('Ativo');
     } else if (val === 'Vitalicio') {
       setMrrAmount(0); // Sem mensalidade!
       setMaxUsers(99999);
+      setStatus('Ativo');
     }
   };
 
@@ -286,6 +295,8 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
     const formattedDate = new Date().toLocaleDateString('pt-BR');
     const finalEmail = fastOwnerEmail.trim() || `${slug}@empresa.com`;
     const finalPassword = fastOwnerPassword.trim() || generateRandomPassword();
+    const isFastTrial = fastPlan === 'Trial20';
+    const trialDates = isFastTrial ? buildTrialDates(20) : {};
 
     const createdTenant: Tenant = {
       id: `t-${Date.now()}`,
@@ -293,12 +304,13 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
       code,
       domain: `${slug}.saas.com`,
       plan: fastPlan,
-      status: 'Ativo',
+      status: isFastTrial ? 'Trial' : 'Ativo',
       endUsersCount: 1,
       maxUsers: fastPlan === 'Vitalicio' ? 99999 : 500,
-      mrrAmount: fastPlan === 'Vitalicio' ? 0 : 499,
+      mrrAmount: fastPlan === 'Vitalicio' || isFastTrial ? 0 : 499,
       isLifetime: fastPlan === 'Vitalicio',
       purchaseAmount: fastPlan === 'Vitalicio' ? 4000 : undefined,
+      ...trialDates,
       createdAt: formattedDate,
       contactEmail: finalEmail,
       contactPhone: '(11) 99999-9999',
@@ -367,18 +379,22 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
     const formattedDate = new Date().toLocaleDateString('pt-BR');
     const finalPassword = tempPassword.trim() || generateRandomPassword();
 
+    const isTrialSelection = plan === 'Trial20' || status === 'Trial';
+    const trialDates = isTrialSelection ? buildTrialDates(20) : {};
+
     const createdTenant: Tenant = {
       id: `t-${Date.now()}`,
       name: finalName,
       code: code || 'TC',
       domain: domain || `${generateSlug(finalName)}.saas.com`,
       plan,
-      status,
-      endUsersCount: status === 'Ativo' ? 1 : 0,
+      status: plan === 'Trial20' ? 'Trial' : status,
+      endUsersCount: status === 'Ativo' || isTrialSelection ? 1 : 0,
       maxUsers,
-      mrrAmount: plan === 'Vitalicio' ? 0 : (status === 'Trial' ? 0 : mrrAmount),
+      mrrAmount: plan === 'Vitalicio' || isTrialSelection ? 0 : mrrAmount,
       isLifetime: plan === 'Vitalicio',
       purchaseAmount: plan === 'Vitalicio' ? 4000 : undefined,
+      ...trialDates,
       createdAt: formattedDate,
       contactEmail: finalEmail,
       contactPhone: contactPhone.trim() || '',
@@ -796,7 +812,19 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                   <label className="block text-xs text-[#9CA3AF] font-semibold mb-2">
                     Plano de Contratação
                   </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFastPlan('Trial20')}
+                      className={`p-3 rounded-lg border text-xs font-semibold text-left transition cursor-pointer flex flex-col justify-between ${
+                        fastPlan === 'Trial20' 
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 shadow-sm shadow-cyan-500/20' 
+                          : 'bg-[#1F2937] border-[#374151] text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span className="font-bold text-cyan-300">⏱️ Teste de 20 Dias</span>
+                      <span className="text-[11px] text-cyan-200/80 mt-0.5">Grátis por 20 dias · Bloqueio auto</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => setFastPlan('Pro')}
@@ -1101,6 +1129,7 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                     onChange={(e) => handlePlanChange(e.target.value as PlanType)}
                     className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer font-medium"
                   >
+                    <option value="Trial20">⏱️ Teste de 20 Dias (Grátis - Bloqueia após 20 dias)</option>
                     <option value="Basic">Basic (R$ 199/mês)</option>
                     <option value="Pro">Pro (R$ 499/mês)</option>
                     <option value="Enterprise">Enterprise (R$ 1.299/mês)</option>
@@ -1115,8 +1144,8 @@ export const NewTenantModal: React.FC<NewTenantModalProps> = ({
                     onChange={(e) => setStatus(e.target.value as TenantStatus)}
                     className="w-full bg-[#020617] border border-[#1e293b] rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
                   >
-                    <option value="Ativo">Ativo</option>
-                    <option value="Trial">Trial (14 dias grátis)</option>
+                    <option value="Ativo">Ativo (Liberado)</option>
+                    <option value="Trial">Trial (Teste de 20 dias grátis)</option>
                     <option value="Inadimplente">Inadimplente</option>
                   </select>
                 </div>

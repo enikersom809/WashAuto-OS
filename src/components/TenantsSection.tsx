@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
 import { cleanDigits } from '../lib/formatters';
+import { getTenantTrialInfo } from '../utils/trialService';
 
 interface TenantsSectionProps {
   tenants: Tenant[];
@@ -224,6 +225,7 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
               className="bg-transparent text-xs text-slate-200 focus:outline-none w-full cursor-pointer font-medium"
             >
               <option value="all" className="bg-[#020617]">Todos os Planos</option>
+              <option value="Trial20" className="bg-[#020617]">⏱️ Teste de 20 Dias (Grátis)</option>
               <option value="Basic" className="bg-[#020617]">Basic (R$ 199)</option>
               <option value="Pro" className="bg-[#020617]">Pro (R$ 499)</option>
               <option value="Enterprise" className="bg-[#020617]">Enterprise (R$ 1.299)</option>
@@ -352,7 +354,9 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                   const isSelected = selectedTenants.includes(tenant.id);
                   const isEnterprise = tenant.plan === 'Enterprise';
                   const isPro = tenant.plan === 'Pro';
+                  const isTrial20 = tenant.plan === 'Trial20';
                   const isVitalicio = tenant.plan === 'Vitalicio' || tenant.isLifetime;
+                  const trialInfo = getTenantTrialInfo(tenant);
 
                   return (
                     <tr 
@@ -372,6 +376,8 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                         <div className="flex items-center gap-3">
                           <div className={`w-9 h-9 rounded font-bold flex items-center justify-center text-xs shrink-0 ${
                             isVitalicio ? 'bg-amber-500/15 border border-amber-500/30 text-amber-300' :
+                            isTrial20 && !trialInfo.isBlocked ? 'bg-cyan-500/15 border border-cyan-500/30 text-cyan-300' :
+                            trialInfo.blockReason === 'trial_expired' ? 'bg-rose-500/15 border border-rose-500/30 text-rose-400' :
                             tenant.status === 'Inadimplente' ? 'bg-rose-500/10 border border-rose-500/20 text-rose-400' :
                             tenant.status === 'Suspenso' ? 'bg-slate-500/10 border border-slate-500/20 text-slate-400' :
                             tenant.status === 'Trial' ? 'bg-amber-500/10 border border-amber-500/20 text-amber-400' :
@@ -402,40 +408,67 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
 
                       <td className="py-4 px-4">
                         <div className="flex flex-col gap-0.5">
-                          <span className={`inline-self-start px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          <span className={`self-start px-2 py-0.5 rounded-full text-[10px] font-bold border ${
                             isVitalicio ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-black' :
+                            isTrial20 ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' :
                             isEnterprise ? 'bg-purple-500/10 text-purple-400 border-purple-500/20' :
                             isPro ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' :
                             'bg-slate-500/10 text-slate-400 border-slate-500/20'
                           }`}>
-                            {isVitalicio ? 'Vitalício (Compra)' : tenant.plan}
+                            {isVitalicio ? 'Vitalício (Compra)' : isTrial20 ? 'Teste 20 Dias' : tenant.plan}
                           </span>
-                          <span className="text-[11px] text-slate-400 font-semibold mt-0.5">
-                            {isVitalicio ? 'R$ 4.000 (Licença Paga)' : `R$ ${tenant.mrrAmount.toLocaleString('pt-BR')}/mês`}
+                          <span className="text-[11px] text-slate-400 font-semibold mt-0.5 tabular-nums">
+                            {isVitalicio
+                              ? 'R$ 4.000 (Licença Paga)'
+                              : isTrial20
+                              ? 'Grátis (20 dias)'
+                              : `R$ ${tenant.mrrAmount.toLocaleString('pt-BR')}/mês`}
                           </span>
                         </div>
                       </td>
 
                       <td className="py-4 px-4">
-                        {tenant.status === 'Ativo' && (
-                          <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Ativo
-                          </span>
-                        )}
-                        {tenant.status === 'Inadimplente' && (
-                          <span className="flex items-center gap-1.5 text-xs font-medium text-rose-400">
-                            <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span> Inadimplente
-                          </span>
-                        )}
-                        {tenant.status === 'Trial' && (
-                          <span className="flex items-center gap-1.5 text-xs font-medium text-amber-400">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span> Trial
-                          </span>
-                        )}
-                        {tenant.status === 'Suspenso' && (
-                          <span className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
-                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Suspenso
-                          </span>
+                        {trialInfo.blockReason === 'trial_expired' ? (
+                          <div className="space-y-0.5">
+                            <span className="flex items-center gap-1.5 text-xs font-semibold text-rose-400">
+                              <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span> Bloqueado (20d expirado)
+                            </span>
+                            <span className="block text-[10px] text-slate-500 tabular-nums">
+                              Expirou em {trialInfo.trialEndsAtFormatted}
+                            </span>
+                          </div>
+                        ) : trialInfo.isTrial && !trialInfo.isBlocked ? (
+                          <div className="space-y-0.5">
+                            <span className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300 tabular-nums">
+                              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span> Teste · {trialInfo.daysRemaining}d restante(s)
+                            </span>
+                            <span className="block text-[10px] text-slate-500 tabular-nums">
+                              Bloqueio em {trialInfo.trialEndsAtFormatted}
+                            </span>
+                          </div>
+                        ) : (
+                          <>
+                            {tenant.status === 'Ativo' && (
+                              <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Ativo
+                              </span>
+                            )}
+                            {tenant.status === 'Inadimplente' && (
+                              <span className="flex items-center gap-1.5 text-xs font-medium text-rose-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span> Inadimplente
+                              </span>
+                            )}
+                            {tenant.status === 'Trial' && (
+                              <span className="flex items-center gap-1.5 text-xs font-medium text-amber-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span> Trial
+                              </span>
+                            )}
+                            {tenant.status === 'Suspenso' && (
+                              <span className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Suspenso
+                              </span>
+                            )}
+                          </>
                         )}
                       </td>
 
@@ -456,7 +489,20 @@ export const TenantsSection: React.FC<TenantsSectionProps> = ({
                         </div>
                       </td>
 
-                      <td className="py-4 px-6 text-right space-x-1">
+                      <td className="py-4 px-6 text-right space-x-1 whitespace-nowrap">
+                        {(trialInfo.isBlocked || trialInfo.isTrial) && (
+                          <button
+                            onClick={() => onEditTenant(tenant)}
+                            className={`px-2 py-1 rounded text-[11px] font-bold transition cursor-pointer mr-1 ${
+                              trialInfo.isBlocked
+                                ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                                : 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30'
+                            }`}
+                            title="Contratar plano e liberar aplicativo"
+                          >
+                            {trialInfo.isBlocked ? 'Liberar App' : 'Contratar'}
+                          </button>
+                        )}
                         <button
                           onClick={() => {
                             setCredentialTenant(tenant);

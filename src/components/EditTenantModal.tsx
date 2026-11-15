@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle, Key, Eye, EyeOff, RefreshCw, Copy, Check, Mail, Loader2, AlertCircle } from 'lucide-react';
+import { X, Pencil, Save, Trash2, Upload, Image as ImageIcon, CheckCircle, Key, Eye, EyeOff, RefreshCw, Copy, Check, Mail, Loader2, AlertCircle, Clock, ShieldCheck } from 'lucide-react';
 import { Tenant, PlanType, TenantStatus } from '../types';
 import { sendUserPasswordResetEmail } from '../lib/firebaseService';
+import { buildTrialDates, getTenantTrialInfo } from '../utils/trialService';
 
 interface EditTenantModalProps {
   tenant: Tenant | null;
@@ -160,16 +161,31 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
                 value={formData.plan}
                 onChange={(e) => {
                   const newPlan = e.target.value as PlanType;
+                  const trialDates = newPlan === 'Trial20' ? buildTrialDates(20) : {};
+                  const nextMrr =
+                    newPlan === 'Vitalicio' || newPlan === 'Trial20'
+                      ? 0
+                      : newPlan === 'Basic'
+                      ? 199
+                      : newPlan === 'Pro'
+                      ? 499
+                      : newPlan === 'Enterprise'
+                      ? 1299
+                      : formData.mrrAmount;
+
                   setFormData({ 
                     ...formData, 
                     plan: newPlan,
+                    status: newPlan === 'Trial20' ? 'Trial' : (formData.plan === 'Trial20' ? 'Ativo' : formData.status),
                     isLifetime: newPlan === 'Vitalicio',
                     purchaseAmount: newPlan === 'Vitalicio' ? 4000 : formData.purchaseAmount,
-                    mrrAmount: newPlan === 'Vitalicio' ? 0 : formData.mrrAmount
+                    mrrAmount: nextMrr,
+                    ...trialDates
                   });
                 }}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
               >
+                <option value="Trial20">⏱️ Teste de 20 Dias (Grátis - Bloqueia após 20 dias)</option>
                 <option value="Basic">Basic (R$ 199/mês)</option>
                 <option value="Pro">Pro (R$ 499/mês)</option>
                 <option value="Enterprise">Enterprise (R$ 1.299/mês)</option>
@@ -182,16 +198,75 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
               <label className="block text-slate-400 mb-1 font-medium">Status da Conta</label>
               <select
                 value={formData.status}
-                onChange={(e) => setFormData({ ...formData, status: e.target.value as TenantStatus })}
+                onChange={(e) => {
+                  const nextStatus = e.target.value as TenantStatus;
+                  const trialDates = nextStatus === 'Trial' && !formData.trialEndsAt ? buildTrialDates(20) : {};
+                  setFormData({ ...formData, status: nextStatus, ...trialDates });
+                }}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
               >
-                <option value="Ativo">Ativo</option>
-                <option value="Inadimplente">Inadimplente</option>
-                <option value="Trial">Trial</option>
-                <option value="Suspenso">Suspenso</option>
+                <option value="Ativo">Ativo (Liberado)</option>
+                <option value="Trial">Trial (Teste de 20 dias)</option>
+                <option value="Inadimplente">Inadimplente (Bloqueado)</option>
+                <option value="Suspenso">Suspenso (Bloqueado)</option>
               </select>
             </div>
           </div>
+
+          {(formData.plan === 'Trial20' || formData.status === 'Trial' || formData.trialEndsAt) && (() => {
+            const trialInfo = getTenantTrialInfo(formData);
+            return (
+              <div className={`p-3 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                trialInfo.isBlocked
+                  ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                  : 'bg-cyan-500/10 border-cyan-500/30 text-cyan-200'
+              }`}>
+                <div className="flex items-start gap-2">
+                  <Clock className={`w-4 h-4 shrink-0 mt-0.5 ${trialInfo.isBlocked ? 'text-rose-400' : 'text-cyan-400'}`} />
+                  <div>
+                    <p className="font-bold">
+                      {trialInfo.isBlocked
+                        ? `🔒 Período de Teste Expirado (Bloqueado desde ${trialInfo.trialEndsAtFormatted})`
+                        : trialInfo.isTrial
+                        ? `⏱️ Teste de 20 Dias Ativo · Faltam ${trialInfo.daysRemaining} dia(s) (até ${trialInfo.trialEndsAtFormatted})`
+                        : '✅ Plano Contratado e Liberado'}
+                    </p>
+                    <p className="text-[10px] opacity-85 mt-0.5">
+                      Ao concluir a contratação, selecione o plano pago (Basic/Pro/Enterprise/Vitalício) ou clique em Liberar Acesso.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const dates = buildTrialDates(20);
+                      setFormData({ ...formData, plan: 'Trial20', status: 'Trial', mrrAmount: 0, ...dates });
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-bold text-cyan-300 cursor-pointer"
+                  >
+                    +20 Dias
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const upgradedPlan = formData.plan === 'Trial20' ? 'Pro' : formData.plan;
+                      const upgradedMrr = upgradedPlan === 'Vitalicio' ? 0 : upgradedPlan === 'Basic' ? 199 : upgradedPlan === 'Enterprise' ? 1299 : 499;
+                      setFormData({
+                        ...formData,
+                        plan: upgradedPlan,
+                        status: 'Ativo',
+                        mrrAmount: formData.mrrAmount > 0 ? formData.mrrAmount : upgradedMrr
+                      });
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-[11px] font-black text-white flex items-center gap-1 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" /> Liberar Pós-Contratação
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>

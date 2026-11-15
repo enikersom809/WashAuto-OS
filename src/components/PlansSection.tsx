@@ -43,6 +43,8 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
   const [newPlanMaxUsers, setNewPlanMaxUsers] = useState<number>(200);
   const [newPlanFeatures, setNewPlanFeatures] = useState<string>('Suporte 24/7, Analytics, API Access');
   const [newPlanIsLifetime, setNewPlanIsLifetime] = useState<boolean>(false);
+  const [newPlanIsTrial, setNewPlanIsTrial] = useState<boolean>(false);
+  const [newPlanTrialDays, setNewPlanTrialDays] = useState<number>(20);
 
   // Revenue Metrics
   const totalBilled = invoices.reduce((acc, inv) => inv.status === 'Pago' ? acc + inv.amount : acc, 0);
@@ -65,12 +67,13 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
 
     const created: Plan = {
       id: `plan-${Date.now()}`,
-      name: newPlanIsLifetime ? 'Vitalicio' : 'Custom',
+      name: newPlanIsTrial ? 'Trial20' : newPlanIsLifetime ? 'Vitalicio' : 'Custom',
       displayName: newPlanName,
-      priceMonthly: newPlanPrice,
+      priceMonthly: newPlanIsTrial ? 0 : newPlanPrice,
       maxUsers: newPlanMaxUsers,
       isLifetime: newPlanIsLifetime,
-      billingCycle: newPlanIsLifetime ? 'lifetime' : 'monthly',
+      trialDays: newPlanIsTrial ? (newPlanTrialDays || 20) : undefined,
+      billingCycle: newPlanIsTrial ? 'trial' : newPlanIsLifetime ? 'lifetime' : 'monthly',
       features: newPlanFeatures.split(',').map(f => f.trim()).filter(Boolean),
       activeTenantsCount: 0
     };
@@ -79,6 +82,8 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
     setShowAddPlanModal(false);
     setNewPlanName('');
     setNewPlanIsLifetime(false);
+    setNewPlanIsTrial(false);
+    setNewPlanTrialDays(20);
     setNewPlanPrice(299);
   };
 
@@ -176,20 +181,28 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
           plans.map((plan) => {
             const tenantsOnPlan = tenants.filter(t => t.plan === plan.name).length;
             const isLifetime = plan.isLifetime || plan.name === 'Vitalicio';
+            const isTrialPlan = plan.billingCycle === 'trial' || plan.name === 'Trial20';
+            const trialDaysVal = plan.trialDays || 20;
 
             return (
               <div
                 key={plan.id}
                 className={`border rounded-xl p-6 flex flex-col justify-between relative transition hover:border-slate-700 ${
-                  isLifetime 
-                    ? 'bg-gradient-to-b from-amber-950/20 via-slate-950 to-slate-950 border-amber-500/50 shadow-xl shadow-amber-500/10'
-                    : plan.isPopular 
-                      ? 'bg-slate-950 border-indigo-500 shadow-xl shadow-indigo-500/10' 
-                      : 'bg-slate-950 border-slate-800'
+                  isTrialPlan
+                    ? 'bg-gradient-to-b from-cyan-950/25 via-slate-950 to-slate-950 border-cyan-500/50 shadow-xl shadow-cyan-500/10'
+                    : isLifetime 
+                      ? 'bg-gradient-to-b from-amber-950/20 via-slate-950 to-slate-950 border-amber-500/50 shadow-xl shadow-amber-500/10'
+                      : plan.isPopular 
+                        ? 'bg-slate-950 border-indigo-500 shadow-xl shadow-indigo-500/10' 
+                        : 'bg-slate-950 border-slate-800'
                 }`}
               >
-                {isLifetime ? (
-                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 text-[10px] uppercase font-black tracking-wider px-3 py-0.5 rounded-full shadow flex items-center gap-1">
+                {isTrialPlan ? (
+                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-cyan-500 to-emerald-400 text-slate-950 text-[10px] uppercase font-black tracking-wider px-3 py-0.5 rounded-full shadow flex items-center gap-1 whitespace-nowrap">
+                    ⏱️ Teste Grátis {trialDaysVal} Dias · Bloqueio Automático
+                  </span>
+                ) : isLifetime ? (
+                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 text-[10px] uppercase font-black tracking-wider px-3 py-0.5 rounded-full shadow flex items-center gap-1 whitespace-nowrap">
                     💎 Licença Vitalícia • Compra do App
                   </span>
                 ) : plan.isPopular ? (
@@ -200,7 +213,7 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
 
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className={`text-lg font-bold ${isLifetime ? 'text-amber-300' : 'text-slate-100'}`}>
+                    <h3 className={`text-lg font-bold ${isTrialPlan ? 'text-cyan-300' : isLifetime ? 'text-amber-300' : 'text-slate-100'}`}>
                       {plan.displayName}
                     </h3>
                     <div className="flex items-center gap-1">
@@ -224,14 +237,23 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
 
                   <div className="mb-4">
                     <span className="text-3xl font-extrabold text-slate-100">
-                      R$ {plan.priceMonthly.toLocaleString('pt-BR')}
+                      {isTrialPlan ? 'Grátis' : `R$ ${plan.priceMonthly.toLocaleString('pt-BR')}`}
                     </span>
-                    {isLifetime ? (
+                    {isTrialPlan ? (
+                      <span className="text-xs text-cyan-400 font-bold ml-1.5">
+                        / {trialDaysVal} dias de avaliação
+                      </span>
+                    ) : isLifetime ? (
                       <span className="text-xs text-amber-400 font-bold ml-1.5">
                         /pagamento único (vitalício)
                       </span>
                     ) : (
                       <span className="text-xs text-slate-500"> /mês</span>
+                    )}
+                    {isTrialPlan && (
+                      <p className="text-[11px] text-amber-300 font-medium mt-0.5">
+                        🔒 Bloqueia automaticamente após {trialDaysVal} dias até contratação
+                      </p>
                     )}
                     {isLifetime && (
                       <p className="text-[11px] text-emerald-400 font-medium mt-0.5">
@@ -241,13 +263,13 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                   </div>
 
                   <div className={`rounded-lg p-2.5 mb-5 flex items-center justify-between text-xs ${
-                    isLifetime ? 'bg-amber-950/30 border border-amber-500/20 text-amber-200' : 'bg-slate-900/60 text-slate-400'
+                    isTrialPlan ? 'bg-cyan-950/30 border border-cyan-500/20 text-cyan-200' : isLifetime ? 'bg-amber-950/30 border border-amber-500/20 text-amber-200' : 'bg-slate-900/60 text-slate-400'
                   }`}>
                     <span className="flex items-center gap-1.5">
-                      <Building2 className={`w-3.5 h-3.5 ${isLifetime ? 'text-amber-400' : 'text-indigo-400'}`} />
-                      {tenantsOnPlan} Empresas {isLifetime ? 'compraram o app' : 'assinantes'}
+                      <Building2 className={`w-3.5 h-3.5 ${isTrialPlan ? 'text-cyan-400' : isLifetime ? 'text-amber-400' : 'text-indigo-400'}`} />
+                      {tenantsOnPlan} Empresas {isTrialPlan ? 'em teste' : isLifetime ? 'compraram o app' : 'assinantes'}
                     </span>
-                    <span className={`font-semibold ${isLifetime ? 'text-amber-300' : 'text-slate-300'}`}>
+                    <span className={`font-semibold ${isTrialPlan ? 'text-cyan-300' : isLifetime ? 'text-amber-300' : 'text-slate-300'}`}>
                       {plan.maxUsers >= 10000 ? 'Usuários Ilimitados' : `Até ${plan.maxUsers} usuários`}
                     </span>
                   </div>
@@ -259,7 +281,7 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                     </p>
                     {plan.features.map((feat, idx) => (
                       <div key={idx} className="flex items-start gap-2 text-xs text-slate-300">
-                        <Check className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isLifetime ? 'text-amber-400' : 'text-emerald-400'}`} />
+                        <Check className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isTrialPlan ? 'text-cyan-400' : isLifetime ? 'text-amber-400' : 'text-emerald-400'}`} />
                         <span>{feat}</span>
                       </div>
                     ))}
@@ -271,7 +293,7 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
                     onClick={() => setEditingPlan(plan)}
                     className="flex-1 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 hover:border-slate-700 rounded-lg text-xs font-semibold transition cursor-pointer text-center"
                   >
-                    Editar Valores & Limites
+                    Editar Valores &amp; Limites
                   </button>
                   <button
                     onClick={() => setPlanToDelete(plan)}
@@ -581,40 +603,63 @@ export const PlansSection: React.FC<PlansSectionProps> = ({
 
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Modelo de Cobrança</label>
-                <div className="grid grid-cols-2 gap-2 mb-2">
+                <div className="grid grid-cols-3 gap-2 mb-2">
                   <button
                     type="button"
-                    onClick={() => { setNewPlanIsLifetime(false); if (newPlanPrice === 4000) setNewPlanPrice(299); }}
-                    className={`py-2 px-3 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
-                      !newPlanIsLifetime ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-slate-900 border-slate-800 text-slate-400'
+                    onClick={() => { setNewPlanIsTrial(true); setNewPlanIsLifetime(false); setNewPlanPrice(0); setNewPlanTrialDays(20); }}
+                    className={`py-2 px-2 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
+                      newPlanIsTrial ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300' : 'bg-slate-900 border-slate-800 text-slate-400'
                     }`}
                   >
-                    Mensalidade Recorrente
+                    ⏱️ Teste 20 Dias
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setNewPlanIsLifetime(true); setNewPlanPrice(4000); setNewPlanMaxUsers(99999); }}
-                    className={`py-2 px-3 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
+                    onClick={() => { setNewPlanIsTrial(false); setNewPlanIsLifetime(false); if (newPlanPrice === 4000 || newPlanPrice === 0) setNewPlanPrice(299); }}
+                    className={`py-2 px-2 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
+                      !newPlanIsLifetime && !newPlanIsTrial ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-slate-900 border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    Mensalidade
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setNewPlanIsTrial(false); setNewPlanIsLifetime(true); setNewPlanPrice(4000); setNewPlanMaxUsers(99999); }}
+                    className={`py-2 px-2 rounded-lg border text-xs font-semibold text-center transition cursor-pointer ${
                       newPlanIsLifetime ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-900 border-slate-800 text-slate-400'
                     }`}
                   >
-                    💎 Vitalício (Compra do App)
+                    💎 Vitalício
                   </button>
                 </div>
               </div>
 
-              <div>
-                <label className="block text-slate-400 mb-1 font-medium">
-                  {newPlanIsLifetime ? 'Preço de Venda do App (R$ - Pagamento Único)' : 'Preço Mensal (R$)'}
-                </label>
-                <input
-                  type="number"
-                  required
-                  value={newPlanPrice}
-                  onChange={(e) => setNewPlanPrice(Number(e.target.value))}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
-                />
-              </div>
+              {newPlanIsTrial ? (
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">Duração do Teste Grátis (Dias)</label>
+                  <input
+                    type="number"
+                    required
+                    min={1}
+                    value={newPlanTrialDays}
+                    onChange={(e) => setNewPlanTrialDays(Number(e.target.value))}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">
+                    {newPlanIsLifetime ? 'Preço de Venda do App (R$ - Pagamento Único)' : 'Preço Mensal (R$)'}
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    value={newPlanPrice}
+                    onChange={(e) => setNewPlanPrice(Number(e.target.value))}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Limite de Usuários</label>

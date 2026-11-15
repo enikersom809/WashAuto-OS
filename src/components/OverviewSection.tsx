@@ -178,6 +178,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
                       <div 
                         className={`h-full rounded-full ${
                           p.name === 'Vitalicio' || p.isLifetime ? 'bg-amber-400' :
+                          p.name === 'Trial20' ? 'bg-cyan-400' :
                           p.name === 'Enterprise' ? 'bg-purple-500' :
                           p.name === 'Pro' ? 'bg-indigo-500' : 'bg-slate-500'
                         }`}

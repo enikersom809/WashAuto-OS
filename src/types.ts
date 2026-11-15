@@ -1,4 +1,4 @@
-export type PlanType = 'Basic' | 'Pro' | 'Enterprise' | 'Vitalicio' | 'Custom';
+export type PlanType = 'Trial20' | 'Basic' | 'Pro' | 'Enterprise' | 'Vitalicio' | 'Custom';
 export type TenantStatus = 'Ativo' | 'Inadimplente' | 'Suspenso' | 'Trial';
 
 export interface Tenant {
@@ -46,6 +46,10 @@ export interface Tenant {
     coverageArea?: string;
     workingHours?: string;
   };
+  hideDefaultBanners?: boolean;
+  trialStartedAt?: string;
+  trialEndsAt?: string;
+  trialDays?: number;
 }
 
 export interface Plan {
@@ -58,7 +62,8 @@ export interface Plan {
   activeTenantsCount: number;
   isPopular?: boolean;
   isLifetime?: boolean;
-  billingCycle?: 'monthly' | 'yearly' | 'lifetime';
+  trialDays?: number;
+  billingCycle?: 'trial' | 'monthly' | 'yearly' | 'lifetime';
 }
 
 export type AdminRole = 'ROOT' | 'ADMIN' | 'SUPORTE' | 'AUDITOR';

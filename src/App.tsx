@@ -26,8 +26,10 @@ import { LoginModal } from './components/LoginModal';
 import { ClientPortal } from './components/ClientPortal';
 import { TenantWorkspace } from './components/TenantWorkspace';
 import { TotemMode } from './components/TotemMode';
+import { TrialBlockedScreen, ClientOrTotemBlockedScreen } from './components/TrialBlockedScreen';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SplashScreen } from './components/SplashScreen';
+import { getTenantTrialInfo } from './utils/trialService';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase';
@@ -112,15 +114,29 @@ export default function App() {
     const saved = localStorage.getItem('saas_master_plans');
     if (saved) {
       try {
-        const parsed: Plan[] = JSON.parse(saved);
+        let parsed: Plan[] = JSON.parse(saved);
+        let changed = false;
+
+        const hasTrial20 = parsed.some(p => p.id === 'plan-trial-20' || p.name === 'Trial20');
+        if (!hasTrial20) {
+          const trial20 = INITIAL_PLANS.find(p => p.id === 'plan-trial-20');
+          if (trial20) {
+            parsed = [trial20, ...parsed];
+            changed = true;
+          }
+        }
+
         const hasVitalicio = parsed.some(p => p.id === 'plan-vitalicio' || p.name === 'Vitalicio');
         if (!hasVitalicio) {
           const vitalicio = INITIAL_PLANS.find(p => p.id === 'plan-vitalicio');
           if (vitalicio) {
-            const updated = [...parsed, vitalicio];
-            localStorage.setItem('saas_master_plans', JSON.stringify(updated));
-            return updated;
+            parsed = [...parsed, vitalicio];
+            changed = true;
           }
+        }
+
+        if (changed) {
+          localStorage.setItem('saas_master_plans', JSON.stringify(parsed));
         }
         return parsed;
       } catch (e) {
@@ -345,6 +361,71 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // ⏱️ Verificação automática do Teste de 20 Dias (expiração -> bloqueio automático)
+  const [trialClockTick, setTrialClockTick] = useState<number>(() => Date.now());
+  const autoBlockedTenantsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTrialClockTick(Date.now());
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const now = new Date(trialClockTick);
+    const expiredTrials = tenants.filter((t) => {
+      if (t.status !== 'Trial') return false;
+      if (autoBlockedTenantsRef.current.has(t.id)) return false;
+      const info = getTenantTrialInfo(t, now);
+      return info.blockReason === 'trial_expired';
+    });
+
+    if (expiredTrials.length === 0) return;
+
+    expiredTrials.forEach((t) => autoBlockedTenantsRef.current.add(t.id));
+
+    setTenants((prev) =>
+      prev.map((t) => {
+        const match = expiredTrials.find((exp) => exp.id === t.id);
+        if (!match) return t;
+        const autoNote = 'Bloqueado automaticamente após término do Teste de 20 Dias. Aguardando contratação.';
+        const updatedTenant: Tenant = {
+          ...t,
+          status: 'Suspenso',
+          notes: t.notes?.includes('Teste de 20 Dias') ? t.notes : [t.notes, autoNote].filter(Boolean).join(' · ')
+        };
+        saveTenantToFirestore(updatedTenant).catch(console.error);
+        if (updatedTenant.contactEmail) {
+          saveCompanyEmailMapping(updatedTenant.contactEmail, updatedTenant);
+        }
+        return updatedTenant;
+      })
+    );
+  }, [tenants, trialClockTick]);
+
+  // 🔄 Consulta manual sob demanda para verificar liberação imediata pós-contratação
+  const handleRefreshSessionTenant = async (tenantId: string): Promise<boolean> => {
+    try {
+      const fresh = await getTenantByIdOrSlugFirestore(tenantId);
+      if (!fresh) return false;
+      setTenants((prev) =>
+        prev.some((t) => t.id === fresh.id)
+          ? prev.map((t) => (t.id === fresh.id ? fresh : t))
+          : [fresh, ...prev]
+      );
+      setAuthSession((prev) => {
+        if (!prev || prev.role === 'admin' || prev.tenant.id !== fresh.id) return prev;
+        return { ...prev, tenant: fresh };
+      });
+      const freshInfo = getTenantTrialInfo(fresh);
+      return !freshInfo.isBlocked;
+    } catch (err) {
+      console.error('Erro ao verificar liberação da empresa:', err);
+      return false;
+    }
+  };
 
   // 🔐 Verificação Resiliente de Sessão
   // - Auto-cura de perfil: Se o usuário estiver no Firebase Auth mas o documento /usuarios/{uid} ainda não existir,
@@ -1014,93 +1095,134 @@ export default function App() {
         )}
 
         {/* 2.2 MODO PORTAL DO CLIENTE */}
-        {authSession?.role === 'cliente' && (
-          <ClientPortal
-            tenant={tenants.find(t => t.id === authSession.tenant.id) || authSession.tenant}
-            clientInfo={authSession.clientInfo}
-            onLogout={handleLogout}
-            onNewAppointmentCreated={(newApp) => {
+        {authSession?.role === 'cliente' && (() => {
+          const liveClientTenant = tenants.find(t => t.id === authSession.tenant.id) || authSession.tenant;
+          const clientTrialInfo = getTenantTrialInfo(liveClientTenant, new Date(trialClockTick));
+          if (clientTrialInfo.isBlocked) {
+            return (
+              <ClientOrTotemBlockedScreen
+                tenant={liveClientTenant}
+                mode="cliente"
+                onRefreshStatus={() => handleRefreshSessionTenant(liveClientTenant.id)}
+                onLogout={handleLogout}
+              />
+            );
+          }
+          return (
+            <ClientPortal
+              tenant={liveClientTenant}
+              clientInfo={authSession.clientInfo}
+              onLogout={handleLogout}
+              onNewAppointmentCreated={(newApp) => {
 
-              const tenantId = authSession.tenant.id;
-              const appointmentItem = {
-                ...(newApp as any),
-                id: (newApp as any).id || `app-${Date.now()}`,
-                dateTime: newApp.dateTime,
-                clientName: newApp.clientName,
-                clientPhone: (newApp as any).clientPhone || '',
-                clientEmail: (newApp as any).clientEmail || '',
-                vehicle: newApp.vehicle,
-                plate: newApp.plate,
-                service: newApp.service,
-                price: newApp.price,
-                status: (newApp as any).status || 'Pendente',
-                addressSummary: (newApp as any).addressSummary || ''
-              };
+                const tenantId = liveClientTenant.id;
+                const appointmentItem = {
+                  ...(newApp as any),
+                  id: (newApp as any).id || `app-${Date.now()}`,
+                  dateTime: newApp.dateTime,
+                  clientName: newApp.clientName,
+                  clientPhone: (newApp as any).clientPhone || '',
+                  clientEmail: (newApp as any).clientEmail || '',
+                  vehicle: newApp.vehicle,
+                  plate: newApp.plate,
+                  service: newApp.service,
+                  price: newApp.price,
+                  status: (newApp as any).status || 'Pendente',
+                  addressSummary: (newApp as any).addressSummary || ''
+                };
 
-              // 🚀 Comunicação em tempo real Celular -> Computador via Firestore
-              saveAppointmentToFirestore(tenantId, appointmentItem).catch(console.error);
+                // 🚀 Comunicação em tempo real Celular -> Computador via Firestore
+                saveAppointmentToFirestore(tenantId, appointmentItem).catch(console.error);
 
-              try {
-                const existing = JSON.parse(localStorage.getItem(`saas_tenant_appointments_${tenantId}`) || '[]');
-                const updated = [appointmentItem, ...existing.filter((a: any) => a.id !== appointmentItem.id)];
-                localStorage.setItem(`saas_tenant_appointments_${tenantId}`, JSON.stringify(updated));
-                window.dispatchEvent(new Event('storage'));
-                window.dispatchEvent(new CustomEvent('saas_data_sync', { detail: { tenantId } }));
-              } catch (e) {
-                console.error('Failed to sync appointment in App.tsx:', e);
-              }
+                try {
+                  const existing = JSON.parse(localStorage.getItem(`saas_tenant_appointments_${tenantId}`) || '[]');
+                  const updated = [appointmentItem, ...existing.filter((a: any) => a.id !== appointmentItem.id)];
+                  localStorage.setItem(`saas_tenant_appointments_${tenantId}`, JSON.stringify(updated));
+                  window.dispatchEvent(new Event('storage'));
+                  window.dispatchEvent(new CustomEvent('saas_data_sync', { detail: { tenantId } }));
+                } catch (e) {
+                  console.error('Failed to sync appointment in App.tsx:', e);
+                }
 
-              const log: SystemLog = {
-                id: `log-${Date.now()}`,
-                timestamp: new Date().toLocaleString('pt-BR'),
-                level: 'INFO',
-                tenantName: authSession.tenant.name,
-                event: `Novo agendamento recebido via Portal do Cliente (${newApp.clientName} - ${newApp.service})`,
-                ipAddress: '177.12.89.201',
-                user: newApp.clientName
-              };
-              setLogs(prev => [log, ...prev]);
-            }}
-          />
-        )}
+                const log: SystemLog = {
+                  id: `log-${Date.now()}`,
+                  timestamp: new Date().toLocaleString('pt-BR'),
+                  level: 'INFO',
+                  tenantName: liveClientTenant.name,
+                  event: `Novo agendamento recebido via Portal do Cliente (${newApp.clientName} - ${newApp.service})`,
+                  ipAddress: '177.12.89.201',
+                  user: newApp.clientName
+                };
+                setLogs(prev => [log, ...prev]);
+              }}
+            />
+          );
+        })()}
 
         {/* 2.3 MODO DONO DO LAVA-JATO (TENANT WORKSPACE - DASHBOARD OPERACIONAL) */}
-        {authSession?.role === 'empresa' && (
-          <TenantWorkspace
-            tenant={authSession.tenant}
-            onExitImpersonation={handleLogout}
-            onReplaySplash={() => setShowSplash(true)}
-            onOpenTotemMode={() => {
-              setAuthSession({
-                role: 'totem',
-                tenant: authSession.tenant
-              });
-            }}
-            onUpdateTenant={(updated) => {
-              setTenants(prev => prev.map(t => t.id === updated.id ? updated : t));
-              setAuthSession(prev => prev ? { ...prev, tenant: updated } : null);
-              saveTenantToFirestore(updated).catch(console.error);
-            }}
-          />
-        )}
+        {authSession?.role === 'empresa' && (() => {
+          const liveEmpresaTenant = tenants.find(t => t.id === authSession.tenant.id) || authSession.tenant;
+          const empresaTrialInfo = getTenantTrialInfo(liveEmpresaTenant, new Date(trialClockTick));
+          if (empresaTrialInfo.isBlocked) {
+            return (
+              <TrialBlockedScreen
+                tenant={liveEmpresaTenant}
+                trialInfo={empresaTrialInfo}
+                onRefreshStatus={() => handleRefreshSessionTenant(liveEmpresaTenant.id)}
+                onLogout={handleLogout}
+              />
+            );
+          }
+          return (
+            <TenantWorkspace
+              tenant={liveEmpresaTenant}
+              onExitImpersonation={handleLogout}
+              onReplaySplash={() => setShowSplash(true)}
+              onOpenTotemMode={() => {
+                setAuthSession({
+                  role: 'totem',
+                  tenant: liveEmpresaTenant
+                });
+              }}
+              onUpdateTenant={(updated) => {
+                setTenants(prev => prev.map(t => t.id === updated.id ? updated : t));
+                setAuthSession(prev => prev ? { ...prev, tenant: updated } : null);
+                saveTenantToFirestore(updated).catch(console.error);
+              }}
+            />
+          );
+        })()}
 
         {/* 2.5 MODO TOTEM DE AUTOATENDIMENTO (TABLET) */}
-        {authSession?.role === 'totem' && (
-          <TotemMode
-            tenant={authSession.tenant}
-            customExitPin={authSession.tenant.tempPassword || '1234'}
-            onExitTotem={() => {
-              const prevTenant = authSession.tenant;
-              setAuthSession({
-                role: 'empresa',
-                tenant: prevTenant,
-                userEmail: prevTenant.contactEmail || 'empresa@lavajato.com',
-                userName: prevTenant.ownerName || prevTenant.name,
-                uid: `emp-${prevTenant.id}`
-              });
-            }}
-          />
-        )}
+        {authSession?.role === 'totem' && (() => {
+          const liveTotemTenant = tenants.find(t => t.id === authSession.tenant.id) || authSession.tenant;
+          const totemTrialInfo = getTenantTrialInfo(liveTotemTenant, new Date(trialClockTick));
+          if (totemTrialInfo.isBlocked) {
+            return (
+              <ClientOrTotemBlockedScreen
+                tenant={liveTotemTenant}
+                mode="totem"
+                onRefreshStatus={() => handleRefreshSessionTenant(liveTotemTenant.id)}
+                onLogout={handleLogout}
+              />
+            );
+          }
+          return (
+            <TotemMode
+              tenant={liveTotemTenant}
+              customExitPin={liveTotemTenant.tempPassword || '1234'}
+              onExitTotem={() => {
+                setAuthSession({
+                  role: 'empresa',
+                  tenant: liveTotemTenant,
+                  userEmail: liveTotemTenant.contactEmail || 'empresa@lavajato.com',
+                  userName: liveTotemTenant.ownerName || liveTotemTenant.name,
+                  uid: `emp-${liveTotemTenant.id}`
+                });
+              }}
+            />
+          );
+        })()}
 
         {/* 2.4 MODO SUPER ADMIN (ROOT SAAS DASHBOARD) */}
         {authSession?.role === 'admin' && (

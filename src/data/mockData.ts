@@ -4,6 +4,24 @@ export const INITIAL_TENANTS: Tenant[] = [];
 
 export const INITIAL_PLANS: Plan[] = [
   {
+    id: 'plan-trial-20',
+    name: 'Trial20',
+    displayName: 'Teste de 20 Dias (Grátis)',
+    priceMonthly: 0,
+    maxUsers: 500,
+    trialDays: 20,
+    billingCycle: 'trial',
+    isPopular: false,
+    features: [
+      'Acesso completo para testes por 20 dias corridos',
+      'Fila de Lavagem, Pátio, Agenda e Portal do Cliente',
+      'Leva & Traz, Fluxo de Caixa, Troca de Óleo e WhatsApp',
+      'Banners Promocionais e Notificações Push no App',
+      'Bloqueio automático após 20 dias até contratação de plano'
+    ],
+    activeTenantsCount: 0
+  },
+  {
     id: 'plan-basic',
     name: 'Basic',
     displayName: 'Plano Básico',
