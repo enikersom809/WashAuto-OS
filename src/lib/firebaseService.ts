@@ -3330,3 +3330,390 @@ export function subscribeToTenantLevaETraz(
     return () => {};
   }
 }
+
+// ================= 12. EXCLUSÃO COMPLETA DE CLIENTES & TOMBSTONES EM TEMPO REAL =================
+export interface DeletedClientTombstone {
+  id: string;
+  tenantId: string;
+  dedupeKey?: string;
+  normName?: string;
+  phoneDigits9?: string;
+  email?: string;
+  docIds?: string[];
+  deletedAt: number;
+  deletedAtIso: string;
+}
+
+function normalizeClientNameForDelete(name?: string): string {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+function getPhoneLast9ForDelete(phone?: string): string {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 8 ? digits.slice(-9) : '';
+}
+
+function doesRawRecordMatchTarget(
+  raw: Record<string, any>,
+  rawId: string,
+  target: {
+    normName: string;
+    phoneDigits9: string;
+    emailLower: string;
+    docIdsSet: Set<string>;
+  }
+): boolean {
+  if (rawId && target.docIdsSet.has(rawId)) return true;
+  if (raw.id && target.docIdsSet.has(String(raw.id))) return true;
+  if (raw.uid && target.docIdsSet.has(String(raw.uid))) return true;
+
+  const rawPhone9 = getPhoneLast9ForDelete(raw.telefone || raw.phone || raw.clientPhone);
+  if (target.phoneDigits9 && rawPhone9 && target.phoneDigits9 === rawPhone9) return true;
+
+  const rawEmail = String(raw.email || raw.clientEmail || '').trim().toLowerCase();
+  if (target.emailLower && rawEmail && target.emailLower === rawEmail) return true;
+
+  const rawNormName = normalizeClientNameForDelete(
+    raw.nomeCompleto || raw.name || raw.nome || raw.clientName
+  );
+  if (target.normName && rawNormName && target.normName === rawNormName) {
+    if (!target.phoneDigits9 || !rawPhone9 || target.phoneDigits9 === rawPhone9) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export async function deleteClientEverywhereFirestore(params: {
+  tenantId: string;
+  cleanTenantSlug?: string;
+  cliente: {
+    id?: string;
+    nomeCompleto: string;
+    telefone?: string;
+    email?: string;
+    dedupeKey?: string;
+    sourceDocIds?: string[];
+  };
+}): Promise<{ success: boolean; tombstone: DeletedClientTombstone }> {
+  const { tenantId, cleanTenantSlug, cliente } = params;
+  const cleanTId = cleanDocId(tenantId);
+  const deletedAt = Date.now();
+  const deletedAtIso = new Date(deletedAt).toISOString();
+
+  const phoneDigits = String(cliente.telefone || '').replace(/\D/g, '');
+  const phoneDigits9 = getPhoneLast9ForDelete(cliente.telefone);
+  const emailLower = String(cliente.email || '').trim().toLowerCase();
+  const normName = normalizeClientNameForDelete(cliente.nomeCompleto);
+
+  const rawDocIds = [
+    cliente.id,
+    ...(cliente.sourceDocIds || []),
+    phoneDigits,
+    emailLower ? emailLower.replace(/[^a-z0-9]/g, '_') : '',
+    cliente.nomeCompleto ? `c-${cleanDocId(cliente.nomeCompleto)}` : ''
+  ]
+    .map(v => String(v || '').trim())
+    .filter(Boolean);
+
+  const docIdsSet = new Set<string>(rawDocIds);
+
+  const tombstoneId = cleanDocId(
+    cliente.dedupeKey ||
+      (phoneDigits9
+        ? `tel_${phoneDigits9}`
+        : emailLower
+        ? `mail_${emailLower}`
+        : `name_${normName || Date.now()}`)
+  );
+
+  const tombstone: DeletedClientTombstone = {
+    id: tombstoneId,
+    tenantId: cleanTId,
+    dedupeKey: cliente.dedupeKey || tombstoneId,
+    normName,
+    phoneDigits9,
+    email: emailLower,
+    docIds: Array.from(docIdsSet),
+    deletedAt,
+    deletedAtIso
+  };
+
+  // 1. Grava tombstone no localStorage imediatamente (offline-first)
+  try {
+    const keysToUpdate = Array.from(
+      new Set([`saas_deleted_clients_${tenantId}`, `saas_deleted_clients_${cleanTId}`])
+    );
+    keysToUpdate.forEach((storageKey) => {
+      const existing: DeletedClientTombstone[] = JSON.parse(
+        localStorage.getItem(storageKey) || '[]'
+      );
+      const updated = [
+        tombstone,
+        ...existing.filter((item) => item.id !== tombstone.id)
+      ];
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+    });
+  } catch (_) {}
+
+  // 2. Grava tombstone no Firestore (/tenants/{cleanTId}/deleted_clients)
+  try {
+    await ensureFirebaseAuthSession();
+    await withTimeout(
+      setDoc(
+        doc(db, 'tenants', cleanTId, 'deleted_clients', tombstoneId),
+        removeUndefinedFields(tombstone),
+        { merge: true }
+      ),
+      5000
+    );
+  } catch (tombErr) {
+    console.warn('[DeleteClient] Erro ao gravar tombstone no Firestore:', tombErr);
+  }
+
+  // 3. Limpa caches locais do Totem e do Perfil de Cliente no dispositivo atual
+  try {
+    const totemKeys = Array.from(
+      new Set([`saas_totem_clients_${tenantId}`, `saas_totem_clients_${cleanTId}`])
+    );
+    totemKeys.forEach((tKey) => {
+      const rawTotem = localStorage.getItem(tKey);
+      if (!rawTotem) return;
+      const list = JSON.parse(rawTotem);
+      if (Array.isArray(list)) {
+        const filtered = list.filter(
+          (item: any) =>
+            !doesRawRecordMatchTarget(item, String(item?.id || item?.uid || ''), {
+              normName,
+              phoneDigits9,
+              emailLower,
+              docIdsSet
+            })
+        );
+        localStorage.setItem(tKey, JSON.stringify(filtered));
+      }
+    });
+
+    const profileKeys = Array.from(
+      new Set([`saas_client_profile_${tenantId}`, `saas_client_profile_${cleanTId}`])
+    );
+    profileKeys.forEach((pKey) => {
+      const rawProfile = localStorage.getItem(pKey);
+      if (!rawProfile) return;
+      const p = JSON.parse(rawProfile);
+      if (
+        p &&
+        doesRawRecordMatchTarget(p, String(p.id || p.uid || ''), {
+          normName,
+          phoneDigits9,
+          emailLower,
+          docIdsSet
+        })
+      ) {
+        localStorage.removeItem(pKey);
+      }
+    });
+  } catch (_) {}
+
+  // 4. Exclui os documentos reais em TODAS as coleções de clientes do Firestore
+  const targetMeta = { normName, phoneDigits9, emailLower, docIdsSet };
+  const tenantKeys = Array.from(
+    new Set(
+      [
+        tenantId,
+        cleanTId,
+        cleanTenantSlug || '',
+        cleanTenantSlug ? `t-${cleanTenantSlug}` : ''
+      ].filter(Boolean)
+    )
+  );
+
+  const deleteTasks: Promise<any>[] = [];
+
+  // 4A. Delete direto pelos IDs conhecidos em /clientes e /tenants/{cleanTId}/clients
+  docIdsSet.forEach((rawId) => {
+    const safeId = cleanDocId(rawId);
+    if (!safeId || safeId.startsWith('c-tel_') || safeId.startsWith('c-mail_') || safeId.startsWith('c-name_')) {
+      return;
+    }
+    deleteTasks.push(deleteDoc(doc(db, 'clientes', safeId)).catch(() => {}));
+    deleteTasks.push(
+      deleteDoc(doc(db, 'tenants', cleanTId, 'clients', safeId)).catch(() => {})
+    );
+  });
+
+  // 4B. Varre /clientes por empresa para pegar documentos cujo ID difira do ID exibido
+  tenantKeys.forEach((empKey) => {
+    deleteTasks.push(
+      getDocs(query(collection(db, 'clientes'), where('empresa', '==', empKey)))
+        .then((snap) =>
+          Promise.all(
+            snap.docs.map((d) =>
+              doesRawRecordMatchTarget(d.data(), d.id, targetMeta)
+                ? deleteDoc(d.ref).catch(() => {})
+                : Promise.resolve()
+            )
+          )
+        )
+        .catch(() => {})
+    );
+  });
+
+  // 4C. Varre /tenants/{cleanTId}/clients para remover todos os registros equivalentes
+  deleteTasks.push(
+    getDocs(collection(db, 'tenants', cleanTId, 'clients'))
+      .then((snap) =>
+        Promise.all(
+          snap.docs.map((d) =>
+            doesRawRecordMatchTarget(d.data(), d.id, targetMeta)
+              ? deleteDoc(d.ref).catch(() => {})
+              : Promise.resolve()
+          )
+        )
+      )
+      .catch(() => {})
+  );
+
+  // 4D. Varre /clients (coleção raiz em inglês usada pelo cadastro do PWA)
+  if (emailLower) {
+    deleteTasks.push(
+      getDocs(query(collection(db, 'clients'), where('email', '==', emailLower)))
+        .then((snap) =>
+          Promise.all(
+            snap.docs.map((d) => {
+              const data = d.data();
+              const belongsToTenant =
+                !data.tenantId || tenantKeys.includes(String(data.tenantId));
+              return belongsToTenant
+                ? deleteDoc(d.ref).catch(() => {})
+                : Promise.resolve();
+            })
+          )
+        )
+        .catch(() => {})
+    );
+  }
+
+  tenantKeys.forEach((empKey) => {
+    deleteTasks.push(
+      getDocs(query(collection(db, 'clients'), where('tenantId', '==', empKey)))
+        .then((snap) =>
+          Promise.all(
+            snap.docs.map((d) =>
+              doesRawRecordMatchTarget(d.data(), d.id, targetMeta)
+                ? deleteDoc(d.ref).catch(() => {})
+                : Promise.resolve()
+            )
+          )
+        )
+        .catch(() => {})
+    );
+  });
+
+  // 4E. Remove contas de cliente vinculadas em /usuarios deste lava-jato
+  deleteTasks.push(
+    getDocs(query(collection(db, 'usuarios'), where('role', '==', 'cliente')))
+      .then((snap) =>
+        Promise.all(
+          snap.docs.map((d) => {
+            const data = d.data();
+            const belongsToTenant =
+              tenantKeys.includes(String(data.tenantId || '')) ||
+              tenantKeys.includes(String(data.empresaId || ''));
+            if (!belongsToTenant) return Promise.resolve();
+            return doesRawRecordMatchTarget(data, d.id, targetMeta)
+              ? deleteDoc(d.ref).catch(() => {})
+              : Promise.resolve();
+          })
+        )
+      )
+      .catch(() => {})
+  );
+
+  try {
+    await withTimeout(Promise.allSettled(deleteTasks), 7000);
+    return { success: true, tombstone };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `tenants/${cleanTId}/clients`);
+    return { success: false, tombstone };
+  }
+}
+
+export function subscribeToDeletedClientsFirestore(
+  tenantId: string,
+  callback: (items: DeletedClientTombstone[]) => void
+): () => void {
+  try {
+    const cleanTId = cleanDocId(tenantId);
+    const colRef = collection(db, 'tenants', cleanTId, 'deleted_clients');
+    const unsubscribe = onSnapshot(
+      colRef,
+      (snapshot) => {
+        const items: DeletedClientTombstone[] = [];
+        snapshot.forEach((docSnap) => {
+          items.push({
+            id: docSnap.id,
+            ...docSnap.data()
+          } as DeletedClientTombstone);
+        });
+        try {
+          localStorage.setItem(`saas_deleted_clients_${cleanTId}`, JSON.stringify(items));
+        } catch (_) {}
+        callback(items);
+      },
+      (err) => {
+        console.warn('subscribeToDeletedClientsFirestore error:', err);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn('subscribeToDeletedClientsFirestore init error:', err);
+    return () => {};
+  }
+}
+
+export async function clearClientTombstonesOnRegisterFirestore(params: {
+  tenantId: string;
+  nomeCompleto: string;
+  telefone?: string;
+  email?: string;
+}): Promise<void> {
+  const cleanTId = cleanDocId(params.tenantId);
+  const phoneDigits9 = getPhoneLast9ForDelete(params.telefone);
+  const emailLower = String(params.email || '').trim().toLowerCase();
+  const normName = normalizeClientNameForDelete(params.nomeCompleto);
+
+  const matchesTombstone = (t: DeletedClientTombstone) =>
+    (phoneDigits9 && t.phoneDigits9 === phoneDigits9) ||
+    (emailLower && t.email === emailLower) ||
+    (normName && t.normName === normName);
+
+  try {
+    const keys = Array.from(
+      new Set([`saas_deleted_clients_${params.tenantId}`, `saas_deleted_clients_${cleanTId}`])
+    );
+    keys.forEach((k) => {
+      const raw = localStorage.getItem(k);
+      if (!raw) return;
+      const list: DeletedClientTombstone[] = JSON.parse(raw);
+      localStorage.setItem(k, JSON.stringify(list.filter((t) => !matchesTombstone(t))));
+    });
+  } catch (_) {}
+
+  try {
+    const snap = await getDocs(collection(db, 'tenants', cleanTId, 'deleted_clients'));
+    await Promise.all(
+      snap.docs.map((d) => {
+        const data = d.data() as DeletedClientTombstone;
+        return matchesTombstone(data) ? deleteDoc(d.ref).catch(() => {}) : Promise.resolve();
+      })
+    );
+  } catch (_) {}
+}
+

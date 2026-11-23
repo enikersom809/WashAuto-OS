@@ -202,6 +202,22 @@
         "createdAt": { "type": "string" }
       },
       "required": ["tenantId", "title", "body", "newStatus", "createdAt"]
+    },
+    "deletedClients": {
+      "title": "Deleted Client Tombstones",
+      "description": "Tombstones of deleted test or removed clients so old appointments and caches do not resurrect them",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "dedupeKey": { "type": "string" },
+        "normName": { "type": "string" },
+        "phoneDigits9": { "type": "string" },
+        "email": { "type": "string" },
+        "docIds": { "type": "array", "items": { "type": "string" } },
+        "deletedAt": { "type": "number" },
+        "deletedAtIso": { "type": "string" }
+      },
+      "required": ["tenantId", "deletedAt"]
     }
   },
   "firestore": {
@@ -260,6 +276,10 @@
     "/tenants/{tenantId}/client_notifications/{notificationId}": {
       "schema": "clientNotifications",
       "description": "Client vehicle status update notifications"
+    },
+    "/tenants/{tenantId}/deleted_clients/{tombstoneId}": {
+      "schema": "deletedClients",
+      "description": "Tombstones for deleted clients per tenant"
     }
   }
 }

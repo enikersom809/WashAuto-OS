@@ -32,6 +32,12 @@ import {
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { formatCelular, formatCep, cleanDigits } from '../lib/formatters';
+import {
+  DeletedClientTombstone,
+  deleteClientEverywhereFirestore,
+  subscribeToDeletedClientsFirestore,
+  clearClientTombstonesOnRegisterFirestore
+} from '../lib/firebaseService';
 
 export interface Veiculo {
   tipo: 'Carro' | 'Moto';
@@ -58,6 +64,8 @@ export interface Cliente {
   empresa: string;
   tenantId?: string;
   dataCadastro?: any;
+  _dedupeKey?: string;
+  _sourceDocIds?: string[];
 }
 
 export interface ClientesWorkspaceProps {
@@ -122,17 +130,84 @@ function cleanDocId(id: string): string {
   return String(id).trim().replace(/[^a-zA-Z0-9_\-.:@]/g, '_') || `doc-${Date.now()}`;
 }
 
+function parseRecordTimestampMs(raw: any): number {
+  const candidate = raw?.updatedAt || raw?.dataCadastro || raw?.createdAt;
+  if (!candidate) return 0;
+  if (typeof candidate === 'number') return candidate;
+  if (typeof candidate?.toMillis === 'function') {
+    try {
+      return candidate.toMillis();
+    } catch {
+      return 0;
+    }
+  }
+  const brMatch = String(candidate).trim().match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[^\d]+(\d{2}):(\d{2}))?/);
+  if (brMatch) {
+    const d = new Date(
+      Number(brMatch[3]),
+      Number(brMatch[2]) - 1,
+      Number(brMatch[1]),
+      Number(brMatch[4] || 0),
+      Number(brMatch[5] || 0)
+    );
+    return isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+  const ms = new Date(candidate).getTime();
+  return isNaN(ms) ? 0 : ms;
+}
+
+function isRecordSuppressedByTombstone(
+  raw: any,
+  tombstones: DeletedClientTombstone[]
+): boolean {
+  if (!tombstones || tombstones.length === 0 || !raw) return false;
+
+  const rawId = String(raw.id || raw.uid || '').trim();
+  const rawPhoneDigits = cleanDigits(String(raw.telefone || raw.phone || raw.clientPhone || ''));
+  const rawPhone9 = rawPhoneDigits.length >= 8 ? rawPhoneDigits.slice(-9) : '';
+  const rawEmail = String(raw.email || raw.clientEmail || '').trim().toLowerCase();
+  const rawNormName = String(raw.nomeCompleto || raw.name || raw.nome || raw.clientName || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+
+  const recordTs = parseRecordTimestampMs(raw);
+
+  return tombstones.some((t) => {
+    const idMatch = Boolean(rawId && Array.isArray(t.docIds) && t.docIds.includes(rawId));
+    const phoneMatch = Boolean(t.phoneDigits9 && rawPhone9 && t.phoneDigits9 === rawPhone9);
+    const emailMatch = Boolean(t.email && rawEmail && t.email === rawEmail);
+    const nameMatch = Boolean(
+      t.normName &&
+        rawNormName &&
+        t.normName === rawNormName &&
+        (!t.phoneDigits9 || !rawPhone9 || t.phoneDigits9 === rawPhone9)
+    );
+
+    if (!idMatch && !phoneMatch && !emailMatch && !nameMatch) return false;
+    // Suprime qualquer registro criado até o momento da exclusão (impede ressuscitação por agendamentos/caches antigos)
+    return recordTs <= (t.deletedAt || 0);
+  });
+}
+
 /**
  * Função de mesclagem e deduplicação inteligente de clientes vindos de múltiplas fontes:
  * /clientes, /tenants/{tenantId}/clients, /usuarios, agendamentos e cache local do totem.
  */
-function mergeAndDeduplicateClients(sourceGroups: any[][]): Cliente[] {
+function mergeAndDeduplicateClients(
+  sourceGroups: any[][],
+  deletedTombstones: DeletedClientTombstone[] = []
+): Cliente[] {
   const mapByKey = new Map<string, Cliente>();
 
   for (const list of sourceGroups) {
     if (!Array.isArray(list)) continue;
     for (const raw of list) {
       if (!raw) continue;
+      if (isRecordSuppressedByTombstone(raw, deletedTombstones)) continue;
+
       const nomeCompleto = String(raw.nomeCompleto || raw.name || raw.nome || raw.clientName || '').trim();
       if (!nomeCompleto) continue;
 
@@ -191,6 +266,8 @@ function mergeAndDeduplicateClients(sourceGroups: any[][]): Cliente[] {
         dedupeKey = `name_${normName}_${normalizePlate(firstPlate)}`;
       }
 
+      const rawDocIds = [raw.id, raw.uid].map(v => String(v || '').trim()).filter(Boolean);
+
       const existing = mapByKey.get(dedupeKey);
       if (!existing) {
         mapByKey.set(dedupeKey, {
@@ -208,9 +285,15 @@ function mergeAndDeduplicateClients(sourceGroups: any[][]): Cliente[] {
           veiculos: formattedVehicles,
           empresa: raw.empresa || raw.tenantId || '',
           tenantId: raw.tenantId || raw.empresa || '',
-          dataCadastro: raw.dataCadastro || raw.createdAt || raw.updatedAt || new Date().toISOString()
+          dataCadastro: raw.dataCadastro || raw.createdAt || raw.updatedAt || new Date().toISOString(),
+          _dedupeKey: dedupeKey,
+          _sourceDocIds: rawDocIds
         });
       } else {
+        // Registra todos os IDs originais mesclados para garantir exclusão completa
+        const mergedIds = new Set([...(existing._sourceDocIds || []), ...rawDocIds]);
+        existing._sourceDocIds = Array.from(mergedIds);
+
         // Enriquecimento com dados adicionais
         if (!existing.telefone && rawPhone) existing.telefone = rawPhone;
         if (!existing.email && email) existing.email = email;
@@ -264,12 +347,25 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({
   const [usuariosDb, setUsuariosDb] = useState<any[]>([]);
   const [localTotemClients, setLocalTotemClients] = useState<any[]>([]);
   const [realtimeAppointments, setRealtimeAppointments] = useState<any[]>([]);
+  const [deletedTombstones, setDeletedTombstones] = useState<DeletedClientTombstone[]>(() => {
+    if (typeof window === 'undefined' || !tenantId) return [];
+    try {
+      const cId = cleanDocId(tenantId);
+      const raw =
+        localStorage.getItem(`saas_deleted_clients_${cId}`) ||
+        localStorage.getItem(`saas_deleted_clients_${tenantId}`);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Feedback
   const [feedback, setFeedback] = useState<{ tipo: 'sucesso' | 'erro'; mensagem: string } | null>(null);
   const [isBuscandoCep, setIsBuscandoCep] = useState<boolean>(false);
   const [isSalvando, setIsSalvando] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [deletingClientId, setDeletingClientId] = useState<string | null>(null);
 
   // Estados para o Formulário de Cadastro Manual/Interno (Balcão)
   const [nomeCompleto, setNomeCompleto] = useState('');
@@ -460,6 +556,22 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({
       unsubscribers.push(unsubApps);
     } catch (_) {}
 
+    // F) Escuta tombstones de clientes excluídos no Firestore (/tenants/{cleanTId}/deleted_clients)
+    const unsubDeleted = subscribeToDeletedClientsFirestore(tenantId, (remoteTombstones) => {
+      setDeletedTombstones((prev) => {
+        const mergedMap = new Map<string, DeletedClientTombstone>();
+        prev.forEach((item) => mergedMap.set(item.id, item));
+        remoteTombstones.forEach((item) => {
+          const existing = mergedMap.get(item.id);
+          if (!existing || (item.deletedAt || 0) >= (existing.deletedAt || 0)) {
+            mergedMap.set(item.id, item);
+          }
+        });
+        return Array.from(mergedMap.values());
+      });
+    });
+    unsubscribers.push(unsubDeleted);
+
     // Escuta evento de storage para sincronização instantânea de totem
     const handleStorageEvent = () => loadLocalClients();
     window.addEventListener('storage', handleStorageEvent);
@@ -472,17 +584,28 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({
     };
   }, [tenantId, cleanTId, cleanTenantSlug, loadLocalClients]);
 
-  // Agrega e deduplica todas as fontes em uma lista única
+  // Agrega e deduplica todas as fontes em uma lista única (filtrando tombstones de exclusão)
   const clientes = useMemo(() => {
-    return mergeAndDeduplicateClients([
-      clientesDb,
-      subcollectionDb,
-      usuariosDb,
-      realtimeAppointments,
-      appointments,
-      localTotemClients
-    ]);
-  }, [clientesDb, subcollectionDb, usuariosDb, realtimeAppointments, appointments, localTotemClients]);
+    return mergeAndDeduplicateClients(
+      [
+        clientesDb,
+        subcollectionDb,
+        usuariosDb,
+        realtimeAppointments,
+        appointments,
+        localTotemClients
+      ],
+      deletedTombstones
+    );
+  }, [
+    clientesDb,
+    subcollectionDb,
+    usuariosDb,
+    realtimeAppointments,
+    appointments,
+    localTotemClients,
+    deletedTombstones
+  ]);
 
   // Ação manual de recarregar dados
   const handleManualRefresh = () => {
@@ -588,6 +711,21 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({
         updatedAt: new Date().toISOString()
       };
 
+      // Limpa eventual tombstone anterior se esse cliente estiver sendo recadastrado manualmente no balcão
+      await clearClientTombstonesOnRegisterFirestore({
+        tenantId,
+        nomeCompleto: nomeCompleto.trim(),
+        telefone,
+        email: emailForm.trim().toLowerCase()
+      });
+      setDeletedTombstones((prev) =>
+        prev.filter((t) => {
+          const p9 = cleanPhoneDigits.length >= 8 ? cleanPhoneDigits.slice(-9) : '';
+          const eLower = emailForm.trim().toLowerCase();
+          return !(p9 && t.phoneDigits9 === p9) && !(eLower && t.email === eLower);
+        })
+      );
+
       // Salva em /clientes e na subcoleção /tenants/{tenantId}/clients
       await setDoc(doc(db, 'clientes', cleanClientId), novoCliente, { merge: true });
       await setDoc(doc(db, 'tenants', cleanTId, 'clients', cleanClientId), novoCliente, { merge: true });
@@ -613,29 +751,42 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({
     }
   };
 
-  // 5. EXCLUIR CLIENTE DO BANCO
-  const handleExcluirCliente = async (clienteId?: string) => {
-    if (!clienteId) return;
+  // 5. EXCLUIR CLIENTE DEFINITIVAMENTE DE TODAS AS COLEÇÕES E CACHES (LOCAL + NETLIFY/FIRESTORE)
+  const handleExcluirCliente = async (cliente: Cliente) => {
+    if (!cliente) return;
+    const targetId = cliente.id || cliente._dedupeKey || cliente.nomeCompleto;
+    setDeletingClientId(targetId);
+
     try {
-      await deleteDoc(doc(db, 'clientes', clienteId));
-      try {
-        await deleteDoc(doc(db, 'tenants', cleanTId, 'clients', clienteId));
-      } catch (_) {}
-
-      // Limpa se estava no cache do totem
-      try {
-        const rawTotem = localStorage.getItem(`saas_totem_clients_${tenantId}`);
-        if (rawTotem) {
-          const list = JSON.parse(rawTotem);
-          const filtered = list.filter((c: any) => c.id !== clienteId && c.uid !== clienteId);
-          localStorage.setItem(`saas_totem_clients_${tenantId}`, JSON.stringify(filtered));
+      const { tombstone } = await deleteClientEverywhereFirestore({
+        tenantId,
+        cleanTenantSlug,
+        cliente: {
+          id: cliente.id,
+          nomeCompleto: cliente.nomeCompleto,
+          telefone: cliente.telefone,
+          email: cliente.email,
+          dedupeKey: cliente._dedupeKey,
+          sourceDocIds: cliente._sourceDocIds
         }
-      } catch (_) {}
+      });
 
-      setFeedback({ tipo: 'sucesso', mensagem: 'Ficha do cliente excluída da nuvem.' });
+      // Atualiza estado imediatamente para sumir da tela sem esperar round-trip
+      setDeletedTombstones((prev) => [
+        tombstone,
+        ...prev.filter((item) => item.id !== tombstone.id)
+      ]);
+      loadLocalClients();
+
+      setFeedback({
+        tipo: 'sucesso',
+        mensagem: `Cliente "${cliente.nomeCompleto}" excluído definitivamente da nuvem e de todos os dispositivos.`
+      });
     } catch (err) {
       console.error('Erro ao excluir cliente:', err);
       setFeedback({ tipo: 'erro', mensagem: 'Não foi possível excluir o cliente.' });
+    } finally {
+      setDeletingClientId(null);
     }
   };
 
@@ -1074,19 +1225,25 @@ export const ClientesWorkspace: React.FC<ClientesWorkspaceProps> = ({
 
                     {/* BOTÃO EXCLUIR */}
                     <button
-                      onClick={() => handleExcluirCliente(cliente.id)}
+                      type="button"
+                      disabled={deletingClientId === (cliente.id || cliente._dedupeKey || cliente.nomeCompleto)}
+                      onClick={() => handleExcluirCliente(cliente)}
                       style={{
                         background: 'transparent',
                         border: 'none',
-                        color: '#6B7280',
+                        color: '#9CA3AF',
                         cursor: 'pointer',
-                        padding: '4px',
-                        borderRadius: '4px'
+                        padding: '6px',
+                        borderRadius: '6px'
                       }}
-                      className="hover:text-red-400 transition"
-                      title="Excluir cadastro do cliente"
+                      className="hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-50"
+                      title="Excluir cadastro do cliente definitivamente"
                     >
-                      <Trash2 size={15} />
+                      {deletingClientId === (cliente.id || cliente._dedupeKey || cliente.nomeCompleto) ? (
+                        <Loader2 size={15} className="animate-spin text-red-400" />
+                      ) : (
+                        <Trash2 size={15} />
+                      )}
                     </button>
                   </div>
 
