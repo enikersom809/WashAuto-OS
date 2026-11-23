@@ -1,6 +1,7 @@
 import { getMessaging, getToken, onMessage, isSupported as isMessagingSupported } from 'firebase/messaging';
 import { collection, doc, setDoc, deleteDoc, getDocs, query, where, onSnapshot, orderBy, limit } from 'firebase/firestore';
 import app, { db, handleFirestoreError, OperationType } from './firebase';
+import { playNotificationSound, unlockNotificationAudio } from '../utils/notificationSound';
 
 export const VAPID_PUBLIC_KEY = 'BKYRV7kGXesqIWRIeGL0wCZNdkYyg5qRpP3or6VgvA153TcAjQ0k3ikJA5dvFb2JPbirpoRQmNHUL6drnnPiONM';
 
@@ -732,12 +733,16 @@ export async function sendClientTestPushNotification(
   params: ClientPushParams
 ): Promise<{ success: boolean; message: string }> {
   try {
+    await unlockNotificationAudio();
     const cleanTId = params.tenantId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const title = `🚗 Teste de Alerta - ${params.tenantName || 'Portal do Cliente'}`;
     const body = `Notificações ativadas! Você será avisado instantaneamente sempre que seu veículo mudar de status no lava-jato.`;
     const url = `/?empresa=${encodeURIComponent(cleanTId)}&aba=status`;
 
-    // 1. Dispara via backend se houver assinatura registrada
+    // 1. Dispara som audível da notificação imediatamente no aparelho
+    await playNotificationSound();
+
+    // 2. Dispara via backend se houver assinatura registrada
     await fetch('/api/send-client-status-push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -755,24 +760,31 @@ export async function sendClientTestPushNotification(
       })
     }).catch(() => {});
 
-    // 2. Confirmação local pelo Service Worker
+    // 3. Confirmação local pelo Service Worker (ou Notification nativo como fallback) com silent: false
     if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-      const reg = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js');
+      const reg = ('serviceWorker' in navigator)
+        ? await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js')
+        : null;
+      const notifOpts: any = {
+        body,
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        vibrate: [200, 100, 200],
+        silent: false,
+        renotify: true,
+        tag: 'client-test-push-' + Date.now(),
+        data: { url, tab: 'status', targetRole: 'cliente', tenantId: cleanTId }
+      };
       if (reg) {
-        await reg.showNotification(title, {
-          body,
-          icon: '/pwa-192x192.png',
-          badge: '/pwa-192x192.png',
-          vibrate: [200, 100, 200],
-          tag: 'client-test-push-' + Date.now(),
-          data: { url, tab: 'status', targetRole: 'cliente', tenantId: cleanTId }
-        } as any);
+        await reg.showNotification(title, notifOpts);
+      } else {
+        new Notification(title, notifOpts);
       }
     }
 
     return {
       success: true,
-      message: 'Alerta Push de teste enviado! Verifique a notificação no seu dispositivo.'
+      message: 'Alerta Push de teste enviado com sinal sonoro!'
     };
   } catch (err: any) {
     return {
@@ -861,6 +873,8 @@ export async function sendTotemPushNotification(params: {
             icon: '/pwa-192x192.png',
             badge: '/pwa-192x192.png',
             vibrate: [250, 100, 250, 100, 400],
+            silent: false,
+            renotify: true,
             tag: `totem-direct-${Date.now()}`,
             data: { url, clientName: params.clientName, tenantId: cleanTId }
           } as any);
@@ -880,48 +894,62 @@ export async function sendTestPushNotification(
   carWashName: string = 'Seu Lava-Jato'
 ): Promise<{ success: boolean; message: string }> {
   try {
+    await unlockNotificationAudio();
     const cleanTId = tenantId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const title = `🔔 Teste de Notificação Push - ${carWashName}`;
-    const body = `Tudo pronto! Seu navegador está configurado para receber alertas em tempo real mesmo com o painel fechado.`;
+    const body = `Tudo pronto! Seu navegador está configurado para receber alertas sonoros e visuais em tempo real mesmo com o painel fechado.`;
     const url = `/?empresa=${encodeURIComponent(cleanTId)}&aba=clientes`;
 
-    // 1. Tenta envio pelo backend
-    const res = await fetch('/api/send-totem-push', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tenantId: cleanTId,
-        title,
-        body,
-        url,
-        clientName: 'Cliente Teste (Totem)',
-        phone: '(11) 99999-8888',
-        vehicle: 'Honda Civic Preto',
-        plate: 'BRA2E19'
-      })
-    });
-    const result = await res.json();
+    // 1. Dispara o alerta sonoro no navegador imediatamente
+    await playNotificationSound();
 
-    // 2. Dispara notificação local pelo Service Worker como confirmação imediata
-    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-      const reg = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js');
-      if (reg) {
-        await reg.showNotification(title, {
+    // 2. Tenta envio pelo backend
+    let result: any = {};
+    try {
+      const res = await fetch('/api/send-totem-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenantId: cleanTId,
+          title,
           body,
-          icon: '/pwa-192x192.png',
-          badge: '/pwa-192x192.png',
-          vibrate: [200, 100, 200],
-          tag: 'test-push-' + Date.now(),
-          data: { url }
-        } as any);
+          url,
+          clientName: 'Cliente Teste (Totem)',
+          phone: '(11) 99999-8888',
+          vehicle: 'Honda Civic Preto',
+          plate: 'BRA2E19'
+        })
+      });
+      result = await res.json();
+    } catch (_) {}
+
+    // 3. Dispara notificação local pelo Service Worker (ou Notification nativo como fallback) com silent: false
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      const reg = ('serviceWorker' in navigator)
+        ? await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js')
+        : null;
+      const notifOpts: any = {
+        body,
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        vibrate: [200, 100, 200],
+        silent: false,
+        renotify: true,
+        tag: 'test-push-' + Date.now(),
+        data: { url }
+      };
+      if (reg) {
+        await reg.showNotification(title, notifOpts);
+      } else {
+        new Notification(title, notifOpts);
       }
     }
 
     return {
       success: true,
       message: result.sentCount > 0 
-        ? `Notificação enviada com sucesso para ${result.sentCount} dispositivo(s)!`
-        : 'Notificação de teste gerada com sucesso no seu dispositivo!'
+        ? `Notificação sonora e visual enviada com sucesso para ${result.sentCount} dispositivo(s)!`
+        : 'Notificação de teste sonora e visual gerada com sucesso no seu dispositivo!'
     };
   } catch (err: any) {
     return {

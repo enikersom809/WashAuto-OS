@@ -83,6 +83,7 @@ import {
   sendClientTestPushNotification,
   ClientStatusNotificationRecord
 } from '../lib/pushNotificationService';
+import { playNotificationSound, unlockNotificationAudio } from '../utils/notificationSound';
 
 interface Vehicle {
   id: string;
@@ -872,10 +873,13 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     [vehicles]
   );
 
-  // Navegação automática para aba Status ao clicar em notificação Push
+  // Navegação automática para aba Status e sinal sonoro ao clicar/receber Push
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     const handleSwMsg = (event: MessageEvent) => {
+      if (event.data?.type === 'PLAY_NOTIFICATION_SOUND') {
+        playNotificationSound().catch(() => {});
+      }
       if (event.data?.type === 'NAVIGATE_TO_TAB' && event.data?.tab === 'status') {
         setPortalTab('status');
       }
@@ -914,6 +918,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   // Escuta mensagens FCM em Foreground (com o portal aberto)
   useEffect(() => {
     const unsubFg = listenForegroundClientPushMessages((payload) => {
+      playNotificationSound().catch(() => {});
       showToast(`${payload.title} — ${payload.body}`);
     });
     return () => unsubFg();
@@ -934,6 +939,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
           const ts = new Date(item.createdAt).getTime();
           if (ts >= pushSessionStartRef.current - 5000 && !seenPushIdsRef.current.has(item.id)) {
             seenPushIdsRef.current.add(item.id);
+            playNotificationSound().catch(() => {});
             showToast(`${item.title} — ${item.body}`);
 
             if (
@@ -972,6 +978,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
   const handleToggleClientPush = async () => {
     if (isRequestingClientPush) return;
+    await unlockNotificationAudio();
     setIsRequestingClientPush(true);
     try {
       if (isClientPushSubscribed) {
@@ -990,6 +997,7 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         setClientPushPermission(res.permission);
         if (res.success) {
           setIsClientPushSubscribed(true);
+          playNotificationSound().catch(() => {});
           showToast('🔔 Notificações Push FCM ativadas! Avisaremos quando o status do veículo mudar.');
         } else {
           showToast(`⚠️ ${res.errorMessage || 'Não foi possível ativar as notificações Push.'}`);
@@ -1004,6 +1012,8 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     if (isTestingClientPush) return;
     setIsTestingClientPush(true);
     try {
+      await unlockNotificationAudio();
+      playNotificationSound().catch(() => {});
       const res = await sendClientTestPushNotification({
         tenantId: tenant.id,
         tenantName: tenant.nomeFantasia || tenant.name,

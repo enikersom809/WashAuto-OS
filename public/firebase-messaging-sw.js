@@ -77,6 +77,7 @@ try {
       icon: '/pwa-192x192.png',
       badge: '/pwa-192x192.png',
       vibrate: [250, 100, 250, 100, 400],
+      silent: false,
       tag: ctx.tag,
       renotify: true,
       requireInteraction: true,
@@ -92,6 +93,14 @@ try {
       },
       actions: ctx.actions
     };
+
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(windowClients) {
+      windowClients.forEach(function(client) {
+        try {
+          client.postMessage({ type: 'PLAY_NOTIFICATION_SOUND', source: 'fcm_background' });
+        } catch (_) {}
+      });
+    }).catch(function() {});
 
     return self.registration.showNotification(ctx.title, options);
   });
@@ -125,6 +134,7 @@ self.addEventListener('push', function(event) {
     icon: payload.icon || '/pwa-192x192.png',
     badge: '/pwa-192x192.png',
     vibrate: [250, 100, 250, 100, 400],
+    silent: false,
     tag: ctx.tag,
     renotify: true,
     requireInteraction: true,
@@ -142,7 +152,16 @@ self.addEventListener('push', function(event) {
   };
 
   event.waitUntil(
-    self.registration.showNotification(ctx.title, notificationOptions)
+    Promise.all([
+      self.registration.showNotification(ctx.title, notificationOptions),
+      clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(windowClients) {
+        windowClients.forEach(function(client) {
+          try {
+            client.postMessage({ type: 'PLAY_NOTIFICATION_SOUND', source: 'web_push' });
+          } catch (_) {}
+        });
+      }).catch(function() {})
+    ])
   );
 });
 

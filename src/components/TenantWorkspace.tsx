@@ -127,6 +127,7 @@ import {
   ReminderAnalysis
 } from '../utils/reminderService';
 import { getTenantTrialInfo } from '../utils/trialService';
+import { playNotificationSound, unlockNotificationAudio } from '../utils/notificationSound';
 
 
 interface WashItem {
@@ -398,28 +399,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     time: string;
   } | null>(null);
 
-  // Som de notificação/chime suave com Web Audio API
+  // Som de notificação/chime suave com Web Audio API + fallback WAV
   const playTotemChime = useCallback(() => {
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.12); // A5
-
-      gain.gain.setValueAtTime(0.18, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start();
-      osc.stop(ctx.currentTime + 0.46);
-    } catch (_) {}
+    playNotificationSound().catch(() => {});
   }, []);
 
   const triggerTotemNotification = useCallback((detail: { name?: string; phone?: string; vehicle?: string; plate?: string }) => {
@@ -487,11 +469,15 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
     }
   }, [initialTenant?.id, initialTenant?.nomeFantasia, initialTenant?.name]);
 
-  // Escuta cliques de notificações push via Service Worker para focar na aba de clientes
+  // Escuta cliques e sinais sonoros de notificações push via Service Worker
   useEffect(() => {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
     const handleSWMessage = (event: MessageEvent) => {
-      if (event.data && (event.data.type === 'NAVIGATE_TO_TAB' || event.data.type === 'NAVIGATE_TAB')) {
+      if (!event.data) return;
+      if (event.data.type === 'PLAY_NOTIFICATION_SOUND') {
+        playNotificationSound().catch(() => {});
+      }
+      if (event.data.type === 'NAVIGATE_TO_TAB' || event.data.type === 'NAVIGATE_TAB') {
         if (event.data.tab === 'clientes') {
           setActiveTab('clientes');
           showToast('🔔 Redirecionado para Gestão de Clientes & Balcão via Notificação Push!');
@@ -517,6 +503,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   }, []);
 
   const handleTogglePushNotifications = async () => {
+    await unlockNotificationAudio();
     if (isPushSubscribed) {
       const disabled = await disablePushNotifications(initialTenant.id);
       if (disabled) {
@@ -530,6 +517,7 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
         setPushPermission(res.permission);
         if (res.success) {
           setIsPushSubscribed(true);
+          playNotificationSound().catch(() => {});
           showToast('✅ Alertas Push ativados! Você receberá notificações sonoras mesmo com a aba fechada.');
         } else {
           showToast(res.errorMessage || 'Não foi possível ativar as notificações push.');
@@ -545,6 +533,9 @@ export const TenantWorkspace: React.FC<TenantWorkspaceProps> = ({
   const handleTestPushNotification = async () => {
     setIsTestingPush(true);
     try {
+      // Desbloqueia e reproduz o som dentro do clique do usuário para garantir áudio imediato
+      await unlockNotificationAudio();
+      playNotificationSound().catch(() => {});
       const res = await sendTestPushNotification(initialTenant.id, initialTenant.nomeFantasia || initialTenant.name);
       showToast(res.message);
     } catch {
